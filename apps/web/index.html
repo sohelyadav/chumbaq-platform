@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Before anything that loads. Origin only, even to this site: paths here can name a
+      project, a person or a link, and nothing on the server reads a dashboard Referer.
+      Reset and verify tokens travel in the fragment, which no Referer ever carries, so
+      this is the second line, not the first. App-wide rather than per page because this
+      is one document across client-side navigation. In the page so it holds on any host;
+      nginx and the dev server also send it as a header. Google Fonts still gets the origin.
+    -->
+    <meta name="referrer" content="strict-origin" />
+    <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chumbaq</title>
+  </head>
+  <body class="min-h-screen bg-background font-sans antialiased">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

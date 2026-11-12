@@ -1,0 +1,58 @@
+# Dependencies (no trailing slash: worktrees link node_modules, and a link is not a folder)
+node_modules
+
+# Build output
+dist/
+*.js.map
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE & OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test & Coverage
+coverage/
+.nyc_output/
+
+# Logs
+*.log
+
+# Vite
+.vite/
+
+# Firebase
+firebase-debug.log
+.firebase/
+
+# Keys and service files: never in the repo (FCM/APNs credentials go in through the dashboard)
+*.pem
+*.key
+*.p8
+*.p12
+*.jks
+*.keystore
+google-services.json
+GoogleService-Info.plist
+*service-account*.json
+*firebase-adminsdk*.json
+
+# Database dumps and backups
+*.sql.gz
+*.dump
+*.bak
+*.bak-*
+*.orig
+
+# Personal AI-tool state (machine- and person-specific; may hold tokens)
+.claude/settings.local.json
+.claude/*.bak*
+.claude-flow/
+.superpowers/

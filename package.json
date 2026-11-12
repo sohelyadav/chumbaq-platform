@@ -1,0 +1,37 @@
+{
+  "name": "chumbaq",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/api",
+    "dev:api": "npm run start:dev --workspace=apps/api",
+    "dev:worker": "npm run dev:worker --workspace=apps/api",
+    "dev:admin-api": "npm run dev:admin-api --workspace=apps/api",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "dev:admin": "npm run dev --workspace=apps/admin",
+    "dev:all": "./scripts/dev.sh",
+    "build": "npm run build --workspaces --if-present",
+    "build:api": "npm run build --workspace=apps/api",
+    "build:web": "npm run build --workspace=apps/web",
+    "build:admin": "npm run build --workspace=apps/admin",
+    "build:shared": "npm run build --workspace=packages/shared",
+    "start": "npm run start:prod --workspace=apps/api",
+    "start:api": "npm run start:prod --workspace=apps/api",
+    "start:worker": "npm run start:worker --workspace=apps/api",
+    "start:admin-api": "npm run start:admin-api --workspace=apps/api",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "seed": "npm run seed --workspace=apps/api"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "shadcn": "^4.1.0"
+  }
+}
