@@ -133,13 +133,21 @@ EOF
 
 # $1 = NTP_SERVERS (empty for NIC and NPL), $2 = a `chronyc -c tracking` line. True when
 # chrony's selected source is one of the configured servers (not, say, a DHCP-supplied one).
+# $1 = host name: the addresses it resolves to, one per line.
+host_addresses() {
+  getent ahosts "$1" 2>/dev/null | awk '{print $1}' | sort -u
+}
+
 clock_source_ok() {
   local servers="${1:-$DEFAULT_NTP_SERVERS}" name host
   [ -n "${servers// /}" ] || servers="$DEFAULT_NTP_SERVERS"
   name=$(printf '%s' "$2" | cut -d, -f2)
   [ -n "$name" ] || return 1
+  # chronyc -c reports the source by address, so a configured name matches through the
+  # addresses it resolves to (a link-local or cloud time server never does).
   for host in $servers; do
     [ "$host" = "$name" ] && return 0
+    host_addresses "$host" | grep -qxF -- "$name" && return 0
   done
   return 1
 }

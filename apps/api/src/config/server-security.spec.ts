@@ -119,6 +119,19 @@ describe('scripts/server-security.sh', () => {
       expect(run(`clock_source_ok "" "${line('169.254.169.254')}"`).ok).toBe(false);
       expect(run(`clock_source_ok "" "00000000,,0,0,0"`).ok).toBe(false);
     });
+
+    // chronyc -c tracking names the source by its address (14.139.60.107 for NPL), so the
+    // check must match a configured name through what it resolves to, as on a real server.
+    it('accepts the address a configured server resolves to, and no other', () => {
+      const resolve =
+        'host_addresses() { case $1 in time.nplindia.org) echo 14.139.60.107 ;; samay1.nic.in) echo 164.100.255.122 ;; esac; }\n';
+      expect(run(`${resolve}clock_source_ok "" "${line('14.139.60.107')}"`).ok).toBe(true);
+      expect(run(`${resolve}clock_source_ok "" "${line('164.100.255.122')}"`).ok).toBe(true);
+      expect(run(`${resolve}clock_source_ok "" "${line('169.254.169.254')}"`).ok).toBe(false);
+      // Whole addresses only: a prefix of a configured server's address is not it.
+      expect(run(`${resolve}clock_source_ok "" "${line('14.139.60.10')}"`).ok).toBe(false);
+      expect(run(`${resolve}clock_source_ok "a.example.org" "${line('14.139.60.107')}"`).ok).toBe(false);
+    });
   });
 
   describe('nginx logging', () => {
