@@ -19,6 +19,8 @@ import { changedLinkFields, linkChanged } from './link-activity';
 // frontend routes. Checked case-insensitively.
 const RESERVED_SHORT_CODES = new Set([
   'api',
+  // GET /api/health, the deploy scripts' health check (/redirect/health would reach it).
+  'health',
   'admin',
   // The customer app's view-as handoff page.
   'impersonate',

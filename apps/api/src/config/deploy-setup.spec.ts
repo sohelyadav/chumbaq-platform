@@ -346,7 +346,7 @@ describe('scripts/deploy-setup.sh', () => {
         expect(result.out).toMatch(/passkey/i);
         expect(readFileSync(path.join(result.app, '.env'), 'utf8')).toBe(env);
         expect(result.log).not.toMatch(/^npm /m);
-        expect(result.log).not.toMatch(/nginx -t|systemctl restart nginx|^sudo (tee|ln) /m);
+        expect(result.log).not.toMatch(/nginx -t|systemctl restart nginx|^sudo (tee|ln) .*sites-/m);
         expect(existsSync(path.join(result.sites, 'chumbaq'))).toBe(false);
         expect(existsSync(path.join(result.sites, 'chumbaq-admin'))).toBe(false);
       });
@@ -451,11 +451,12 @@ describe('scripts/deploy-setup.sh', () => {
       expect(out).toContain('server_name app.example.com;');
       expect(out).not.toContain('default_server');
       expect(out).toContain('root /srv/chumbaq/apps/web/dist;');
-      for (const location of ['/api/', '/redirect/', '/.well-known/']) {
+      const proxied = { '/api/': 'http://127.0.0.1:3000;', '/.well-known/': 'http://127.0.0.1:3000;', '/redirect/': 'http://127.0.0.1:3000/api/;' };
+      for (const [location, target] of Object.entries(proxied)) {
         const block = out.slice(out.indexOf(`location ${location} {`));
         expect([location, block.slice(0, block.indexOf('}'))]).toEqual([
           location,
-          expect.stringContaining('proxy_pass http://127.0.0.1:3000;'),
+          expect.stringContaining(`proxy_pass ${target}`),
         ]);
       }
       expect(out).not.toMatch(/__[A-Z_]+__/);
@@ -674,6 +675,11 @@ describe('scripts/deploy-setup.sh', () => {
         expect(result.log).toContain('sudo systemctl restart nginx');
         expect(result.log).toContain('npm run build:admin');
         expect(result.log).toContain('npm ci');
+        // Upgrades keep the config files the script edits, rather than prompting over SSH.
+        const keep = readFileSync(path.join(result.system, 'etc/apt/apt.conf.d/90chumbaq-keep-config'), 'utf8');
+        expect(keep).toContain('"--force-confold";');
+        const lines = result.log.split('\n');
+        expect(lines.findIndex((l) => l.includes('90chumbaq-keep-config'))).toBeLessThan(lines.indexOf('sudo apt upgrade -y'));
       });
 
       // Each process reads its .env as ../../.env from where it runs (the ecosystem file

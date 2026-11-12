@@ -81,9 +81,11 @@ export default defineConfig(({ command, mode }) => {
           target: apiTarget,
           changeOrigin: true,
         },
+        // Short links: the API serves the redirect at /api/<code> (nginx does the same).
         '/redirect': {
           target: apiTarget,
           changeOrigin: true,
+          rewrite: (p) => p.replace(/^\/redirect\//, '/api/'),
         },
       },
     },

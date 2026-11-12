@@ -14,6 +14,7 @@ import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { ConversionsModule } from './modules/conversions/conversions.module';
 import { TeamsModule } from './modules/teams/teams.module';
 import { RedirectModule } from './modules/redirect/redirect.module';
+import { HealthModule } from './modules/health/health.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 
@@ -117,6 +118,8 @@ import { QueueModule } from './queue/queue.module';
     PrivacyModule,
     ProjectActivityModule,
     ProjectActivityApiModule,
+    // GET /api/health: the deploy scripts wait on it after each (re)start.
+    HealthModule,
     // RedirectModule must be last so /:shortCode doesn't intercept /api/* routes
     RedirectModule,
   ],

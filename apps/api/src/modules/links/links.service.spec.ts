@@ -165,6 +165,13 @@ describe('LinksService', () => {
       },
     );
 
+    // /redirect/health reaches GET /api/health, the deploy scripts' health check.
+    it('rejects health as a shortCode', async () => {
+      await expect(service.create('proj-1', { ...baseDto, shortCode: 'health' } as any)).rejects.toThrow(
+        ConflictException,
+      );
+    });
+
     it('rejects a reserved custom shortCode case-insensitively', async () => {
 
       await expect(

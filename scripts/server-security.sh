@@ -339,7 +339,7 @@ setup_log_retention() {
 
 # $1 = NTP_SERVERS. Waits up to 60 seconds for a source, else stops.
 setup_clock() {
-  local conf i
+  local conf
   conf=$(chrony_conf "$1") || return 1
   sudo apt install -y chrony
   sudo mkdir -p "$(R /var/log/chrony)"
@@ -349,7 +349,7 @@ setup_clock() {
   printf '%s\n' "$conf" | sys_write "$(R /etc/chrony/conf.d/chumbaq.conf)"
   sudo systemctl enable chrony
   sudo systemctl restart chrony
-  for i in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     if clock_source_ok "$1" "$(chronyc -c tracking 2>/dev/null)"; then
       chronyc sources
       return 0

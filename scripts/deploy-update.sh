@@ -16,7 +16,6 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=deploy-setup.sh
 source "$SCRIPT_DIR/deploy-setup.sh"
 BRANCH="${1:-$BRANCH}"
-PM2_API="$SITE-api"
 
 echo "========================================="
 echo "  Chumbaq - Deploying $BRANCH to $DEPLOY_ENV"

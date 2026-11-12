@@ -385,14 +385,17 @@ customer_site_config() {
         proxy_cache_bypass $http_upgrade;
     }
 
-    # Redirect/short links proxy
+    # Short links. A link is APP_URL/<code>: the dashboard's /:shortCode page sends the
+    # browser to /redirect/<code>, and the API serves the redirect at /api/<code> (the URI
+    # on proxy_pass replaces /redirect/ with /api/). Without it every short link is a 404.
     location /redirect/ {
-        proxy_pass http://127.0.0.1:__API_PORT__;
+        proxy_pass http://127.0.0.1:__API_PORT__/api/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-Id $request_id;
     }
 
     # App link verification (apple-app-site-association, assetlinks.json) for short links
@@ -640,8 +643,8 @@ pm2_up() {
 # minutes. The customer API applies migrations as it boots, so the admin API and the worker,
 # which never change the schema, start only after this.
 wait_for_health() {
-  local i
-  for i in $(seq 1 60); do
+  local _
+  for _ in $(seq 1 60); do
     if curl -fsS -o /dev/null "http://127.0.0.1:$1/api/health"; then
       return 0
     fi
@@ -685,6 +688,10 @@ check_files_before_deploy
 
 # --- System packages ---
 echo "[1/8] Installing system packages..."
+# Upgrades keep config files this script has changed (nginx.conf, redis.conf, chrony.conf)
+# instead of stopping to ask, which over SSH with nobody to answer would hang the run.
+printf 'Dpkg::Options {\n  "--force-confdef";\n  "--force-confold";\n};\n' |
+  sys_write "$(R /etc/apt/apt.conf.d/90chumbaq-keep-config)"
 sudo apt update && sudo apt upgrade -y
 sudo apt install -y build-essential git curl ca-certificates nginx \
   postgresql postgresql-contrib redis-server certbot python3-certbot-nginx

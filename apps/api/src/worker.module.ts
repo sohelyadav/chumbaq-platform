@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
 import { QueueModule } from './queue/queue.module';
 import { ProcessorsModule } from './queue/processors/processors.module';
+import { ProjectAccessModule } from './modules/project-access/project-access.module';
 import databaseConfig from './config/database.config';
 import jwtConfig from './config/jwt.config';
 import appConfig from './config/app.config';
@@ -49,6 +50,10 @@ import staffConfig from './config/staff.config';
     }),
     ScheduleModule.forRoot(),
     QueueModule,
+    // Global in the API, where controllers' @RequireProjectPermission guard needs it. The
+    // worker serves no routes, but feature modules it loads (push → touchpoints) declare
+    // controllers, and Nest resolves their guards at boot: without this the worker dies.
+    ProjectAccessModule,
     ProcessorsModule,
   ],
 })

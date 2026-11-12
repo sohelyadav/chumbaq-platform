@@ -130,6 +130,9 @@ describe('the two APIs serve their own routes only', () => {
       { secret: process.env.JWT_SECRET as string, expiresIn: '5m' },
     );
     expect((await call(customer.base, 'GET', '/api/auth/me', token)).status).toBe(200);
+    // The deploy scripts wait on the customer API's own health check after each restart.
+    const health = await call(customer.base, 'GET', '/api/health');
+    expect([health.status, await health.json()]).toEqual([200, { data: { status: 'ok' } }]);
     for (const path of ['/api/admin/overview', '/api/admin/tenants', '/api/staff/auth/me']) {
       expect({ path, status: (await call(customer.base, 'GET', path, token)).status }).toEqual({ path, status: 404 });
     }
