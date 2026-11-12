@@ -703,6 +703,21 @@ describe('scripts/deploy-setup.sh', () => {
         expect(result.log).toContain('pm2 save');
       });
 
+      // Ubuntu 24.04 home folders are 750: without a way through, nginx answers 500 for
+      // every dashboard and admin page.
+      it('lets nginx through a closed folder above the checkout, and only through it', () => {
+        chmodSync(dir, 0o750);
+        const result = runWholeScript(dir, { env: matching });
+        expect(result.ok).toBe(true);
+        expect(result.log).toContain(`sudo setfacl -m u:www-data:--x ${dir}\n`);
+        // Before nginx is restarted on the new sites.
+        const lines = result.log.split('\n');
+        expect(lines.indexOf(`sudo setfacl -m u:www-data:--x ${dir}`)).toBeLessThan(lines.indexOf('sudo systemctl restart nginx'));
+        chmodSync(dir, 0o755);
+        const open = runWholeScript(dir, { env: matching });
+        expect(open.log).not.toContain(`setfacl -m u:www-data:--x ${dir}\n`);
+      });
+
       it('clones the repository only when there is no checkout', () => {
         const result = runWholeScript(dir, { env: matching });
         expect(result.log).toContain(`git clone --branch main git@example.com:chumbaq-platform.git ${result.app}`);

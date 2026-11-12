@@ -606,6 +606,20 @@ ensure_redis_settings() {
   env_add_if_missing "$1" REDIS_DB "$REDIS_DB"
 }
 
+# nginx (www-data) serves apps/web/dist and apps/admin/dist from APP_DIR, so it must be
+# able to pass through every folder above it. Ubuntu 24.04 creates home folders 750, which
+# would make every page a 500. Each closed folder gets an ACL letting www-data through, and
+# nothing else: it can neither list the folder nor read files that are not world-readable
+# (the .env is 600).
+allow_nginx_traverse() {
+  local dir="$APP_DIR"
+  while dir=$(dirname "$dir") && [ "$dir" != "/" ]; do
+    if [ -z "$(find "$dir" -maxdepth 0 -perm -o=x 2>/dev/null)" ]; then
+      sudo setfacl -m u:www-data:--x "$dir"
+    fi
+  done
+}
+
 # The checkout this environment runs from. A missing one is cloned from REPO_URL; an
 # existing one is left on whatever it has (deploy-update.sh moves it).
 ensure_checkout() {
@@ -694,7 +708,7 @@ printf 'Dpkg::Options {\n  "--force-confdef";\n  "--force-confold";\n};\n' |
   sys_write "$(R /etc/apt/apt.conf.d/90chumbaq-keep-config)"
 sudo apt update && sudo apt upgrade -y
 sudo apt install -y build-essential git curl ca-certificates nginx \
-  postgresql postgresql-contrib redis-server certbot python3-certbot-nginx
+  postgresql postgresql-contrib redis-server certbot python3-certbot-nginx acl
 sudo systemctl enable postgresql
 sudo systemctl start postgresql
 
@@ -744,6 +758,7 @@ npm run build:admin
 
 # --- Nginx config ---
 echo "[7/8] Configuring Nginx..."
+allow_nginx_traverse
 write_site chumbaq-default default_site_config
 write_site "$SITE" customer_site_config
 write_site "$SITE-admin" admin_site_config
