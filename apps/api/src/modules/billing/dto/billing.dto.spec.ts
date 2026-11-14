@@ -16,17 +16,17 @@ describe('billing DTOs, through the real validation pipe', () => {
 
   describe('ChoosePlanDto', () => {
     it('takes a plan code and an interval', async () => {
-      await expect(choose({ plan: 'growth_2', interval: 'yearly' })).resolves.toEqual({ plan: 'growth_2', interval: 'yearly' });
+      await expect(choose({ plan: 'team_2', interval: 'yearly' })).resolves.toEqual({ plan: 'team_2', interval: 'yearly' });
     });
 
     it('refuses a price, an amount or any other field: amounts come from the server', async () => {
-      await expect(choose({ plan: 'growth', interval: 'monthly', amountPaise: 1 })).rejects.toThrow(BadRequestException);
-      await expect(choose({ plan: 'growth', interval: 'monthly', price: 1 })).rejects.toThrow(BadRequestException);
+      await expect(choose({ plan: 'team', interval: 'monthly', amountPaise: 1 })).rejects.toThrow(BadRequestException);
+      await expect(choose({ plan: 'team', interval: 'monthly', price: 1 })).rejects.toThrow(BadRequestException);
     });
 
     it('refuses an interval or plan code outside the rules', async () => {
-      await expect(choose({ plan: 'growth', interval: 'weekly' })).rejects.toThrow(BadRequestException);
-      await expect(choose({ plan: 'Growth', interval: 'monthly' })).rejects.toThrow(BadRequestException);
+      await expect(choose({ plan: 'team', interval: 'weekly' })).rejects.toThrow(BadRequestException);
+      await expect(choose({ plan: 'Team', interval: 'monthly' })).rejects.toThrow(BadRequestException);
       await expect(choose({ plan: { $ne: 1 }, interval: 'monthly' })).rejects.toThrow(BadRequestException);
     });
   });
