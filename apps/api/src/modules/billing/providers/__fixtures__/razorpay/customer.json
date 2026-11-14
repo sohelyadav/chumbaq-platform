@@ -1,0 +1,13 @@
+{
+  "id" : "cust_1Aa00000000004",
+  "entity": "customer",
+  "name" : "<name>",
+  "email" : "<email>",
+  "contact" : "<phone>",
+  "gstin": null,
+  "notes": {
+    "notes_key_1":"Tea, Earl Grey, Hot",
+    "notes_key_2":"Tea, Earl Grey… decaf."
+  },
+  "created_at ": 1234567890
+}

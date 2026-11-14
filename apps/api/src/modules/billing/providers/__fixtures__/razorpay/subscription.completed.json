@@ -1,0 +1,89 @@
+{
+  "entity": "event",
+  "account_id": "acc_BFQ7uQEaa7j2z7",
+  "event": "subscription.completed",
+  "contains": [
+    "subscription",
+    "payment"
+  ],
+  "payload": {
+    "subscription": {
+      "entity": {
+        "id": "sub_DEX6xcJ1HSW4CR",
+        "entity": "subscription",
+        "plan_id": "plan_BvrFKjSxauOH7N",
+        "customer_id": "cust_C0WlbKhp3aLA7W",
+        "status": "completed",
+        "type": 2,
+        "current_start": 1599244200,
+        "current_end": 1601836200,
+        "ended_at": 1599244200,
+        "quantity": 1,
+        "notes": {
+          "Important": "Notes for Internal Reference"
+        },
+        "charge_at": null,
+        "start_at": 1570213800,
+        "end_at": 1599244200,
+        "auth_attempts": 0,
+        "total_count": 12,
+        "paid_count": 11,
+        "customer_notify": true,
+        "created_at": 1567689895,
+        "expire_by": 1567881000,
+        "short_url": null,
+        "has_scheduled_changes": false,
+        "change_scheduled_at": null,
+        "source": "api",
+        "offer_id":"offer_JHD834hjbxzhd38d",
+        "remaining_count": 0
+      }
+    },
+    "payment": {
+      "entity": {
+        "id": "pay_DEXkZ54GsNwVk9",
+        "entity": "payment",
+        "amount": 100000,
+        "currency": "INR",
+        "status": "captured",
+        "order_id": "order_DEXkYoCpua7kn3",
+        "invoice_id": "inv_DEXkYmFDy966lT",
+        "international": false,
+        "method": "card",
+        "amount_refunded": 0,
+        "amount_transferred": 0,
+        "refund_status": null,
+        "captured": "1",
+        "description": "Recurring Payment via Subscription",
+        "card_id": "card_DEXkZBosDfKGEe",
+        "card": {
+          "id": "card_DEXkZBosDfKGEe",
+          "entity": "card",
+          "name": "Gaurav Kumar",
+          "last4": "0008",
+          "network": "MasterCard",
+          "type": "unknown",
+          "issuer": "",
+          "international": false,
+          "emi": false,
+          "expiry_month": 11,
+          "expiry_year": 2031
+        },
+        "bank": null,
+        "wallet": null,
+        "vpa": null,
+        "email": "gaurav.kumar@example.com",
+        "contact": "+919876543210",
+        "customer_id": "cust_C0WlbKhp3aLA7W",
+        "token_id": null,
+        "notes": [],
+        "fee": 2900,
+        "tax": 0,
+        "error_code": null,
+        "error_description": null,
+        "created_at": 1567692144
+      }
+    }
+  },
+  "created_at": 1567692150
+}

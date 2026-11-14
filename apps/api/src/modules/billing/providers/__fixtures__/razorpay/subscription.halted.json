@@ -1,0 +1,43 @@
+{
+  "entity": "event",
+  "account_id": "acc_BFQ7uQEaa7j2z7",
+  "event": "subscription.halted",
+  "contains": [
+    "subscription"
+  ],
+  "payload": {
+    "subscription": {
+      "entity": {
+        "id": "sub_DEX6xcJ1HSW4CR",
+        "entity": "subscription",
+        "plan_id": "plan_BvrFKjSxauOH7N",
+        "customer_id": "cust_C0WlbKhp3aLA7W",
+        "status": "halted",
+        "type": 2,
+        "current_start": 1572892200,
+        "current_end": 1575484200,
+        "ended_at": null,
+        "quantity": 1,
+        "notes": {
+          "Important": "Notes for Internal Reference"
+        },
+        "charge_at": 1575484200,
+        "start_at": 1570213800,
+        "end_at": 1599244200,
+        "auth_attempts": 4,
+        "total_count": 12,
+        "paid_count": 1,
+        "customer_notify": true,
+        "created_at": 1567689895,
+        "expire_by": 1567881000,
+        "short_url": null,
+        "has_scheduled_changes": false,
+        "change_scheduled_at": null,
+        "source": "api",
+        "offer_id":"offer_JHD834hjbxzhd38d",
+        "remaining_count": 10
+      }
+    }
+  },
+  "created_at": 1567691269
+}

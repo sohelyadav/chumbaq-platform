@@ -1,0 +1,40 @@
+{
+  "entity": "event",
+  "account_id": "acc_F5Motm2sJ5Fomd",
+  "event": "subscription.authenticated",
+  "contains": [
+    "subscription"
+  ],
+  "payload": {
+    "subscription": {
+      "entity": {
+        "id": "sub_F5aa7VaVXtXh80",
+        "entity": "subscription",
+        "plan_id": "plan_F5Zu0nrXVhHV2m",
+        "customer_id": "cust_F5ZuzTm0cqYpzp",
+        "status": "authenticated",
+        "current_start": null,
+        "current_end": null,
+        "ended_at": null,
+        "quantity": 1,
+        "notes": [],
+        "charge_at": 1593109800,
+        "start_at": 1593109800,
+        "end_at": 1598380200,
+        "auth_attempts": 0,
+        "total_count": 3,
+        "paid_count": 0,
+        "customer_notify": true,
+        "created_at": 1592811228,
+        "expire_by": null,
+        "short_url": null,
+        "has_scheduled_changes": false,
+        "change_scheduled_at": null,
+        "source": "api",
+        "offer_id":"offer_JHD834hjbxzhd38d",
+        "remaining_count": 3
+      }
+    }
+  },
+  "created_at": 1592811255
+}
