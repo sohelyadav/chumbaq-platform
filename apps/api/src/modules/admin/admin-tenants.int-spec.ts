@@ -379,10 +379,25 @@ describe('AdminTenantsService (integration)', () => {
       expect(meta.countedThrough).toBe('2026-11-13');
     });
 
-    it('sorts by messages sent, the never-used last', async () => {
+    it('sorts by messages sent, the zeros last and together', async () => {
       expect(await emails({ sort: 'messages_sent_30d', order: 'desc', limit: 100 })).toEqual([
-        ...at('heavy', 'light', 'quiet', 'fresh', 'never'),
+        ...at('heavy', 'light', 'fresh', 'never', 'quiet'),
         STAFF,
+      ]);
+    });
+
+    it('sorts a tenant with no usage as the 0 it shows, with the other zeros', async () => {
+      // Every 0 together, before 10 and 50, tie-broken newest sign-up first:
+      // quiet has a counted 0, fresh, never and staff have no rows at all.
+      expect(await emails({ sort: 'messages_sent_30d', order: 'asc', limit: 100 })).toEqual([
+        ...at('fresh', 'never', 'quiet'),
+        STAFF,
+        ...at('light', 'heavy'),
+      ]);
+      expect(await emails({ sort: 'mau_this_month', order: 'asc', limit: 100 })).toEqual([
+        ...at('fresh', 'never', 'quiet', 'light'),
+        STAFF,
+        ...at('heavy'),
       ]);
     });
 

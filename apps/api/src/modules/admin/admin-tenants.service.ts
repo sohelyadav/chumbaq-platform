@@ -79,12 +79,16 @@ const NEW_TENANT_DAYS = 30;
 
 /**
  * The SQL for each sort, chosen from this fixed map and never from the input.
- * Usage columns are null for a tenant with no usage, which sorts last either way.
+ * A tenant with no usage rows has null usage columns, but the list shows its
+ * counts as 0, so the counts sort as 0 alongside the counted zeros (a bare
+ * column with NULLS LAST would split the zeros across both ends of an
+ * ascending list). Only the last usage day is really absent (shown as a dash),
+ * and that sorts last in either direction.
  */
 const SORT_COLUMNS: Record<AdminTenantSort, string> = {
   created_at: 'u.created_at',
-  mau_this_month: 'usage.mau_this_month',
-  messages_sent_30d: 'usage.messages_sent_30d',
+  mau_this_month: 'COALESCE(usage.mau_this_month, 0)',
+  messages_sent_30d: 'COALESCE(usage.messages_sent_30d, 0)',
   last_usage_day: 'usage.last_usage_day',
 };
 
