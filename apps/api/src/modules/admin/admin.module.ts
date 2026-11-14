@@ -17,6 +17,8 @@ import { AdminAuditModule } from './admin-audit.module';
 import { AdminAuditLogsController } from './admin-audit-logs.controller';
 import { AdminAuditLogsService } from './admin-audit-logs.service';
 import { AdminTenantsController } from './admin-tenants.controller';
+import { AdminPlansController } from './admin-plans.controller';
+import { AdminPlansService } from './admin-plans.service';
 import { AdminUsageController } from './admin-usage.controller';
 import { AdminUsageService } from './admin-usage.service';
 import { AdminTenantsService } from './admin-tenants.service';
@@ -60,7 +62,8 @@ import { IncidentsController } from '../incidents/incidents.controller';
     FactorResetsModule,
     SecurityAlertsModule,
     IncidentsModule,
-    // Effective limits and plan on the tenant page (AccountLimitsService).
+    // Effective limits and plan on the tenant page (AccountLimitsService), plans and
+    // prices, and the billing provider for the staff billing actions.
     BillingCoreModule,
   ],
   controllers: [
@@ -76,6 +79,7 @@ import { IncidentsController } from '../incidents/incidents.controller';
     InternalAlertsController,
     AdminTripwiresController,
     IncidentsController,
+    AdminPlansController,
   ],
   providers: [
     SeatsService,
@@ -83,6 +87,7 @@ import { IncidentsController } from '../incidents/incidents.controller';
     AdminInsightsService,
     AdminAuditLogsService,
     AdminUsageService,
+    AdminPlansService,
   ],
 })
 export class AdminModule {}

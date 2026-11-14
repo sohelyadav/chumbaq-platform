@@ -1,4 +1,4 @@
-import { annualisedPaise, assertPaise, GST_RATE_BPS, gstInclusive, netOfTax } from './money';
+import { annualisedPaise, assertPaise, formatRupees, GST_RATE_BPS, gstInclusive, netOfTax } from './money';
 
 describe('money', () => {
   it('adds GST rounded half up', () => {
@@ -68,5 +68,15 @@ describe('money', () => {
     expect(() => annualisedPaise(0.1, 'monthly')).toThrow();
     // A result past the safe range is refused rather than returned rounded.
     expect(() => gstInclusive(Number.MAX_SAFE_INTEGER, 1800)).toThrow();
+  });
+
+  it('formats paise as rupees with Indian grouping, exactly', () => {
+    expect(formatRupees(117882)).toBe('₹1,178.82');
+    expect(formatRupees(5)).toBe('₹0.05');
+    expect(formatRupees(0)).toBe('₹0.00');
+    expect(formatRupees(1234567800)).toBe('₹1,23,45,678.00');
+    expect(formatRupees(10000000)).toBe('₹1,00,000.00');
+    expect(formatRupees(-117882)).toBe('-₹1,178.82');
+    expect(() => formatRupees(1.5)).toThrow();
   });
 });

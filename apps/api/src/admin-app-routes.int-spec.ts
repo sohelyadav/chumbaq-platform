@@ -64,6 +64,11 @@ const ADMIN_ROUTES = [
   'GET /api/admin/security-contact',
   'PUT /api/admin/security-contact',
   'GET /api/admin/security-alerts',
+  'GET /api/admin/plans',
+  'POST /api/admin/plans',
+  'PATCH /api/admin/plans/:code',
+  'POST /api/admin/plans/:code/prices',
+  'POST /api/admin/plans/:code/prices/:id/retire',
 ].sort();
 
 /** All an enrolment-only session may reach: say who it is, enrol a factor, sign out. */

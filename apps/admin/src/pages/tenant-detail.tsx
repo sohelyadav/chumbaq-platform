@@ -82,6 +82,14 @@ const AUDIT_LABELS: Record<AdminAuditAction, string> = {
   'staff.factor_removed': 'Removed a sign-in method',
   'tenant.impersonation_exchanged': 'View-as opened',
   'tenant.impersonation_refused': 'View-as link refused',
+  'billing.plan_created': 'Plan created',
+  'billing.plan_updated': 'Plan changed',
+  'billing.price_added': 'Plan price added',
+  'billing.price_retired': 'Plan price retired',
+  'billing.comp_granted': 'Complimentary plan given',
+  'billing.comp_ended': 'Complimentary plan ended',
+  'billing.subscription_cancelled': 'Subscription cancelled by staff',
+  'billing.invoice_resent': 'Invoice link resent',
 };
 
 /** Mirrors `FACTOR_RESET_VERIFICATION_METHODS` in the API. Email is never one. */

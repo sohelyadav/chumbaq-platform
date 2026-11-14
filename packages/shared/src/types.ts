@@ -638,7 +638,22 @@ export type AdminAuditAction =
   /** The customer app exchanged a view-as code for the read-only session. */
   | 'tenant.impersonation_exchanged'
   /** A view-as code was spent but refused on its recheck; `metadata.reason` says why. */
-  | 'tenant.impersonation_refused';
+  | 'tenant.impersonation_refused'
+  /** Staff created a plan; `targetLabel` is its code, `metadata` its limits. */
+  | 'billing.plan_created'
+  /** Staff changed a plan's name, limits, order or availability; `metadata` has `before` and `after`. */
+  | 'billing.plan_updated'
+  /** Staff added a price to a plan, checked against the provider's plan; it replaces the current one. */
+  | 'billing.price_added'
+  /** Staff stopped offering a price; subscriptions on it keep it. */
+  | 'billing.price_retired'
+  /** Staff gave an account a plan without payment, with an optional end. */
+  | 'billing.comp_granted'
+  | 'billing.comp_ended'
+  /** Staff cancelled an account's subscription at the provider; `metadata.atCycleEnd`. */
+  | 'billing.subscription_cancelled'
+  /** Staff had the provider email an invoice's link to the customer again. */
+  | 'billing.invoice_resent';
 
 export type AdminTenantStatus = 'active' | 'suspended';
 
@@ -1550,6 +1565,91 @@ export interface BillingOverview {
   details: BillingDetails | null;
   /** The provider's public key id, for its checkout. Never a secret. */
   keyId: string;
+}
+
+/** A price as staff see it: with the provider's plan id, whether it is offered, and who is on it. */
+export interface AdminPlanPrice extends BillingPrice {
+  razorpayPlanId: string;
+  isCurrent: boolean;
+  createdAt: string;
+  /** Subscriptions on this price that are authorised or live (authenticated, active, pending, halted). */
+  subscribers: number;
+}
+
+export interface AdminPlan extends PlanLimits {
+  code: string;
+  name: string;
+  sortOrder: number;
+  isActive: boolean;
+  /** Current prices first, then earlier ones, newest first. */
+  prices: AdminPlanPrice[];
+  /** Whether this server takes payments; prices can be added only when it does. */
+  billingEnabled: boolean;
+}
+
+/** Money split by GST, all integer paise: `grossPaise = netPaise + taxPaise`. */
+export interface MoneySplit {
+  netPaise: number;
+  taxPaise: number;
+  grossPaise: number;
+}
+
+export interface AdminBillingPayment {
+  id: string;
+  tenantId: string;
+  tenantEmail: string;
+  amountPaise: number;
+  refundedPaise: number;
+  /** What was kept, excluding GST: `amountPaise - refundedPaise` less its GST. */
+  netPaise: number;
+  status: 'captured' | 'failed' | 'refunded';
+  method: string | null;
+  failureReason: string | null;
+  paidAt: string;
+  /** Charged on a subscription that was replaced before it ever became the account's own. */
+  orphan: boolean;
+}
+
+export interface AdminBillingSummary {
+  /** Monthly recurring revenue of paying accounts (comps excluded). */
+  mrr: MoneySplit;
+  arr: MoneySplit;
+  byPlan: { planCode: string; planName: string; accounts: number; mrrNetPaise: number }[];
+  /** Payments kept (captured less refunds) in the last 30 days. */
+  revenue30d: MoneySplit;
+  /** The last 12 UTC months, oldest first, months with nothing included as zeros. `month` is `YYYY-MM`. */
+  revenueByMonth: ({ month: string } & MoneySplit)[];
+  pastDue: {
+    tenantId: string;
+    email: string;
+    status: 'pending' | 'halted';
+    since: string;
+    daysOverdue: number;
+    graceUntil: string | null;
+  }[];
+  /** The 20 newest payments of any status. */
+  recentPayments: AdminBillingPayment[];
+  /** The 20 newest failed payments. */
+  recentFailures: AdminBillingPayment[];
+  overMau: { tenantId: string; email: string; planCode: string; mau: number; limit: number }[];
+  comped: { tenantId: string; email: string; planCode: string; until: string | null; reason: string }[];
+  /** Accounts whose subscription ends at the period end. */
+  cancelling: number;
+  /** Cancels the worker could not send yet; `error` is the provider's answer as stored. */
+  outboxErrors: { subscriptionId: string; tenantId: string; error: string; attempts: number }[];
+}
+
+export interface AdminTenantBilling {
+  overview: Omit<BillingOverview, 'plans' | 'keyId'>;
+  comp: { planCode: string; until: string | null; reason: string; byEmail: string | null; at: string } | null;
+  subscriptions: (BillingSubscriptionView & {
+    providerSubscriptionId: string;
+    method: string | null;
+    supersededBy: string | null;
+    createdAt: string;
+  })[];
+  invoices: BillingInvoiceView[];
+  payments: AdminBillingPayment[];
 }
 
 export interface BillingCheckout {

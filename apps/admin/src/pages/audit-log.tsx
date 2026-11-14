@@ -26,6 +26,8 @@ import {
 import { toast } from '@/components/ui/use-toast';
 import { useAdminAuditLogs, useExportAdminAuditLogs } from '@/hooks/use-admin-insights';
 import {
+  AUDIT_ACTIONS,
+  AUDIT_ACTION_LABELS,
   EMPTY_FILTER_FORM,
   filterFormError,
   hasFilters,
@@ -39,45 +41,8 @@ const LIMIT = 20;
 /** The API's AUDIT_EXPORT_ROW_CAP, stated before the click; the response confirms it. */
 const EXPORT_ROW_CAP = 10_000;
 
-const ACTION_LABELS: Record<AdminAuditAction, string> = {
-  'tripwire.created': 'Trap made',
-  'tripwire.revoked': 'Trap switched off',
-  'incident.recorded': 'Incident recorded',
-  'incident.reported': 'Incident marked reported to CERT-In',
-  'incident.note_added': 'Incident note added',
-  'incident.closed': 'Incident closed',
-  'security_contact.updated': 'Security contact changed',
-  'tenant.suspended': 'Tenant suspended',
-  'tenant.reactivated': 'Tenant reactivated',
-  'tenant.impersonated': 'Tenant impersonated',
-  'tenant.viewed': 'Tenant viewed by staff',
-  'super_admin.granted': 'Super admin granted',
-  'super_admin.revoked': 'Super admin revoked',
-  'super_admin.passkeys_reset': 'Passkeys reset by CLI',
-  'account.factors_reset': 'Second factors reset',
-  'audit_log.exported': 'Audit log exported',
-  'tenants.exported': 'Tenants list exported',
-  'account.factors_reset_requested': 'Second factor reset requested',
-  'account.factors_reset_cancelled': 'Second factor reset cancelled',
-  'account.password_reset_refused': 'Password reset refused after factor reset',
-  'account.password_reset_link_issued': 'Password reset link issued by CLI',
-  'account.password_reset_link_cancelled': 'Password reset link cancelled',
-  'account.password_reset_link_void_failed': 'Sign-in could not cancel a password reset link',
-  'account.project_limit_changed': 'Project limit changed',
-  'account.seat_limit_changed': 'Seat limit changed',
-  'staff.signed_in': 'Signed in',
-  'staff.sign_in_failed': 'Failed sign-in',
-  'staff.signed_out': 'Signed out',
-  'staff.session_revoked': 'Session ended',
-  'staff.enrolment_started': 'Started sign-in setup',
-  'staff.enrolment_allowed': 'Enrolment code issued',
-  'staff.factor_added': 'Added a sign-in method',
-  'staff.factor_removed': 'Removed a sign-in method',
-  'tenant.impersonation_exchanged': 'View-as opened',
-  'tenant.impersonation_refused': 'View-as link refused',
-};
-
-const ACTIONS = Object.keys(ACTION_LABELS) as AdminAuditAction[];
+const ACTION_LABELS = AUDIT_ACTION_LABELS;
+const ACTIONS = AUDIT_ACTIONS;
 
 function actorLabel(log: AdminAuditLog): string {
   return !log.actorEmail || log.actorEmail === 'cli' ? 'CLI' : log.actorEmail;

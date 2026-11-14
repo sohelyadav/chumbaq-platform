@@ -51,6 +51,14 @@ const AUDIT_ACTIONS: Record<AdminAuditAction, true> = {
   'staff.factor_removed': true,
   'tenant.impersonation_exchanged': true,
   'tenant.impersonation_refused': true,
+  'billing.plan_created': true,
+  'billing.plan_updated': true,
+  'billing.price_added': true,
+  'billing.price_retired': true,
+  'billing.comp_granted': true,
+  'billing.comp_ended': true,
+  'billing.subscription_cancelled': true,
+  'billing.invoice_resent': true,
 };
 export const AUDIT_ACTION_VALUES = Object.keys(AUDIT_ACTIONS) as AdminAuditAction[];
 

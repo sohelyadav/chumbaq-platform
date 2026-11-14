@@ -52,3 +52,20 @@ export function annualisedPaise(pricePaise: number, interval: BillingInterval): 
   assertPaise(pricePaise);
   return toPaise(BigInt(pricePaise) * (interval === 'monthly' ? 12n : 1n));
 }
+
+/**
+ * Integer paise as rupees with Indian digit grouping, "₹1,23,456.78", for messages
+ * staff read. String arithmetic on the integer, so every amount prints exactly; the
+ * dashboard and admin app keep their own copies of the same rule.
+ */
+export function formatRupees(paise: number): string {
+  if (!Number.isSafeInteger(paise)) throw new RangeError(`Not a whole number of paise: ${paise}`);
+  const digits = String(Math.abs(paise)).padStart(3, '0');
+  const rupees = digits.slice(0, -2);
+  let grouped = rupees;
+  if (rupees.length > 3) {
+    const head = rupees.slice(0, -3).replace(/\B(?=(\d{2})+$)/g, ',');
+    grouped = `${head},${rupees.slice(-3)}`;
+  }
+  return `${paise < 0 ? '-' : ''}₹${grouped}.${digits.slice(-2)}`;
+}

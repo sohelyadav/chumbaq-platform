@@ -13,7 +13,7 @@ import { fileURLToPath } from 'url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const jiti = createJiti(import.meta.url, { interopDefault: true });
-const { EMPTY_FILTER_FORM, filterFormError, readFilterForm, toApiFilters, writeFilterForm } =
+const { AUDIT_ACTIONS, AUDIT_ACTION_LABELS, EMPTY_FILTER_FORM, filterFormError, readFilterForm, toApiFilters, writeFilterForm } =
   await jiti.import(path.join(here, 'admin-audit-filters.ts'));
 
 let passed = 0;
@@ -77,6 +77,32 @@ check(
 check('refuses an end before the start', filterFormError(form({ fromDate: '2026-11-02', toDate: '2026-11-01' })) !== null);
 check('accepts the same start and end day', filterFormError(form({ fromDate: '2026-11-01', toDate: '2026-11-01' })) === null);
 check('refuses a date that is not YYYY-MM-DD', filterFormError(form({ fromDate: '11/01/2026' })) !== null);
+
+{
+  const BILLING = [
+    'billing.plan_created',
+    'billing.plan_updated',
+    'billing.price_added',
+    'billing.price_retired',
+    'billing.comp_granted',
+    'billing.comp_ended',
+    'billing.subscription_cancelled',
+    'billing.invoice_resent',
+  ];
+  const missing = BILLING.filter((a) => !AUDIT_ACTIONS.includes(a) || !AUDIT_ACTION_LABELS[a]);
+  check('every billing action can be filtered on and has a label', missing.length === 0, missing.join(', '));
+  const read = readFilterForm(new URLSearchParams(`action=${BILLING.join(',')},billing.refunded`), AUDIT_ACTIONS);
+  check(
+    'a pasted URL keeps the billing actions and drops an unknown one',
+    JSON.stringify(read.actions) === JSON.stringify(BILLING),
+    JSON.stringify(read.actions),
+  );
+  check(
+    'and sends them to the API as written',
+    JSON.stringify(toApiFilters(read).action) === JSON.stringify(BILLING),
+    JSON.stringify(toApiFilters(read)),
+  );
+}
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) process.exit(1);
