@@ -80,7 +80,8 @@ describe('Rotating the email webhook token (integration)', () => {
     expect(await status(webhooks.sesWebhook(OLD_TOKEN, { body: '{}' } as never))).toBe(404);
     expect(await status(webhooks.brevoWebhook(OLD_TOKEN, { body: {} } as never))).toBe(404);
     expect(await status(webhooks.sesWebhook(newToken, { body: '{}' } as never))).toBe(401);
-    expect(await status(webhooks.brevoWebhook(newToken, { body: {} } as never))).toBe(200);
+    // Found (refused only because the project does not send through Brevo).
+    expect(await status(webhooks.brevoWebhook(newToken, { body: {} } as never))).toBe(403);
 
     // The confirmed topic stays: SNS re-confirms the same topic at the new URL.
     const [row] = await ds.query(`SELECT ses_topic_arn FROM email_settings WHERE project_id = $1`, [INT_PROJECT_ID]);

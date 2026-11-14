@@ -194,6 +194,16 @@ describe('EmailPublicController', () => {
   });
 
   describe('Brevo webhook', () => {
+    // One token is in all three provider URLs. Brevo's is unsigned, so it must not be a way
+    // round the SES and Resend signature checks for a project that sends through those.
+    it.each(['ses', 'resend', null])('refuses events for a project whose provider is %s', async (provider) => {
+      settings.findByWebhookToken.mockResolvedValueOnce({ ...settingsRow, provider });
+      await expect(
+        controller.brevoWebhook(TOKEN, { body: { event: 'hard_bounce', email: 'customer@example.com' } } as never),
+      ).rejects.toThrow(ForbiddenException);
+      expect(events.ingest).not.toHaveBeenCalled();
+    });
+
     it('refuses an unknown webhook token', async () => {
       settings.findByWebhookToken.mockResolvedValueOnce(null);
       await expect(
@@ -203,6 +213,7 @@ describe('EmailPublicController', () => {
     });
 
     it('ingests events as unsigned, so each is checked against the project', async () => {
+      settings.findByWebhookToken.mockResolvedValueOnce({ ...settingsRow, provider: 'brevo' });
       await controller.brevoWebhook(TOKEN, {
         body: { event: 'spam', email: 'angry@example.com', ts_event: 1793530800 },
       } as never);

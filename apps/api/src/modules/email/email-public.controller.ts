@@ -417,6 +417,10 @@ export class EmailPublicController {
    * whole of the authentication. Events are therefore ingested unsigned:
    * each one is checked against the project's own people before it can
    * suppress an address or count toward a campaign.
+   *
+   * The token is the same in all three provider URLs, so this route answers only
+   * a project that sends through Brevo. Otherwise a holder of the URL of a project
+   * on SES or Resend would post here unsigned what those routes refuse unsigned.
    */
   @SkipThrottle()
   @Post('webhooks/brevo/:token')
@@ -427,6 +431,9 @@ export class EmailPublicController {
   ): Promise<{ recorded: number }> {
     const settings = await this.settings.findByWebhookToken(token);
     if (!settings) throw new NotFoundException();
+    if (settings.provider !== 'brevo') {
+      throw new ForbiddenException('Connect Brevo in Email settings to receive its events.');
+    }
 
     const recorded = await this.events.ingest(
       settings.projectId,
