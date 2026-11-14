@@ -1,4 +1,10 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ServiceUnavailableException,
+  Logger,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 import * as crypto from 'crypto';
@@ -18,11 +24,15 @@ let cachedKey: Buffer | null = null;
 function getEncryptionKey(): Buffer {
   if (cachedKey) return cachedKey;
   const raw = process.env.MIXPANEL_ENCRYPTION_KEY;
+  // A server that is not set up for Mixpanel is a 503 the caller can read, not a 500 stack.
+  // The variable's name stays out of the response; the log says which one it is.
   if (!raw) {
-    throw new Error('Missing required environment variable: MIXPANEL_ENCRYPTION_KEY');
+    Logger.error('MIXPANEL_ENCRYPTION_KEY is not set', 'MixpanelCohortsService');
+    throw new ServiceUnavailableException('Mixpanel integration is not available on this server.');
   }
   if (raw.length < 32) {
-    throw new Error('MIXPANEL_ENCRYPTION_KEY must be at least 32 bytes');
+    Logger.error('MIXPANEL_ENCRYPTION_KEY must be at least 32 bytes', 'MixpanelCohortsService');
+    throw new ServiceUnavailableException('Mixpanel integration is not available on this server.');
   }
   cachedKey = Buffer.from(raw, 'utf8').slice(0, 32);
   return cachedKey;

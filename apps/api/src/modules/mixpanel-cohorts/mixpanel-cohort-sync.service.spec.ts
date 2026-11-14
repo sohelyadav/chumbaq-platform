@@ -1,3 +1,4 @@
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { MixpanelCohortSyncService } from './mixpanel-cohort-sync.service';
@@ -101,9 +102,10 @@ describe('MixpanelCohortSyncService', () => {
     it('throws when getDecryptedConfig returns null', async () => {
       mixpanelCohortsService.getDecryptedConfig.mockResolvedValueOnce(null);
 
-      await expect(service.importCohort('proj-1', 42)).rejects.toThrow(
-        'Mixpanel is not configured for this project',
-      );
+      const err = await service.importCohort('proj-1', 42).catch((e) => e);
+      // A 400 for the caller, not a 500: the project simply has not connected Mixpanel.
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect(err.message).toBe('Mixpanel is not configured for this project');
     });
 
     it('throws when the cohort is not found in the Mixpanel list', async () => {
@@ -116,9 +118,9 @@ describe('MixpanelCohortSyncService', () => {
         { id: 99, name: 'Other', count: 1, created: '2024-01-01' },
       ]);
 
-      await expect(service.importCohort('proj-1', 42)).rejects.toThrow(
-        'Cohort 42 not found in Mixpanel',
-      );
+      const err = await service.importCohort('proj-1', 42).catch((e) => e);
+      expect(err).toBeInstanceOf(NotFoundException);
+      expect(err.message).toBe('Cohort 42 not found in Mixpanel');
     });
 
     it('creates a new cohort entity with status "syncing" and returns it immediately', async () => {

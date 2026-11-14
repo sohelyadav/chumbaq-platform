@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MixpanelCohortEntity } from './entities/mixpanel-cohort.entity';
@@ -72,13 +72,13 @@ export class MixpanelCohortSyncService {
   ): Promise<{ cohort: MixpanelCohortEntity; creds: MixpanelCredentials | null }> {
     const creds = await this.mixpanelCohortsService.getDecryptedConfig(projectId);
     if (!creds) {
-      throw new Error('Mixpanel is not configured for this project');
+      throw new BadRequestException('Mixpanel is not configured for this project');
     }
 
     const availableCohorts = await this.mixpanelApiService.listCohorts(creds);
     const cohortInfo = availableCohorts.find((c) => c.id === mixpanelCohortId);
     if (!cohortInfo) {
-      throw new Error(`Cohort ${mixpanelCohortId} not found in Mixpanel`);
+      throw new NotFoundException(`Cohort ${mixpanelCohortId} not found in Mixpanel`);
     }
 
     let cohort = await this.cohortRepo.findOne({
