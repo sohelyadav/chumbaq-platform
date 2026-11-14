@@ -3,6 +3,7 @@ import {
   BillingEvent,
   BillingProvider,
   BillingProviderError,
+  ProviderCustomer,
   ProviderInvoice,
   ProviderPlan,
   ProviderSubscription,
@@ -45,7 +46,7 @@ export class FakeBillingProvider implements BillingProvider {
   readonly subscriptions = new Map<string, ProviderSubscription>();
   readonly plans = new Map<string, ProviderPlan>();
   readonly invoices = new Map<string, ProviderInvoice>();
-  readonly customers = new Map<string, { name: string; email: string; gstin: string | null; accountRef: string }>();
+  readonly customers = new Map<string, { name: string; email: string; gstin: string | null; accountRef: string | null }>();
   /** Every `GET /v1/invoices` URL the listing asked for, in order. */
   readonly invoiceListRequests: string[] = [];
   private readonly failures = new Map<Method, Error[]>();
@@ -98,13 +99,33 @@ export class FakeBillingProvider implements BillingProvider {
     email: string;
     gstin: string | null;
     accountRef: string;
-  }): Promise<{ id: string }> {
+  }): Promise<ProviderCustomer> {
     this.enter('createCustomer', [input]);
     const name = razorpayCustomerName(input.name);
     const email = razorpayCustomerEmail(input.email);
+    // `fail_existing: "0"`: a customer with this email already is answered as it is,
+    // its own notes and GSTIN, whatever was sent.
+    for (const [id, existing] of this.customers) {
+      if (existing.email === email) return { id, accountRef: existing.accountRef, gstin: existing.gstin };
+    }
     const id = this.newId('cust');
     this.customers.set(id, { ...input, name, email });
-    return { id };
+    return { id, accountRef: input.accountRef, gstin: input.gstin };
+  }
+
+  async updateCustomerName(id: string, name: string): Promise<void> {
+    this.enter('updateCustomerName', [id, name]);
+    checkedId(id, 'customerId');
+    const customer = this.customers.get(id);
+    if (!customer) throw notFound();
+    customer.name = razorpayCustomerName(name);
+  }
+
+  /** A customer made outside billing (another product on the same account), as Razorpay would hold it. */
+  seedCustomer(customer: { name: string; email: string; gstin: string | null; accountRef: string | null }): string {
+    const id = this.newId('cust');
+    this.customers.set(id, { ...customer });
+    return id;
   }
 
   async createSubscription(input: {

@@ -18,7 +18,8 @@ export function billingErrorMessage(err: unknown, fallback: string): string {
 /**
  * The details printed on tax invoices: legal name, optional GSTIN, billing address and
  * state (the place of supply). The server checks everything again, including that a
- * GSTIN belongs to the chosen state, and its message is shown as it is.
+ * GSTIN belongs to the chosen state, and its message is shown as it is. Once the
+ * account has subscribed the GSTIN is shown but not editable (`gstinLocked`).
  */
 export function BillingDetailsForm({
   initial,
@@ -38,6 +39,7 @@ export function BillingDetailsForm({
   const [postalCode, setPostalCode] = useState(initial?.address.postalCode ?? '');
   const [stateCode, setStateCode] = useState(initial?.stateCode ?? '');
   const [error, setError] = useState<string | null>(null);
+  const gstinLocked = initial?.gstinLocked === true;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -89,7 +91,14 @@ export function BillingDetailsForm({
           spellCheck={false}
           autoCapitalize="characters"
           className="font-mono"
+          disabled={gstinLocked}
+          aria-describedby={gstinLocked ? 'billing-gstin-locked' : undefined}
         />
+        {gstinLocked && (
+          <p id="billing-gstin-locked" className="text-xs text-muted-foreground">
+            Razorpay keeps the GSTIN you subscribed with, so it can't be changed here. Contact support to change it.
+          </p>
+        )}
       </div>
       <div className="space-y-2">
         <Label htmlFor="billing-line1">Address</Label>

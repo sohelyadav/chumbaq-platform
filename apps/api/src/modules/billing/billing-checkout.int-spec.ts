@@ -12,7 +12,7 @@ import { BillingOutboxService } from './billing-outbox.service';
 import { BillingOverviewService } from './billing-overview.service';
 import { BillingStateService } from './billing-state.service';
 import type { BillingDetailsDto } from './dto/billing.dto';
-import { CHECKOUT_EXPIRY_MS } from './providers/billing-provider';
+import { BillingProviderError, CHECKOUT_EXPIRY_MS } from './providers/billing-provider';
 
 const KEY_ID = 'rzp_test_AbC123xyz';
 
@@ -158,21 +158,100 @@ describe('BillingCheckoutService (integration)', () => {
       expect(await account(w.user.userId)).toBeUndefined();
 
       const saved = await checkout.saveDetails(w.user.userId, DETAILS);
-      expect(saved).toEqual({ ...DETAILS, address: { ...DETAILS.address, line2: null } });
+      expect(saved).toEqual({ ...DETAILS, address: { ...DETAILS.address, line2: null }, gstinLocked: false });
       const again = await checkout.saveDetails(w.user.userId, { ...DETAILS, gstin: undefined, legalName: 'Acme' });
       expect(again.gstin).toBeNull();
       expect(await account(w.user.userId)).toMatchObject({ legal_name: 'Acme', gstin: null, state_code: '27' });
     });
   });
 
+  describe('details at the provider', () => {
+    const customerOf = async (userId: string) => fake.customers.get((await account(userId)).provider_customer_id);
+
+    it('sends a new legal name to the customer Razorpay already has, so later invoices carry it', async () => {
+      const w = await subscribed();
+      expect((await customerOf(w.user.userId))?.name).toBe('Acme Software Private Limited');
+      const before = fake.callsOf('updateCustomerName').length;
+
+      const saved = await checkout.saveDetails(w.user.userId, { ...DETAILS, legalName: 'Acme Software Labs Private Limited' });
+      expect(saved.gstinLocked).toBe(true);
+      expect(fake.callsOf('updateCustomerName').slice(before)).toEqual([
+        [(await account(w.user.userId)).provider_customer_id, 'Acme Software Labs Private Limited'],
+      ]);
+      expect((await customerOf(w.user.userId))?.name).toBe('Acme Software Labs Private Limited');
+      expect(await account(w.user.userId)).toMatchObject({ legal_name: 'Acme Software Labs Private Limited' });
+      expect((await overview.overview(w.user.userId)).details?.gstinLocked).toBe(true);
+
+      // An address change alone needs nothing from Razorpay.
+      await checkout.saveDetails(w.user.userId, {
+        ...DETAILS,
+        legalName: 'Acme Software Labs Private Limited',
+        address: { ...DETAILS.address, line1: '2 Main Road' },
+      });
+      expect(fake.callsOf('updateCustomerName').length - before).toBe(1);
+    });
+
+    it('refuses a GSTIN change once Razorpay has the customer, and changes nothing', async () => {
+      const w = await subscribed();
+      const calls = fake.calls.length;
+      for (const gstin of [undefined, '27AAACR5055K1Z5']) {
+        expect(await refusal(checkout.saveDetails(w.user.userId, { ...DETAILS, gstin, legalName: 'Other' }))).toEqual({
+          status: 409,
+          message: 'Your GSTIN cannot be changed once you have subscribed. Contact support to change it.',
+        });
+      }
+      expect(fake.calls.length).toBe(calls);
+      expect(await account(w.user.userId)).toMatchObject({ gstin: DETAILS.gstin, legal_name: DETAILS.legalName });
+    });
+
+    it('says Razorpay could not take the new name, and keeps the old one', async () => {
+      const w = await subscribed();
+      fake.failNext('updateCustomerName', new BillingProviderError(400, 'BAD_REQUEST_ERROR', 'The name is invalid'));
+      expect(await refusal(checkout.saveDetails(w.user.userId, { ...DETAILS, legalName: 'Acme New' }))).toEqual({
+        status: 502,
+        message: 'Razorpay could not update your billing name. Try again later.',
+      });
+      expect(await account(w.user.userId)).toMatchObject({ legal_name: DETAILS.legalName });
+    });
+
+    it('never adopts a customer Razorpay already had for the email under another reference', async () => {
+      const w = await world();
+      // A customer made by another product on the same Razorpay account.
+      fake.seedCustomer({ name: 'Someone', email: w.user.email, gstin: DETAILS.gstin!, accountRef: null });
+      const created = fake.callsOf('createSubscription').length;
+      expect(await refusal(checkout.subscribe(w.user, { plan: w.planA, interval: 'monthly' }))).toEqual({
+        status: 409,
+        message: 'Your billing account at Razorpay needs a look from support before you can subscribe. Contact support.',
+      });
+      expect(fake.callsOf('createSubscription').length).toBe(created);
+      expect((await account(w.user.userId)).provider_customer_id).toBeNull();
+    });
+
+    it('never adopts its own earlier customer holding another GSTIN', async () => {
+      const w = await world();
+      fake.seedCustomer({ name: 'Acme', email: w.user.email, gstin: null, accountRef: w.user.userId });
+      expect((await refusal(checkout.subscribe(w.user, { plan: w.planA, interval: 'monthly' }))).status).toBe(409);
+      expect((await account(w.user.userId)).provider_customer_id).toBeNull();
+    });
+
+    it('adopts its own earlier customer with the same GSTIN', async () => {
+      const w = await world();
+      const id = fake.seedCustomer({ name: 'Acme', email: w.user.email, gstin: DETAILS.gstin!, accountRef: w.user.userId });
+      const started = await checkout.subscribe(w.user, { plan: w.planA, interval: 'monthly' });
+      expect(started.customerId).toBe(id);
+      expect((await account(w.user.userId)).provider_customer_id).toBe(id);
+    });
+  });
+
   describe('subscribe', () => {
     it('needs billing details first', async () => {
       const w = await world({ details: false });
+      const created = fake.callsOf('createSubscription').length;
       expect(await refusal(checkout.subscribe(w.user, { plan: w.planA, interval: 'monthly' }))).toEqual({
         status: 400,
         message: 'Add your billing details first.',
       });
-      expect(fake.callsOf('createSubscription')).toHaveLength(0);
+      expect(fake.callsOf('createSubscription')).toHaveLength(created);
     });
 
     it('stores a created subscription as next, makes the customer once, and supersedes an earlier checkout', async () => {

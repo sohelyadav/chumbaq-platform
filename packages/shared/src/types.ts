@@ -1519,6 +1519,11 @@ export interface BillingDetails {
   address: BillingAddress;
   /** Two-digit GST state code: the place of supply. */
   stateCode: string;
+  /**
+   * Whether the GSTIN can no longer be changed here: the account has a customer at the
+   * payment provider, which keeps the GSTIN it was made with. Ignored on input.
+   */
+  gstinLocked: boolean;
 }
 
 export interface BillingSubscriptionView {

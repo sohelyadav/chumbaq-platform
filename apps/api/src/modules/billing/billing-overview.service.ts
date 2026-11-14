@@ -194,5 +194,6 @@ export function detailsOf(account: BillingAccountEntity | null): BillingDetails 
     gstin: account.gstin,
     address: account.address,
     stateCode: account.stateCode,
+    gstinLocked: account.providerCustomerId !== null,
   };
 }

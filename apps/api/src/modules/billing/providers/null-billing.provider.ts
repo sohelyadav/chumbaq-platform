@@ -1,4 +1,11 @@
-import type { BillingEvent, BillingProvider, ProviderInvoice, ProviderPlan, ProviderSubscription } from './billing-provider';
+import type {
+  BillingEvent,
+  BillingProvider,
+  ProviderCustomer,
+  ProviderInvoice,
+  ProviderPlan,
+  ProviderSubscription,
+} from './billing-provider';
 
 const NOT_CONFIGURED = 'Billing is not configured';
 
@@ -11,7 +18,11 @@ export class NullBillingProvider implements BillingProvider {
   readonly enabled = false;
   readonly keyId = null;
 
-  async createCustomer(): Promise<{ id: string }> {
+  async createCustomer(): Promise<ProviderCustomer> {
+    throw new Error(NOT_CONFIGURED);
+  }
+
+  async updateCustomerName(): Promise<void> {
     throw new Error(NOT_CONFIGURED);
   }
 

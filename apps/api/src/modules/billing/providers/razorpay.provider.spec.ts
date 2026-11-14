@@ -88,7 +88,8 @@ describe('RazorpayProvider', () => {
       gstin: '29ABCDE1234F1Z5',
       accountRef: 'acct-1',
     });
-    expect(result).toEqual({ id: 'cust_1Aa00000000004' });
+    // The documented reply carries other notes and no GSTIN: not a customer we made.
+    expect(result).toEqual({ id: 'cust_1Aa00000000004', accountRef: null, gstin: null });
     expect(calls[0]).toMatchObject({
       method: 'POST',
       body: {
@@ -99,6 +100,36 @@ describe('RazorpayProvider', () => {
         notes: { account_ref: 'acct-1' },
       },
     });
+  });
+
+  it("reads back the account reference and GSTIN of the customer Razorpay answers with", async () => {
+    const reply = { ...fixture('customer.json'), gstin: '29ABCDE1234F1Z5', notes: { account_ref: 'acct-1' } };
+    const { impl } = stubFetch({ [`POST ${BASE}/customers`]: () => json(reply) });
+    const result = await provider(impl).createCustomer({ name: 'Acme', email: 'a@acme.test', gstin: null, accountRef: 'acct-2' });
+    expect(result).toEqual({ id: 'cust_1Aa00000000004', accountRef: 'acct-1', gstin: '29ABCDE1234F1Z5' });
+
+    const empty = { ...fixture('customer.json'), notes: [] };
+    const { impl: emptyImpl } = stubFetch({ [`POST ${BASE}/customers`]: () => json(empty) });
+    expect(
+      await provider(emptyImpl).createCustomer({ name: 'Acme', email: 'a@acme.test', gstin: null, accountRef: 'acct-2' }),
+    ).toEqual({ id: 'cust_1Aa00000000004', accountRef: null, gstin: null });
+  });
+
+  it('renames a customer with PUT /customers/:id, the name only and put into the rules', async () => {
+    const { impl, calls } = stubFetch({ [`PUT ${BASE}/customers/cust_1Aa00000000004`]: () => json(fixture('customer.json')) });
+    await provider(impl).updateCustomerName('cust_1Aa00000000004', 'Smith & Sons');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ method: 'PUT', body: { name: 'Smith and Sons' } });
+    expect(Object.keys(calls[0].body as object)).toEqual(['name']);
+  });
+
+  it('refuses to rename a customer whose id is not Razorpay-shaped, or a name Razorpay would refuse, before any request', async () => {
+    const { impl } = stubFetch({});
+    await expect(provider(impl).updateCustomerName('../payments', 'Acme')).rejects.toBeInstanceOf(InvalidProviderIdError);
+    await expect(provider(impl).updateCustomerName('cust_1Aa00000000004', 'देवनागरी')).rejects.toBeInstanceOf(
+      InvalidCustomerInputError,
+    );
+    expect(impl).not.toHaveBeenCalled();
   });
 
   it('leaves gstin out of the customer when there is none', async () => {

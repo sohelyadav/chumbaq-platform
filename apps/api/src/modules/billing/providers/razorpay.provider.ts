@@ -3,6 +3,7 @@ import {
   BillingEvent,
   BillingProvider,
   BillingProviderError,
+  ProviderCustomer,
   ProviderInvoice,
   ProviderPlan,
   ProviderSubscription,
@@ -97,7 +98,7 @@ export class RazorpayProvider implements BillingProvider {
     email: string;
     gstin: string | null;
     accountRef: string;
-  }): Promise<{ id: string }> {
+  }): Promise<ProviderCustomer> {
     // Refused (`InvalidCustomerInputError`) before any request if Razorpay would refuse it.
     const body: Record<string, unknown> = {
       name: razorpayCustomerName(input.name),
@@ -107,10 +108,24 @@ export class RazorpayProvider implements BillingProvider {
     // "0": answer with the existing customer of that email and contact rather than fail.
     body.fail_existing = '0';
     body.notes = { account_ref: input.accountRef };
-    const reply = await this.request('POST', '/customers', body);
-    const id = (reply as { id?: unknown }).id;
+    const reply = (await this.request('POST', '/customers', body)) as { id?: unknown; gstin?: unknown; notes?: unknown };
+    const id = reply.id;
     if (typeof id !== 'string' || !RAZORPAY_ID_PATTERN.test(id)) throw new InvalidPayloadError('customer.id');
-    return { id };
+    // `notes` is an object when set, and may be `[]` when empty, as on other entities.
+    const notes = reply.notes && typeof reply.notes === 'object' && !Array.isArray(reply.notes) ? reply.notes : {};
+    const accountRef = (notes as { account_ref?: unknown }).account_ref;
+    return {
+      id,
+      accountRef: typeof accountRef === 'string' ? accountRef : null,
+      gstin: typeof reply.gstin === 'string' && reply.gstin !== '' ? reply.gstin : null,
+    };
+  }
+
+  /** `PUT /v1/customers/:id` with the name only: the API takes name, email and contact, never a GSTIN. */
+  async updateCustomerName(id: string, name: string): Promise<void> {
+    const path = `/customers/${checkedId(id, 'customerId')}`;
+    const reply = await this.request('PUT', path, { name: razorpayCustomerName(name) });
+    if ((reply as { id?: unknown }).id !== id) throw new InvalidPayloadError('customer.id');
   }
 
   async createSubscription(input: {
@@ -184,7 +199,7 @@ export class RazorpayProvider implements BillingProvider {
     return parseRazorpayEvent(body);
   }
 
-  private async request(method: 'GET' | 'POST', path: string, body?: unknown): Promise<object> {
+  private async request(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<object> {
     const response = await this.#fetch(`${API_BASE}${path}`, {
       method,
       headers: {

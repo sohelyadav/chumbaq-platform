@@ -73,6 +73,18 @@ export interface ProviderRefund {
   createdAt: Date;
 }
 
+/**
+ * A customer as the provider answered creating it. With Razorpay that may be an
+ * existing customer with the same email (`fail_existing: "0"`): `accountRef` is the
+ * reference we put in its notes when we made it (null if it has none, so not ours),
+ * and `gstin` the GSTIN it holds, which is not necessarily the one just sent.
+ */
+export interface ProviderCustomer {
+  id: string;
+  accountRef: string | null;
+  gstin: string | null;
+}
+
 export interface ProviderPlan {
   id: string;
   period: string;
@@ -117,7 +129,13 @@ export interface BillingProvider {
    * there. A name with too little left, or an email the provider would refuse, throws
    * `InvalidCustomerInputError` naming the field, before any request.
    */
-  createCustomer(input: { name: string; email: string; gstin: string | null; accountRef: string }): Promise<{ id: string }>;
+  createCustomer(input: { name: string; email: string; gstin: string | null; accountRef: string }): Promise<ProviderCustomer>;
+  /**
+   * Renames the customer (put into the provider's rules as `createCustomer` does).
+   * Only the name: Razorpay's edit-customer API does not take a GSTIN, which is set
+   * once, when the customer is created.
+   */
+  updateCustomerName(id: string, name: string): Promise<void>;
   createSubscription(input: {
     planId: string;
     totalCount: number;

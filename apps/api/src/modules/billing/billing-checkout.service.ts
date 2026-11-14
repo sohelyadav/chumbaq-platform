@@ -45,6 +45,10 @@ export const BILLING_MESSAGES = {
   providerRefusedCancel: 'Razorpay could not cancel the subscription. Try again later.',
   gstinState: 'The GSTIN is registered in another state. Check the state or the GSTIN.',
   gstinInvalid: 'Enter a valid GSTIN, or leave it empty.',
+  gstinLocked: 'Your GSTIN cannot be changed once you have subscribed. Contact support to change it.',
+  customerMismatch: 'Your billing account at Razorpay needs a look from support before you can subscribe. Contact support.',
+  detailsChangedMeanwhile: 'Your billing details changed meanwhile. Try again.',
+  providerRefusedDetails: 'Razorpay could not update your billing name. Try again later.',
 } as const;
 
 const PROVIDER_LABEL = 'Razorpay';
@@ -97,7 +101,16 @@ export class BillingCheckoutService {
     private readonly overviews: BillingOverviewService,
   ) {}
 
-  /** Writes only the detail columns, creating the account row if needed. */
+  /**
+   * Writes only the detail columns, creating the account row if needed.
+   *
+   * Once the account has a customer at the provider, the details are on it too: a new
+   * legal name is sent there first (no lock held), so later invoices carry it. The
+   * GSTIN cannot follow (Razorpay's edit-customer API takes no GSTIN; it is set when
+   * the customer is made), so a GSTIN change is refused then, and support changes it.
+   * Under the lock it is checked again: a customer made meanwhile by a subscribe in
+   * another tab refuses a change it has not seen.
+   */
   async saveDetails(userId: string, dto: BillingDetailsDto): Promise<BillingDetails> {
     const gstin = dto.gstin ?? null;
     if (gstin !== null && !isValidGstin(gstin)) throw new BadRequestException(BILLING_MESSAGES.gstinInvalid);
@@ -111,15 +124,36 @@ export class BillingCheckoutService {
       postalCode: dto.address.postalCode,
       country: 'IN' as const,
     };
-    await this.dataSource.query(
-      `INSERT INTO billing_accounts (user_id, legal_name, gstin, address, state_code)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (user_id) DO UPDATE SET
-         legal_name = EXCLUDED.legal_name, gstin = EXCLUDED.gstin, address = EXCLUDED.address,
-         state_code = EXCLUDED.state_code, updated_at = now()`,
-      [userId, dto.legalName, gstin, address, dto.stateCode],
-    );
-    return { legalName: dto.legalName, gstin, address, stateCode: dto.stateCode };
+
+    const before = await this.dataSource.manager.findOne(BillingAccountEntity, { where: { userId } });
+    let renamed = false;
+    if (before?.providerCustomerId) {
+      if (gstin !== before.gstin) throw new ConflictException(BILLING_MESSAGES.gstinLocked);
+      if (dto.legalName !== before.legalName) {
+        await this.customerCall(BILLING_MESSAGES.providerRefusedDetails, () =>
+          this.provider.updateCustomerName(before.providerCustomerId!, dto.legalName),
+        );
+        renamed = true;
+      }
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      const { account: locked } = await this.read(manager, userId, true);
+      if (locked?.providerCustomerId) {
+        if (gstin !== locked.gstin) throw new ConflictException(BILLING_MESSAGES.gstinLocked);
+        const sentName = renamed && locked.providerCustomerId === before?.providerCustomerId;
+        if (dto.legalName !== locked.legalName && !sentName) {
+          throw new ConflictException(BILLING_MESSAGES.detailsChangedMeanwhile);
+        }
+      }
+      await manager.query(
+        `UPDATE billing_accounts
+            SET legal_name = $2, gstin = $3, address = $4, state_code = $5, updated_at = now()
+          WHERE user_id = $1`,
+        [userId, dto.legalName, gstin, address, dto.stateCode],
+      );
+    });
+    return { legalName: dto.legalName, gstin, address, stateCode: dto.stateCode, gstinLocked: !!before?.providerCustomerId };
   }
 
   async subscribe(user: Customer, dto: ChoosePlanDto, now: Date = new Date()): Promise<BillingCheckout> {
@@ -387,34 +421,63 @@ export class BillingCheckoutService {
 
   // ------------------------------------------------------------ the provider
 
-  /** The account's customer at the provider, created once (with no lock held). */
+  /**
+   * The account's customer at the provider, created once (with no lock held).
+   *
+   * Razorpay answers a create for an email it already knows with that customer
+   * (`fail_existing: "0"`), which may not be ours: the Razorpay account can serve
+   * other products. Only a customer whose notes carry this account's reference is
+   * adopted, and only with the GSTIN the account holds (Razorpay cannot change a
+   * customer's GSTIN afterwards). Anything else is refused and logged for support,
+   * never adopted: payments and invoices are matched to an account by customer.
+   */
   private async customerFor(user: Customer, account: BillingAccountEntity): Promise<string> {
     if (account.providerCustomerId) return account.providerCustomerId;
-    let customer: { id: string };
-    try {
-      customer = await this.call(BILLING_MESSAGES.providerRefused, () =>
-        this.provider.createCustomer({
-          name: account.legalName ?? user.name,
-          email: user.email,
-          gstin: account.gstin,
-          accountRef: user.userId,
-        }),
+    const customer = await this.customerCall(BILLING_MESSAGES.providerRefused, () =>
+      this.provider.createCustomer({
+        name: account.legalName ?? user.name,
+        email: user.email,
+        gstin: account.gstin,
+        accountRef: user.userId,
+      }),
+    );
+    if (customer.accountRef !== user.userId) {
+      this.logger.warn(
+        `Razorpay answered account ${user.userId} with customer ${logValue(customer.id)}, which another reference made`,
       );
+      throw new ConflictException(BILLING_MESSAGES.customerMismatch);
+    }
+    if ((customer.gstin ?? '').toUpperCase() !== (account.gstin ?? '')) {
+      this.logger.warn(`Razorpay customer ${logValue(customer.id)} of account ${user.userId} holds another GSTIN`);
+      throw new ConflictException(BILLING_MESSAGES.customerMismatch);
+    }
+    // Kept at once, so a second request reuses it, and only over the details it was
+    // made with. Another request's customer, if it won, stays.
+    const [, adopted] = await this.dataSource.query(
+      `UPDATE billing_accounts SET provider_customer_id = $2, updated_at = now()
+        WHERE user_id = $1 AND provider_customer_id IS NULL AND gstin IS NOT DISTINCT FROM $3
+          AND NOT EXISTS (SELECT 1 FROM billing_accounts other WHERE other.provider_customer_id = $2)`,
+      [user.userId, customer.id, account.gstin],
+    );
+    if (adopted === 1) return customer.id;
+    const [row] = await this.dataSource.query(
+      `SELECT provider_customer_id, gstin FROM billing_accounts WHERE user_id = $1`,
+      [user.userId],
+    );
+    if (row?.provider_customer_id) return row.provider_customer_id;
+    if (row && row.gstin !== account.gstin) throw new ConflictException(BILLING_MESSAGES.detailsChangedMeanwhile);
+    this.logger.warn(`Razorpay customer ${logValue(customer.id)} of account ${user.userId} is held by another account`);
+    throw new ConflictException(BILLING_MESSAGES.customerMismatch);
+  }
+
+  /** `call`, with a customer detail Razorpay would refuse answered as a 400 naming the field. */
+  private async customerCall<T>(refused: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await this.call(refused, fn);
     } catch (error) {
       if (error instanceof InvalidCustomerInputError) throw new BadRequestException(error.message);
       throw error;
     }
-    // Kept at once, so a second request reuses it; another request's customer, if it won, stays.
-    await this.dataSource.query(
-      `UPDATE billing_accounts SET provider_customer_id = $2, updated_at = now()
-        WHERE user_id = $1 AND provider_customer_id IS NULL
-          AND NOT EXISTS (SELECT 1 FROM billing_accounts other WHERE other.provider_customer_id = $2)`,
-      [user.userId, customer.id],
-    );
-    const [row] = await this.dataSource.query(`SELECT provider_customer_id FROM billing_accounts WHERE user_id = $1`, [
-      user.userId,
-    ]);
-    return row?.provider_customer_id ?? customer.id;
   }
 
   /**
