@@ -48,10 +48,16 @@ export default function InvitePage() {
       return;
     }
     pendingInvite.clear(window.sessionStorage);
-    // Once, though StrictMode runs effects twice.
+    // Once per mount. StrictMode's rehearsal unmount (development only) detaches the
+    // mutation from this component, which would then never hear the answer and stay on
+    // "Opening your invite..."; so the cleanup lets the remount ask again. A preview
+    // changes nothing, so asking twice is harmless.
     if (asked.current) return;
     asked.current = true;
     load();
+    return () => {
+      asked.current = false;
+    };
   }, [token, isLoading, isAuthenticated]);
 
   const handleAccept = () => {
