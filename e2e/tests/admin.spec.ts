@@ -65,6 +65,15 @@ test('staff enrol a passkey, sign in with it, and view a tenant read-only', asyn
   await expect(banner).toContainText(`Viewing ${tenant.email} as Super Admin · read-only`);
   await expect(viewAs.getByText(project.name)).toBeVisible();
 
+  // Read-only means the API refuses writes, not just that the banner says so.
+  await viewAs.getByRole('button', { name: 'New Project' }).click();
+  const create = viewAs.getByRole('dialog', { name: 'New Project' });
+  await create.getByPlaceholder('My App').fill('Made while viewing as');
+  await create.getByPlaceholder('example.com').fill('view-as.e2e.example.test');
+  await create.getByRole('button', { name: 'Create Project' }).click();
+  await expect(create.getByRole('alert')).toHaveText('Impersonation sessions are read-only');
+  await create.getByRole('button', { name: 'Cancel' }).click();
+
   // Ending it leaves for the admin app's page for that tenant.
   await banner.getByRole('button', { name: 'Exit' }).click();
   await expect(viewAs).toHaveURL(new RegExp(`^${adminUrl('')}/`));
