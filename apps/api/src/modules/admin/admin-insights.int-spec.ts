@@ -281,6 +281,9 @@ describe('AdminInsightsService against Postgres', () => {
       await usage(t, '2026-10-15', 'push_sent', 7);
       // 30 days before the last counted day: outside the window.
       await usage(t, '2026-10-14', 'push_sent', 1000);
+      // A snapshot per closed day, as the roll-up writes: only the last day's counts.
+      await usage(t, '2026-10-31', 'mau_month_to_date', 30);
+      await usage(t, '2026-11-12', 'mau_month_to_date', 3);
       await usage(t, '2026-11-13', 'mau_month_to_date', 4);
       const after = await service.overview();
 
@@ -308,6 +311,8 @@ describe('AdminInsightsService against Postgres', () => {
       const before = await service.overview();
 
       await usage(heavy, '2026-11-13', 'push_sent', 2_000_000_000);
+      await usage(heavy, '2026-10-31', 'mau_month_to_date', 700);
+      await usage(heavy, '2026-11-12', 'mau_month_to_date', 999_999_999);
       await usage(heavy, '2026-11-13', 'mau_month_to_date', 1_000_000_000);
       await usage(light, '2026-11-12', 'email_sent', 1_500_000_000);
       // Last usage 20, 14 and 13 days before the last counted day.

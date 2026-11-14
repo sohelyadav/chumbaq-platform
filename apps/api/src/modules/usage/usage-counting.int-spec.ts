@@ -99,11 +99,16 @@ describe('usage counting (integration)', () => {
     return row.id;
   };
 
-  const device = async (project: string, firstSeenAt: string): Promise<string> => {
+  /**
+   * A device row. `last_seen_at` is an update-date column that moves on every
+   * save of the row (each identify, any dashboard edit), so a real device first
+   * seen days ago usually carries a `last_seen_at` of today.
+   */
+  const device = async (project: string, firstSeenAt: string, lastSeenAt = firstSeenAt): Promise<string> => {
     const [row] = await m.query(
       `INSERT INTO device_identities (project_id, device_fingerprint, platform, first_seen_at, last_seen_at)
-       VALUES ($1, $2, 'ios', $3::timestamptz::timestamp, $3::timestamptz::timestamp) RETURNING id`,
-      [project, `fp-${randomUUID()}`, firstSeenAt],
+       VALUES ($1, $2, 'ios', $3::timestamptz::timestamp, $4::timestamptz::timestamp) RETURNING id`,
+      [project, `fp-${randomUUID()}`, firstSeenAt, lastSeenAt],
     );
     return row.id;
   };
@@ -176,7 +181,9 @@ describe('usage counting (integration)', () => {
 
     await device(P1, at('02:00:00'));
     await device(P1, '2026-11-13T19:00:00Z');
-    await device(P1, '2026-11-12T12:00:00Z');
+    // First seen on earlier days and saved again today: not new today.
+    await device(P1, '2026-11-12T12:00:00Z', at('16:00:00'));
+    await device(P1, '2026-11-02T08:00:00Z', at('17:00:00'));
   };
 
   const seedP2 = async () => {

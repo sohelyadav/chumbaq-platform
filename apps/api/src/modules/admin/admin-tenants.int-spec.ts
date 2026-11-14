@@ -344,6 +344,12 @@ describe('AdminTenantsService (integration)', () => {
       );
       heavy = await withUsage('heavy');
       await usage(heavy, '2026-11-13', 'push_sent', 50);
+      // The roll-up writes a month-to-date snapshot for every closed day, the
+      // previous month's included; only the last counted day's is this month's.
+      await usage(heavy, '2026-10-30', 'mau_month_to_date', 40);
+      await usage(heavy, '2026-10-31', 'mau_month_to_date', 41);
+      await usage(heavy, '2026-11-01', 'mau_month_to_date', 2);
+      await usage(heavy, '2026-11-12', 'mau_month_to_date', 4);
       await usage(heavy, '2026-11-13', 'mau_month_to_date', 5);
       light = await withUsage('light');
       await usage(light, '2026-11-01', 'email_sent', 10);
