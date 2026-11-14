@@ -8,6 +8,8 @@ import {
   assertE2eDatabase,
   assertE2eRedisDb,
   exportRunSecrets,
+  LANE,
+  laneOverrides,
   LOG_DIR,
   newRunSecrets,
   readDotEnv,
@@ -20,8 +22,13 @@ const VITE = path.join(REPO_ROOT, 'node_modules/.bin/vite');
 const TYPEORM_CLI = path.join(REPO_ROOT, 'node_modules/typeorm/cli.js');
 
 /**
- * Builds and starts the whole stack for one run, and returns its teardown:
+ * Builds and starts the whole stack for one run (on lane E2E_LANE), and returns its
+ * teardown:
  *
+ * 0. for a lane other than 0, puts the lane's changes to the .env (its database, Redis
+ *    database, ports and addresses) into this process's environment, which every
+ *    process started from here inherits (migrations, the apps, both Vite servers, and
+ *    the test workers with the CLI they run) and which wins over the .env in each;
  * 1. refuses unless the .env names an `_e2e` database and its own Redis database, and
  *    unless every port the stack needs is free (another stack, or a run that died);
  * 2. builds @chumbaq/shared and the API (skip with E2E_SKIP_BUILD=1 when iterating);
@@ -33,7 +40,10 @@ const TYPEORM_CLI = path.join(REPO_ROOT, 'node_modules/typeorm/cli.js');
  *    and both Vite dev servers, waiting for each.
  */
 export default async function globalSetup(_config: FullConfig): Promise<() => Promise<void>> {
-  const env = readDotEnv();
+  const base = readDotEnv();
+  const overrides = laneOverrides(base);
+  Object.assign(process.env, overrides);
+  const env = { ...base, ...overrides };
   assertE2eDatabase(env);
   assertE2eRedisDb(env);
   const ports = stackPorts(env);
@@ -42,7 +52,7 @@ export default async function globalSetup(_config: FullConfig): Promise<() => Pr
   for (const port of Object.values(ports)) if (await portInUse(port)) busy.push(port);
   if (busy.length) {
     throw new Error(
-      `Ports already in use: ${busy.join(', ')}. Another stack (or a previous run) holds them; stop it first.`,
+      `Ports already in use on lane ${LANE}: ${busy.join(', ')}. Another stack (or a previous run) holds them; stop it first, or use another E2E_LANE.`,
     );
   }
 

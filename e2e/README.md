@@ -15,9 +15,35 @@ E2E_SKIP_BUILD=1 npm run test:e2e        # skip rebuilding the API (when only sp
 
 The first time, install the browser: `npx playwright install chromium`.
 
+### Lanes: several stacks at once
+
+`E2E_LANE` picks one of three stacks, so several runs can go side by side from one
+checkout. Unset or `0` is the stack the `.env` describes. Lane `n` (1 or 2) is derived
+from it (`laneOverrides` in `support/stack.ts`):
+
+- database `chumbaq_l<n>_e2e` (create it once:
+  `psql -U postgres -c "CREATE DATABASE chumbaq_l1_e2e OWNER <DATABASE_USER>;"`);
+- Redis database `12 + n`;
+- every port moved up by `100 * n`: `API_PORT`, `ADMIN_API_PORT`, and the stack's ports
+  wherever an address names one (`APP_URL`, `ADMIN_APP_URL`, `VITE_ADMIN_APP_URL`,
+  `API_BASE_URL`, `CORS_ORIGINS`, ...), with the Razorpay mock following the API;
+- artefacts under `e2e/.artefacts/lane-<n>/`.
+
+The changes reach every process as environment variables, which win over the `.env`.
+A lane refuses to start if it would share a database, a Redis database or a port with
+lane 0. One run per lane at a time (the port check refuses a second), and build from one
+lane only while nothing else runs: every lane runs the same `apps/api/dist`.
+
+```bash
+E2E_LANE=0 npm run test:e2e                     # builds, then runs
+E2E_LANE=1 E2E_SKIP_BUILD=1 npm run test:e2e &  # meanwhile, elsewhere
+E2E_LANE=2 E2E_SKIP_BUILD=1 npm run test:e2e
+```
+
 Failures keep a trace and a screenshot under `e2e/.artefacts/test-results/` (open a
 trace with `npx playwright show-trace <path>`); the HTML report is in
 `e2e/.artefacts/report/`, and each process of the stack logs to `e2e/.artefacts/logs/`.
+Lanes other than 0 use `e2e/.artefacts/lane-<n>/` instead.
 
 ### What it needs
 
@@ -38,7 +64,8 @@ stack of its own:
 
 ### What the harness does (`support/global-setup.ts`)
 
-1. Checks the database name, the Redis database and the ports.
+1. Applies the lane's changes to the `.env` (none for lane 0), then checks the database
+   name, the Redis database and the ports.
 2. Builds `@chumbaq/shared` and the API.
 3. Resets the database and Redis, and applies the migrations (some tables exist only in
    migrations, so `synchronize` alone would leave them out).

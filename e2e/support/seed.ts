@@ -1,7 +1,7 @@
 import { createCipheriv, randomBytes } from 'crypto';
 import { Client } from 'pg';
 import { api } from './api';
-import { assertE2eDatabase, readDotEnv, runSecrets } from './stack';
+import { assertE2eDatabase, runSecrets, stackEnv } from './stack';
 
 /**
  * Seeding for what the real API cannot do without a third party. Writes go to the e2e
@@ -9,7 +9,7 @@ import { assertE2eDatabase, readDotEnv, runSecrets } from './stack';
  */
 
 async function withDatabase<T>(work: (client: Client) => Promise<T>): Promise<T> {
-  const env = readDotEnv();
+  const env = stackEnv();
   const client = new Client({
     host: env.DATABASE_HOST,
     port: Number(env.DATABASE_PORT || 5432),

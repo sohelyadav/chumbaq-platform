@@ -18,7 +18,16 @@ export async function resetStores(env: Record<string, string>): Promise<void> {
     password: env.DATABASE_PASSWORD,
     database,
   });
-  await client.connect();
+  try {
+    await client.connect();
+  } catch (error) {
+    if ((error as { code?: string }).code === '3D000') {
+      throw new Error(
+        `The e2e database ${database} does not exist. Create it once: psql -U postgres -c "CREATE DATABASE ${database} OWNER ${env.DATABASE_USER};"`,
+      );
+    }
+    throw error;
+  }
   try {
     // Checked again on the live connection, in case anything in between rewrote the name.
     const { rows } = await client.query<{ name: string }>('SELECT current_database() AS name');

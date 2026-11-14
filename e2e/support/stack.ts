@@ -8,13 +8,34 @@ import { parse } from 'dotenv';
  *
  * Ports and database settings come from the repo-root `.env`, the same file the API,
  * the worker and both Vite servers read, so the harness and the apps cannot disagree
- * about them. Its values are never printed. Everything the tests themselves need to
+ * about them (lanes other than 0 change a few of them, see `laneOverrides`, and hand
+ * the changes to every process as environment variables). Its values are never printed. Everything the tests themselves need to
  * know (signing secrets, the fake Razorpay keys) is generated per run here and handed
  * to the apps as environment variables, which take precedence over the `.env`.
  */
 
 export const REPO_ROOT = path.resolve(__dirname, '../..');
-export const ARTEFACTS_DIR = path.join(REPO_ROOT, 'e2e/.artefacts');
+
+/**
+ * Lanes: up to three stacks at once from one checkout, chosen by E2E_LANE. Lane 0 (unset
+ * or 0) is the stack the `.env` describes. Lane n (1 or 2) is a separate stack derived
+ * from it: database `chumbaq_l<n>_e2e`, Redis database 12 + n, every port moved up by
+ * 100 * n, and artefacts under e2e/.artefacts/lane-<n>/.
+ */
+export const MAX_LANE = 2;
+const LANE_PORT_STEP = 100;
+const LANE_REDIS_DB_BASE = 12;
+
+export function e2eLane(value: string | undefined = process.env.E2E_LANE): number {
+  if (value === undefined || value === '') return 0;
+  if (!/^\d+$/.test(value) || Number(value) > MAX_LANE) {
+    throw new Error(`E2E_LANE must be a whole number from 0 to ${MAX_LANE} (got "${value}")`);
+  }
+  return Number(value);
+}
+
+export const LANE = e2eLane();
+export const ARTEFACTS_DIR = path.join(REPO_ROOT, 'e2e/.artefacts', ...(LANE === 0 ? [] : [`lane-${LANE}`]));
 export const LOG_DIR = path.join(ARTEFACTS_DIR, 'logs');
 
 /** The repo-root `.env`, parsed without touching `process.env`. */
@@ -47,7 +68,12 @@ export interface StackPorts {
   razorpayMock: number;
 }
 
-export function stackPorts(env: Record<string, string> = readDotEnv()): StackPorts {
+/**
+ * The stack's ports, read from `env`: the `.env` itself for lane 0's, or `stackEnv()` for
+ * the current lane's. `lane` only moves an explicitly chosen E2E_RAZORPAY_MOCK_PORT; the
+ * default mock port follows the API's.
+ */
+export function stackPorts(env: Record<string, string> = stackEnv(), lane = LANE): StackPorts {
   const api = requiredPort(env.API_PORT, 'API_PORT');
   return {
     api,
@@ -55,8 +81,61 @@ export function stackPorts(env: Record<string, string> = readDotEnv()): StackPor
     web: portOf(env.APP_URL, 'APP_URL'),
     admin: portOf(env.ADMIN_APP_URL, 'ADMIN_APP_URL'),
     // Not in .env: the mock exists only for this harness.
-    razorpayMock: Number(process.env.E2E_RAZORPAY_MOCK_PORT || api + 90),
+    razorpayMock: process.env.E2E_RAZORPAY_MOCK_PORT
+      ? Number(process.env.E2E_RAZORPAY_MOCK_PORT) + lane * LANE_PORT_STEP
+      : api + 90,
   };
+}
+
+/** Keys whose values can name one of the stack's own addresses (URLs, origins, hosts). */
+const ADDRESS_KEY = /(_URL|_URLS|_ORIGIN|_ORIGINS|_DOMAIN)$|^VITE_/;
+
+/**
+ * What lane `lane` changes in the `.env`: nothing for lane 0. For lane n, its own
+ * database and Redis database, API_PORT and ADMIN_API_PORT moved up by 100 * n, and the
+ * same move applied to the stack's ports wherever an address-like value names one
+ * (APP_URL, ADMIN_APP_URL, API_BASE_URL, CORS_ORIGINS, the WebAuthn origins, and so on),
+ * so every process sees the lane's addresses and none of lane 0's. VITE_ADMIN_APP_URL is
+ * always set, to the lane's admin app. Refuses anything that would leave the lane
+ * sharing a database, a Redis database or a port with lane 0.
+ */
+export function laneOverrides(base: Record<string, string>, lane = LANE): Record<string, string> {
+  if (lane === 0) return {};
+  const offset = lane * LANE_PORT_STEP;
+  const basePorts = stackPorts(base, 0);
+  const own = new Set([basePorts.api, basePorts.adminApi, basePorts.web, basePorts.admin]);
+  const shift = (value: string) =>
+    value.replace(/:(\d{1,5})(?!\d)/g, (match, port: string) => (own.has(Number(port)) ? `:${Number(port) + offset}` : match));
+
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (!ADDRESS_KEY.test(key)) continue;
+    const moved = shift(value);
+    if (moved !== value) out[key] = moved;
+  }
+  out.API_PORT = String(basePorts.api + offset);
+  out.ADMIN_API_PORT = String(basePorts.adminApi + offset);
+  out.APP_URL = shift(base.APP_URL);
+  out.ADMIN_APP_URL = shift(base.ADMIN_APP_URL);
+  out.VITE_ADMIN_APP_URL = out.ADMIN_APP_URL;
+  out.DATABASE_NAME = `chumbaq_l${lane}_e2e`;
+  out.REDIS_DB = String(LANE_REDIS_DB_BASE + lane);
+
+  const lanePorts = stackPorts({ ...base, ...out }, lane);
+  const shared = Object.values(lanePorts).filter((port) => Object.values(basePorts).includes(port));
+  if (shared.length) {
+    throw new Error(`Refusing to run lane ${lane}: it would share ports ${shared.join(', ')} with lane 0. Give APP_URL and ADMIN_APP_URL explicit ports in .env.`);
+  }
+  if (out.DATABASE_NAME === base.DATABASE_NAME || out.REDIS_DB === base.REDIS_DB) {
+    throw new Error(`Refusing to run lane ${lane}: the .env already uses its database or Redis database, so lane 0 and lane ${lane} would wipe each other.`);
+  }
+  return out;
+}
+
+/** The `.env` with the current lane's changes on top: what every process of this lane sees. */
+export function stackEnv(lane = LANE): Record<string, string> {
+  const base = readDotEnv();
+  return { ...base, ...laneOverrides(base, lane) };
 }
 
 /**

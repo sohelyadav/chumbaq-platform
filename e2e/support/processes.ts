@@ -9,7 +9,8 @@ import { LOG_DIR } from './stack';
 /**
  * Starting and stopping the stack's processes. Each runs in its own process group
  * (`detached`), so stopping signals the whole tree (npx → vite, and so on) and a child
- * reparented on the way down is still caught. Output goes to e2e/.artefacts/logs/<name>.log.
+ * reparented on the way down is still caught. Output goes to e2e/.artefacts/logs/<name>.log
+ * (e2e/.artefacts/lane-<n>/logs/ for lane n).
  */
 
 export interface Started {

@@ -2,18 +2,19 @@ import { execFile } from 'child_process';
 import path from 'path';
 import { promisify } from 'util';
 import type { CDPSession, Page } from '@playwright/test';
-import { readDotEnv, REPO_ROOT, stackPorts } from './stack';
+import { REPO_ROOT, stackPorts } from './stack';
 
 const run = promisify(execFile);
 
-/** The admin app's origin, from ADMIN_APP_URL in the .env. */
+/** The admin app's origin, from ADMIN_APP_URL in the .env (moved for this lane). */
 export function adminUrl(pathname: string): string {
-  return `https://localhost:${stackPorts(readDotEnv()).admin}${pathname}`;
+  return `https://localhost:${stackPorts().admin}${pathname}`;
 }
 
 /**
  * Makes someone a super admin the only way there is: the CLI, from apps/api, against
- * the database the .env names (the e2e one; the harness refused any other).
+ * the lane's database (the e2e one; the harness refused any other). globalSetup put the
+ * lane's DATABASE_NAME in this process's environment, which wins over the .env.
  */
 export async function grantSuperAdmin(email: string): Promise<void> {
   await run('npm', ['run', 'admin:grant', '--', email], {
