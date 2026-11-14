@@ -4,6 +4,7 @@ import {
   AccountBillingState,
   CANCEL_END_SLACK_MS,
   FREE_PLAN,
+  SUCCESSOR_LEAD_MS,
   SUCCESSOR_START_SLACK_MS,
   SubscriptionState,
 } from './effective-plan';
@@ -54,7 +55,10 @@ export function effectivePlanCodeSql(now: string): string {
     nxt.status = 'authenticated'
     AND nxt.start_at IS NOT NULL
     AND ${at} < nxt.start_at + interval '${SUCCESSOR_START_SLACK_MS} milliseconds'
-    AND (np.sort_order > ${currentRank} OR NOT ${currentLive}))`;
+    AND CASE
+      WHEN ${currentLive} THEN COALESCE(np.sort_order > ${currentRank}, false)
+      ELSE nxt.start_at <= ${at} + interval '${SUCCESSOR_LEAD_MS} milliseconds'
+    END)`;
   return `(CASE
     WHEN ba.comp_plan_code IS NOT NULL AND (ba.comp_until IS NULL OR ba.comp_until > ${at}) THEN ba.comp_plan_code
     WHEN ${successorCounts} THEN nxt.plan_code

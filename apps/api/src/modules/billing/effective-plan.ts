@@ -14,9 +14,13 @@ import type {
  * The rules, in order:
  * 1. An active comp (no end, or ending after now) gives its plan.
  * 2. An `authenticated` next subscription with a start, until a day after that
- *    start, gives its plan when it outranks the current plan or the current
- *    subscription is not live. An upgrade counts from authorisation; a downgrade
- *    or interval switch waits for it to activate.
+ *    start, gives its plan when the current subscription is live and it outranks
+ *    the current plan, or when the current subscription is not live and its start
+ *    is at most a day away. An upgrade over a live (paid) current counts from
+ *    authorisation; a downgrade or interval switch waits for it to activate.
+ *    Authorising is only a mandate, with nothing charged, so with no live current
+ *    paying for the time before the start, a successor counts only once it is
+ *    about to charge: never for months on a mandate alone.
  * 3. A live current subscription gives its plan, until its period end when it is
  *    cancelling.
  * 4. Otherwise the free plan.
@@ -49,6 +53,12 @@ export const FREE_PLAN = 'free';
 /** How long past its start an authenticated successor still counts, waiting for its activation webhook. */
 export const SUCCESSOR_START_SLACK_MS = 24 * 3600_000;
 
+/**
+ * How long before its start an authenticated successor counts when no live current
+ * subscription covers the time before it.
+ */
+export const SUCCESSOR_LEAD_MS = 24 * 3600_000;
+
 /** How long past its period end a cancelling subscription still counts, waiting for its cancelled webhook. */
 export const CANCEL_END_SLACK_MS = 24 * 3600_000;
 
@@ -80,7 +90,8 @@ function successorCounts(state: AccountBillingState, now: Date, rank: (planCode:
   const next = state.next;
   if (!next || next.status !== 'authenticated' || !next.startAt) return false;
   if (now.getTime() >= next.startAt.getTime() + SUCCESSOR_START_SLACK_MS) return false;
-  return rank(next.planCode) > currentRank(state, now, rank) || !isLive(state.current, now);
+  if (isLive(state.current, now)) return rank(next.planCode) > currentRank(state, now, rank);
+  return next.startAt.getTime() <= now.getTime() + SUCCESSOR_LEAD_MS;
 }
 
 export function effectivePlan(

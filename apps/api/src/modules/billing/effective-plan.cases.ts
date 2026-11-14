@@ -177,6 +177,47 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     null,
     'change_scheduled',
   ],
+  // With no live current subscription paying for the time before it starts, an
+  // authenticated successor (a mandate, no charge yet) counts only once it is
+  // about to charge, never for months on a mandate alone.
+  [
+    'current halted past grace, authenticated successor starting in 300 days',
+    state({
+      current: sub({ planCode: 'a', interval: 'yearly', status: 'halted', graceUntil: at(-DAY) }),
+      next: sub({ planCode: 'b', interval: 'yearly', status: 'authenticated', startAt: at(300 * DAY) }),
+    }),
+    'free',
+    'free',
+    null,
+    'change_scheduled',
+  ],
+  [
+    'no current, authenticated successor starting in 30 days',
+    state({ next: sub({ planCode: 'b', status: 'authenticated', startAt: at(30 * DAY) }) }),
+    'free',
+    'free',
+    null,
+    'change_scheduled',
+  ],
+  [
+    'current expired, authenticated successor starting in 2 days',
+    state({
+      current: sub({ planCode: 'a', status: 'expired' }),
+      next: sub({ planCode: 'b', status: 'authenticated', startAt: at(2 * DAY) }),
+    }),
+    'free',
+    'free',
+    null,
+    'change_scheduled',
+  ],
+  [
+    'no current, authenticated successor starting in 23 hours (inside the lead)',
+    state({ next: sub({ planCode: 'b', status: 'authenticated', startAt: at(23 * HOUR) }) }),
+    'b',
+    'subscription',
+    null,
+    'upgrade_pending',
+  ],
   [
     'authenticated successor with no start does not count',
     state({ next: sub({ planCode: 'b', status: 'authenticated', startAt: null }) }),
