@@ -72,6 +72,18 @@ const STATE_SQL = `
          devices_through AS "devicesThrough"
     FROM usage_rollup_state WHERE id = 1`;
 
+/** What the usage tables cover, or null before the roll-up first ran. Readers need only this. */
+export async function readUsageCoverage(manager: EntityManager): Promise<UsageCoverage | null> {
+  const [state]: RollupState[] = await manager.query(STATE_SQL);
+  if (!state) return null;
+  return {
+    startedOn: state.startedOn,
+    countedFrom: state.firstDay,
+    countedThrough: state.lastClosedDay >= state.firstDay ? state.lastClosedDay : null,
+    mauFrom: monthStart(state.startedOn),
+  };
+}
+
 /**
  * Rolls usage up into `usage_daily`, run hourly by the worker.
  *
@@ -119,15 +131,8 @@ export class UsageRollupService {
   }
 
   /** What the tables cover, or null before the first run. */
-  async readCoverage(manager: EntityManager): Promise<UsageCoverage | null> {
-    const [state]: RollupState[] = await manager.query(STATE_SQL);
-    if (!state) return null;
-    return {
-      startedOn: state.startedOn,
-      countedFrom: state.firstDay,
-      countedThrough: state.lastClosedDay >= state.firstDay ? state.lastClosedDay : null,
-      mauFrom: monthStart(state.startedOn),
-    };
+  readCoverage(manager: EntityManager): Promise<UsageCoverage | null> {
+    return readUsageCoverage(manager);
   }
 
   private async run(runner: QueryRunner, now: Date): Promise<RollupTick> {

@@ -30,3 +30,14 @@ export function monthStart(day: string): string {
   dayStart(day);
   return `${day.slice(0, 7)}-01`;
 }
+
+/** The first day of the month `n` months from the month `day` is in. */
+export function addMonths(day: string, n: number): string {
+  const start = dayStart(monthStart(day));
+  return utcDay(new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + n, 1)));
+}
+
+/** The last day of the UTC month `day` is in. */
+export function monthEnd(day: string): string {
+  return addDays(addMonths(day, 1), -1);
+}

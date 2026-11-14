@@ -1,4 +1,4 @@
-import { addDays, dayStart, monthStart, utcDay } from './usage-days';
+import { addDays, addMonths, dayStart, monthEnd, monthStart, utcDay } from './usage-days';
 
 describe('usage days', () => {
   it('names the UTC day of an instant, whatever the local zone', () => {
@@ -23,6 +23,20 @@ describe('usage days', () => {
   it('names the first day of the month', () => {
     expect(monthStart('2026-11-14')).toBe('2026-11-01');
     expect(monthStart('2026-11-01')).toBe('2026-11-01');
+  });
+
+  it('moves by whole months from the first of a month', () => {
+    expect(addMonths('2026-11-14', -1)).toBe('2026-10-01');
+    expect(addMonths('2026-01-31', -1)).toBe('2025-12-01');
+    expect(addMonths('2026-12-01', 1)).toBe('2027-01-01');
+    expect(addMonths('2026-11-01', -13)).toBe('2025-10-01');
+  });
+
+  it('names the last day of the month', () => {
+    expect(monthEnd('2026-02-10')).toBe('2026-02-28');
+    expect(monthEnd('2028-02-01')).toBe('2028-02-29');
+    expect(monthEnd('2026-10-31')).toBe('2026-10-31');
+    expect(monthEnd('2026-12-05')).toBe('2026-12-31');
   });
 
   it('refuses anything but a YYYY-MM-DD day', () => {
