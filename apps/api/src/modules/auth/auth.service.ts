@@ -137,16 +137,18 @@ export class AuthService {
    */
   async register(dto: RegisterDto, context: RequestContext = {}): Promise<void> {
     const trap = await this.tripwires.findAccount(dto.email);
+    // Counted for every address, a trap's too, so its answer takes no less time. Fails
+    // closed: with Redis away no mail goes out (the answer is the same either way).
+    let admitted = false;
+    try {
+      admitted = await this.preAuth.admitLimited('signup-mail', dto.email, SIGNUP_MAILS_PER_HOUR, 3600);
+    } catch (error) {
+      this.logger.error(`Sign-up mail not counted, so not sent: ${logValue((error as Error).message)}`);
+    }
     if (trap) {
       // Not awaited, and no mail: answered exactly as any other address.
       void this.tripwires.trippedAccount(trap, 'sign_up', context.ipAddress ?? null);
       return;
-    }
-    let admitted = true;
-    try {
-      admitted = await this.preAuth.admitLimited('signup-mail', dto.email, SIGNUP_MAILS_PER_HOUR, 3600);
-    } catch (error) {
-      this.logger.error(`Sign-up mail not counted: ${logValue((error as Error).message)}`);
     }
     if (admitted) this.recovery.startSignup(dto.email, dto.name);
   }
