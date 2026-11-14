@@ -1,3 +1,4 @@
+import { existsSync } from 'fs';
 import path from 'path';
 import type { FullConfig } from '@playwright/test';
 import { portInUse, run, runToEnd, stopAll, waitForOutput, waitForUrl, type Started } from './processes';
@@ -62,6 +63,12 @@ export default async function globalSetup(_config: FullConfig): Promise<() => Pr
   if (process.env.E2E_SKIP_BUILD !== '1') {
     runToEnd('Building @chumbaq/shared', 'npm', ['run', 'build:shared'], REPO_ROOT);
     runToEnd('Building the API', 'npm', ['run', 'build:api'], REPO_ROOT);
+  }
+
+  // A build from before the provider base URL overrides would ignore them and call the
+  // real providers with the run's fake keys, so it is refused rather than started.
+  if (!existsSync(path.join(API_DIR, 'dist/config/provider-endpoints.config.js'))) {
+    throw new Error('apps/api/dist predates the provider base URL overrides: run once without E2E_SKIP_BUILD to rebuild it.');
   }
 
   await resetStores(env);
