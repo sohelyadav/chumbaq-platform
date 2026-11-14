@@ -79,6 +79,13 @@ export class IdentityService {
     dto: IdentifyDto,
     clientIp?: string,
   ): Promise<DeviceIdentityEntity> {
+    // Two first calls for one fingerprint both find no row, and the second INSERT
+    // then fails on the unique (project, fingerprint) key: a 500 the SDK retries.
+    // FOR UPDATE has no row to lock yet, so serialise on the key itself. The one
+    // that waits reads the row the first committed, and takes the update path.
+    await manager.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+      `device_identity:${dto.projectId}:${dto.deviceFingerprint}`,
+    ]);
     let identity = await repository.findOne({
       where: {
         projectId: dto.projectId,

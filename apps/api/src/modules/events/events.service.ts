@@ -7,6 +7,12 @@ import { IdentityService } from '../identity/identity.service';
 import { TrackEventDto } from './dto/track-event.dto';
 import { TrackingConsentService } from '../consent/tracking-consent.service';
 
+/** Postgres `foreign_key_violation`, as the driver reports it through TypeORM. */
+function isForeignKeyViolation(error: unknown): boolean {
+  const driverError = (error as { driverError?: { code?: string } } | null)?.driverError;
+  return driverError?.code === '23503';
+}
+
 @Injectable()
 export class EventsService {
   private readonly logger = new Logger(EventsService.name);
@@ -67,7 +73,19 @@ export class EventsService {
       timestamp: dto.timestamp ? new Date(dto.timestamp) : new Date(),
     } as Partial<UserEventEntity>);
 
-    return this.eventRepository.save(event as UserEventEntity);
+    try {
+      return await this.eventRepository.save(event as UserEventEntity);
+    } catch (error) {
+      // The device was erased between the lookup above and this insert, so its row is
+      // gone and the foreign key refuses the event. The person asked for their data to
+      // go: drop the event and answer 2xx like any other drop, which the SDK does not
+      // retry (a 500 would be retried for ever).
+      if (deviceIdentityId && isForeignKeyViolation(error)) {
+        this.logger.log('Dropped an event for a device erased while it was being recorded');
+        return null;
+      }
+      throw error;
+    }
   }
 
   async trackServerEvent(params: {
