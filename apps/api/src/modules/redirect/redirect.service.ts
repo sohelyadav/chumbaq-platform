@@ -7,6 +7,7 @@ import { ProjectEntity } from '../projects/entities/project.entity';
 import { PlatformDetectorService, DeviceInfo } from './platform-detector.service';
 import { LinkVariantsService } from '../links/link-variants.service';
 import { ProjectSuspensionService } from '../projects/project-suspension.service';
+import { isPlatformHost } from '../../common/platform-hosts';
 
 export interface RedirectResult {
   type: 'redirect' | 'interstitial';
@@ -256,13 +257,29 @@ a:hover { text-decoration: underline; }
     };
   }
 
+  /**
+   * The one project whose app the association files may name for this host, or null.
+   * Never for a host the platform serves itself (every tenant's links and the account
+   * links live there), never when more than one project claims the host (the domain is
+   * typed in by owners and not proven, so a second claim must not decide whose app it
+   * is), and never for a suspended tenant.
+   */
+  private async associatedProject(host: string): Promise<ProjectEntity | null> {
+    if (!host || isPlatformHost(host)) return null;
+    const claims = await this.projectRepository.find({ where: { domain: host }, take: 2 });
+    if (claims.length !== 1) return null;
+    const [project] = claims;
+    if (await this.suspension.isSuspended(project.id)) return null;
+    return project;
+  }
+
   async getAppleAppSiteAssociation(
     domain: string,
   ): Promise<Record<string, any>> {
-    const project = await this.projectRepository.findOne({
-      where: { domain },
-    });
+    const project = await this.associatedProject(domain);
 
+    // webcredentials stays empty: links need only applinks, and naming an app there
+    // would offer it the saved passwords of the host.
     if (!project || !project.iosBundleId || !project.iosTeamId) {
       return {
         applinks: { details: [] },
@@ -283,16 +300,12 @@ a:hover { text-decoration: underline; }
           },
         ],
       },
-      webcredentials: {
-        apps: [appId],
-      },
+      webcredentials: { apps: [] },
     };
   }
 
   async getAssetLinks(domain: string): Promise<Record<string, any>[]> {
-    const project = await this.projectRepository.findOne({
-      where: { domain },
-    });
+    const project = await this.associatedProject(domain);
 
     if (!project || !project.androidPackageName) {
       return [];

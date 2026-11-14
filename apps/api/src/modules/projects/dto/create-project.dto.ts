@@ -1,4 +1,16 @@
-import { IsString, IsOptional, IsUrl, MaxLength } from 'class-validator';
+import { IsString, IsOptional, IsUrl, MaxLength, ValidateBy } from 'class-validator';
+import { isPlatformHost, PLATFORM_HOST_MESSAGE } from '../../../common/platform-hosts';
+
+/** A project may not claim a host the platform serves itself; see `common/platform-hosts.ts`. */
+function IsNotPlatformHost(): PropertyDecorator {
+  return ValidateBy({
+    name: 'isNotPlatformHost',
+    validator: {
+      validate: (value: unknown) => typeof value !== 'string' || !isPlatformHost(value),
+      defaultMessage: () => PLATFORM_HOST_MESSAGE,
+    },
+  });
+}
 
 export class CreateProjectDto {
   @IsString()
@@ -8,6 +20,7 @@ export class CreateProjectDto {
   @IsOptional()
   @IsString()
   @MaxLength(255)
+  @IsNotPlatformHost()
   domain?: string;
 
   @IsOptional()

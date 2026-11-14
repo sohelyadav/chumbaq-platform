@@ -11,7 +11,7 @@ import { LinkVariantsService } from '../links/link-variants.service';
 describe('RedirectService', () => {
   let service: RedirectService;
   let linkRepo: { findOne: jest.Mock };
-  let projectRepo: { findOne: jest.Mock };
+  let projectRepo: { findOne: jest.Mock; find: jest.Mock };
   let platformDetector: { detect: jest.Mock };
   let linkVariantsService: { selectVariant: jest.Mock };
 
@@ -79,7 +79,7 @@ describe('RedirectService', () => {
 
   beforeEach(async () => {
     linkRepo = { findOne: jest.fn() };
-    projectRepo = { findOne: jest.fn() };
+    projectRepo = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]) };
     platformDetector = { detect: jest.fn() };
     linkVariantsService = { selectVariant: jest.fn().mockResolvedValue(null) };
     suspendedProject = null;
@@ -334,7 +334,7 @@ describe('RedirectService', () => {
   // ---------------------------------------------------------------------------
   describe('getAppleAppSiteAssociation', () => {
     it('returns empty applinks when project is not found', async () => {
-      projectRepo.findOne.mockResolvedValueOnce(null);
+      projectRepo.find.mockResolvedValueOnce([]);
 
       const result = await service.getAppleAppSiteAssociation('missing.com');
 
@@ -345,20 +345,21 @@ describe('RedirectService', () => {
     });
 
     it('returns a populated AASA when project has iosBundleId and iosTeamId', async () => {
-      projectRepo.findOne.mockResolvedValueOnce(baseProject);
+      projectRepo.find.mockResolvedValueOnce([baseProject]);
 
       const result = await service.getAppleAppSiteAssociation('example.com');
 
       expect(result.applinks.details).toHaveLength(1);
       expect(result.applinks.details[0].appIDs).toEqual(['TEAM123.com.demo.ios']);
-      expect(result.webcredentials.apps).toEqual(['TEAM123.com.demo.ios']);
+      // Links need applinks only; webcredentials would offer the app the host's saved passwords.
+      expect(result.webcredentials.apps).toEqual([]);
     });
 
     it('returns empty applinks when iosBundleId is missing', async () => {
-      projectRepo.findOne.mockResolvedValueOnce({
+      projectRepo.find.mockResolvedValueOnce([{
         ...baseProject,
         iosBundleId: null,
-      });
+      }]);
 
       const result = await service.getAppleAppSiteAssociation('example.com');
       expect(result.applinks.details).toEqual([]);
@@ -370,7 +371,7 @@ describe('RedirectService', () => {
   // ---------------------------------------------------------------------------
   describe('getAssetLinks', () => {
     it('returns an empty array when project is not found', async () => {
-      projectRepo.findOne.mockResolvedValueOnce(null);
+      projectRepo.find.mockResolvedValueOnce([]);
 
       const result = await service.getAssetLinks('missing.com');
 
@@ -378,17 +379,17 @@ describe('RedirectService', () => {
     });
 
     it('returns an empty array when androidPackageName is missing', async () => {
-      projectRepo.findOne.mockResolvedValueOnce({
+      projectRepo.find.mockResolvedValueOnce([{
         ...baseProject,
         androidPackageName: null,
-      });
+      }]);
 
       const result = await service.getAssetLinks('example.com');
       expect(result).toEqual([]);
     });
 
     it('parses comma-separated fingerprints into an array', async () => {
-      projectRepo.findOne.mockResolvedValueOnce(baseProject);
+      projectRepo.find.mockResolvedValueOnce([baseProject]);
 
       const result = await service.getAssetLinks('example.com');
 
@@ -401,14 +402,69 @@ describe('RedirectService', () => {
     });
 
     it('returns empty fingerprints array when the fingerprints field is empty', async () => {
-      projectRepo.findOne.mockResolvedValueOnce({
+      projectRepo.find.mockResolvedValueOnce([{
         ...baseProject,
         androidSha256Fingerprints: null,
-      });
+      }]);
 
       const result = await service.getAssetLinks('example.com');
 
       expect(result[0].target.sha256_cert_fingerprints).toEqual([]);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Which project may hold a host's association files
+  // ---------------------------------------------------------------------------
+  describe('association files for a host', () => {
+    const saved = { ...process.env };
+    beforeEach(() => {
+      process.env.APP_URL = 'https://app.example.test';
+      process.env.API_BASE_URL = 'https://app.example.test';
+      process.env.SHORT_LINK_DOMAIN = 'go.example.test';
+      process.env.ADMIN_APP_URL = 'https://admin.example.test';
+    });
+    afterEach(() => {
+      process.env = { ...saved };
+    });
+
+    const tenantB = { ...baseProject, id: 'proj-b', iosTeamId: 'TEAMB00001', iosBundleId: 'com.b.app', androidPackageName: 'com.b.app' };
+
+    it.each(['app.example.test', 'APP.example.test', 'go.example.test', 'admin.example.test'])(
+      'never names a tenant app for the platform host %s, even when a project claims it',
+      async (host) => {
+        projectRepo.find.mockResolvedValue([tenantB]);
+
+        expect(await service.getAppleAppSiteAssociation(host)).toEqual({
+          applinks: { details: [] },
+          webcredentials: { apps: [] },
+        });
+        expect(await service.getAssetLinks(host)).toEqual([]);
+      },
+    );
+
+    it('names nobody when two projects claim the same host', async () => {
+      projectRepo.find.mockResolvedValue([baseProject, tenantB]);
+
+      expect((await service.getAppleAppSiteAssociation('links.acme.test')).applinks.details).toEqual([]);
+      expect(await service.getAssetLinks('links.acme.test')).toEqual([]);
+    });
+
+    it('withdraws a suspended tenant\'s app', async () => {
+      suspendedProject = 'proj-1';
+      projectRepo.find.mockResolvedValue([baseProject]);
+
+      expect((await service.getAppleAppSiteAssociation('links.acme.test')).applinks.details).toEqual([]);
+      expect(await service.getAssetLinks('links.acme.test')).toEqual([]);
+    });
+
+    it('still names the one unsuspended project that holds its own host', async () => {
+      projectRepo.find.mockResolvedValue([baseProject]);
+
+      expect((await service.getAppleAppSiteAssociation('links.acme.test')).applinks.details[0].appIDs).toEqual([
+        'TEAM123.com.demo.ios',
+      ]);
+      expect((await service.getAssetLinks('links.acme.test'))[0].target.package_name).toBe('com.demo');
     });
   });
 
