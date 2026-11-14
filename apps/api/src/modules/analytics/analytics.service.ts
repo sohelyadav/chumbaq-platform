@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, Logger, Inject, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { dateTruncUnit } from '../../common/date-trunc-unit';
 import * as geoip from 'geoip-lite';
 import { ClickEventEntity } from './entities/click-event.entity';
 import { ConversionEventEntity } from '../conversions/entities/conversion-event.entity';
@@ -273,8 +274,7 @@ export class AnalyticsService {
     end: Date,
     granularity: 'hour' | 'day' | 'week' = 'day',
   ): Promise<{ date: string; clicks: number }[]> {
-    const allowedGranularities = ['hour', 'day', 'week'] as const;
-    const gran = allowedGranularities.includes(granularity) ? granularity : 'day';
+    const gran = dateTruncUnit(granularity);
 
     const result = await this.clickEventRepository
       .createQueryBuilder('click')
@@ -641,8 +641,7 @@ export class AnalyticsService {
     end: Date,
     granularity: 'hour' | 'day' | 'week' = 'day',
   ): Promise<{ date: string; clicks: number }[]> {
-    const allowedGranularities = ['hour', 'day', 'week'] as const;
-    const gran = allowedGranularities.includes(granularity) ? granularity : 'day';
+    const gran = dateTruncUnit(granularity);
 
     const result = await this.clickEventRepository
       .createQueryBuilder('click')

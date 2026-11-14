@@ -406,6 +406,23 @@ describe('EventsService', () => {
         eventName: 'signup',
       });
     });
+
+    // granularity arrives as a bare query string: its union type exists only at
+    // compile time, so a value that is not one of the three units must never reach
+    // the SQL text.
+    it.each([
+      ["day', event.timestamp)::text || (SELECT 'INJECTED') || DATE_TRUNC('day"],
+      ['month'],
+      [''],
+      [['hour', 'day']],
+    ])('falls back to day and keeps %j out of the SQL', async (granularity) => {
+      qb.getRawMany.mockResolvedValueOnce([]);
+
+      await service.getEventVolume('proj-1', { granularity: granularity as any });
+
+      expect(qb.select).toHaveBeenCalledWith("DATE_TRUNC('day', event.timestamp)", 'date');
+      expect(qb.groupBy).toHaveBeenCalledWith("DATE_TRUNC('day', event.timestamp)");
+    });
   });
 
   // ---------------------------------------------------------------------------

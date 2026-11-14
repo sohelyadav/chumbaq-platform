@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { dateTruncUnit } from '../../common/date-trunc-unit';
 import { UserEventEntity } from './entities/user-event.entity';
 import { IdentityService } from '../identity/identity.service';
 import { TrackEventDto } from './dto/track-event.dto';
@@ -175,7 +176,7 @@ export class EventsService {
       eventName?: string;
     },
   ): Promise<{ date: string; count: number }[]> {
-    const gran = opts.granularity || 'day';
+    const gran = dateTruncUnit(opts.granularity);
     const now = new Date();
     const start = opts.start ? new Date(opts.start) : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     const end = opts.end ? new Date(opts.end) : now;

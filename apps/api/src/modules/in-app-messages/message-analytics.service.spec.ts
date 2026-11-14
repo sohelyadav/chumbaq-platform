@@ -204,6 +204,24 @@ describe('MessageAnalyticsService', () => {
 
       expect(qb.select).toHaveBeenCalledWith(expect.stringContaining("'hour'"), 'date');
     });
+
+    // granularity arrives as a bare query string: its union type exists only at
+    // compile time, so a value that is not one of the three units must never reach
+    // the SQL text.
+    it.each([
+      ["day', imp.created_at)::text || (SELECT 'INJECTED') || DATE_TRUNC('day"],
+      ['month'],
+      [['hour', 'day']],
+    ])('falls back to day and keeps %j out of the SQL', async (granularity) => {
+      const qb = makeQb();
+      qb.getRawMany.mockResolvedValueOnce([]);
+      qbQueue.push(qb);
+
+      await service.getTimeseries('m1', 'proj-1', { granularity: granularity as any });
+
+      expect(qb.select).toHaveBeenCalledWith("DATE_TRUNC('day', imp.created_at)", 'date');
+      expect(qb.groupBy).toHaveBeenCalledWith("DATE_TRUNC('day', imp.created_at)");
+    });
   });
 
   describe('getPlatformBreakdown', () => {

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { dateTruncUnit } from '../../common/date-trunc-unit';
 import { WidgetEventEntity } from './entities/widget-event.entity';
 
 @Injectable()
@@ -38,8 +39,7 @@ export class WidgetAnalyticsService {
     end: Date,
     granularity: 'hour' | 'day' | 'week' = 'day',
   ): Promise<{ date: string; impressions: number; clicks: number }[]> {
-    const allowedGranularities = ['hour', 'day', 'week'] as const;
-    const gran = allowedGranularities.includes(granularity) ? granularity : 'day';
+    const gran = dateTruncUnit(granularity);
 
     const result = await this.eventRepository
       .createQueryBuilder('event')

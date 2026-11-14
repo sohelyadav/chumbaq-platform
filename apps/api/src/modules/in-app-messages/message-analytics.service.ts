@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { dateTruncUnit } from '../../common/date-trunc-unit';
 import { InAppMessageImpressionEntity } from './entities/in-app-message-impression.entity';
 import { InAppMessageEntity } from './entities/in-app-message.entity';
 
@@ -119,7 +120,7 @@ export class MessageAnalyticsService {
     projectId: string,
     opts: { start?: string; end?: string; granularity?: 'hour' | 'day' | 'week' },
   ): Promise<TimeSeries[]> {
-    const gran = opts.granularity || 'day';
+    const gran = dateTruncUnit(opts.granularity);
     const now = new Date();
     const start = opts.start ? new Date(opts.start) : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     const end = opts.end ? new Date(opts.end) : now;
