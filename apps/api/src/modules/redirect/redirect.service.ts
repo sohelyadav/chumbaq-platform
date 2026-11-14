@@ -242,8 +242,10 @@ a:hover { text-decoration: underline; }
       throw new NotFoundException('Link not found');
     }
 
-    // The preview carries the destination URL.
-    if (await this.suspension.isSuspended(link.projectId)) {
+    // The preview carries the destination URL, so it is refused whenever the redirect
+    // would be: turned off, expired, or a suspended tenant's.
+    const expired = link.expiresAt && new Date(link.expiresAt) < new Date();
+    if (!link.isActive || expired || (await this.suspension.isSuspended(link.projectId))) {
       throw new NotFoundException('Link is no longer active');
     }
 

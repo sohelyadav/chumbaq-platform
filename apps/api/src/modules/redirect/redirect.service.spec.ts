@@ -332,6 +332,18 @@ describe('RedirectService', () => {
   // ---------------------------------------------------------------------------
   // getAppleAppSiteAssociation
   // ---------------------------------------------------------------------------
+  describe('getLinkPreview of a link that would not redirect', () => {
+    it.each([
+      ['turned off', { isActive: false }],
+      ['expired', { expiresAt: new Date(Date.now() - 60_000) }],
+    ])('does not give out the destination of a link %s', async (_state, over) => {
+      linkRepo.findOne.mockResolvedValueOnce(baseLink(over as Partial<LinkEntity>));
+      const error = await service.getLinkPreview('abc').catch((caught) => caught);
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect(JSON.stringify(error.getResponse())).not.toContain('example.com');
+    });
+  });
+
   describe('getAppleAppSiteAssociation', () => {
     it('returns empty applinks when project is not found', async () => {
       projectRepo.find.mockResolvedValueOnce([]);
