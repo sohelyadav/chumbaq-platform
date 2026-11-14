@@ -153,13 +153,11 @@ export default function UsersListPage() {
                     <TableCell>
                       <Link to={`/projects/${projectId}/users/${member.id}`} className="block">
                         <div className="flex items-center gap-3">
-                          {member.avatar ? (
-                            <img src={member.avatar} alt="" className="size-8 rounded-full object-cover" />
-                          ) : (
-                            <div className="flex aspect-square size-8 items-center justify-center rounded-full bg-primary/10 text-primary text-xs font-medium">
-                              {(member.displayName || '?').charAt(0).toUpperCase()}
-                            </div>
-                          )}
+                          {/* Initials, never the SDK-set avatar URL: anyone with the app's key
+                              can set it, and loading it tells its host each viewer's IP. */}
+                          <div className="flex aspect-square size-8 items-center justify-center rounded-full bg-primary/10 text-primary text-xs font-medium">
+                            {(member.displayName || '?').charAt(0).toUpperCase()}
+                          </div>
                           <div>
                             <p className="font-medium text-sm hover:underline">{member.displayName}</p>
                             {member.email && <p className="text-xs text-muted-foreground">{member.email}</p>}

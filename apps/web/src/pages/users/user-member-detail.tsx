@@ -440,13 +440,10 @@ export default function UserMemberDetailPage() {
         <aside className="space-y-3 xl:sticky xl:top-4 self-start">
           <div className="rounded-xl border border-border/60 bg-card p-4">
             <div className="mb-4 text-center">
-              {person.avatar ? (
-                <img src={person.avatar} alt="" className="mx-auto mb-2.5 h-16 w-16 rounded-full object-cover ring-2 ring-border" />
-              ) : (
-                <div className="mx-auto mb-2.5 flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-primary/20 to-primary/5 text-primary ring-2 ring-border">
-                  <span className="text-xl font-bold">{(person.displayName || '?').charAt(0).toUpperCase()}</span>
-                </div>
-              )}
+              {/* Initials, never the SDK-set avatar URL (see users-list.tsx). */}
+              <div className="mx-auto mb-2.5 flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-primary/20 to-primary/5 text-primary ring-2 ring-border">
+                <span className="text-xl font-bold">{(person.displayName || '?').charAt(0).toUpperCase()}</span>
+              </div>
               <h2 className="text-xs font-semibold">User Profile</h2>
               <p className="mt-1 break-all text-xs text-muted-foreground">{displayName}</p>
             </div>
