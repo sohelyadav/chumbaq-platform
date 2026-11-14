@@ -69,10 +69,21 @@ export class CohortSyncScheduler {
     const suspended = await this.suspension.suspendedProjectIds();
     const syncable = cohorts.filter((cohort) => !suspended.has(cohort.projectId));
 
-    for (const cohort of syncable) {
+    // Not for a cohort that already has a job waiting or running. One lane serves every
+    // tenant, so while one large cohort holds it, every other cohort's job waits, and
+    // each hour would otherwise add another copy of each (a live sync never touches
+    // updated_at, so after two hours it also looks stranded).
+    const queued = new Set(
+      (await this.cohortQueue.getJobs(['waiting', 'delayed', 'active', 'prioritized']))
+        .map((job) => job?.data?.cohortId)
+        .filter((id): id is string => typeof id === 'string'),
+    );
+    const due = syncable.filter((cohort) => !queued.has(cohort.id));
+
+    for (const cohort of due) {
       await this.cohortQueue.add(JOB_SYNC_COHORT, { cohortId: cohort.id });
     }
 
-    return syncable.length;
+    return due.length;
   }
 }

@@ -13,7 +13,7 @@ describe('CohortSyncScheduler', () => {
   let scheduler: CohortSyncScheduler;
 
   const cohortRepo = { find: jest.fn() };
-  const cohortQueue = { add: jest.fn() };
+  const cohortQueue = { add: jest.fn(), getJobs: jest.fn(async () => [] as unknown[]) };
   let suspendedProjects = new Set<string>();
   const suspension = { suspendedProjectIds: jest.fn(async () => suspendedProjects) };
 
@@ -40,6 +40,17 @@ describe('CohortSyncScheduler', () => {
 
     expect(cohortQueue.add).toHaveBeenCalledTimes(2);
     expect(cohortQueue.add).toHaveBeenCalledWith('sync-cohort', { cohortId: 'c-1' });
+    expect(cohortQueue.add).toHaveBeenCalledWith('sync-cohort', { cohortId: 'c-2' });
+  });
+
+  it('does not add a second job for a cohort whose job is still waiting or running', async () => {
+    cohortRepo.find.mockResolvedValueOnce([{ id: 'c-1' }, { id: 'c-2' }]);
+    cohortQueue.getJobs.mockResolvedValueOnce([{ data: { cohortId: 'c-1' } }]);
+
+    await expect(scheduler.enqueueDueCohorts()).resolves.toBe(1);
+
+    expect(cohortQueue.getJobs).toHaveBeenCalledWith(['waiting', 'delayed', 'active', 'prioritized']);
+    expect(cohortQueue.add).toHaveBeenCalledTimes(1);
     expect(cohortQueue.add).toHaveBeenCalledWith('sync-cohort', { cohortId: 'c-2' });
   });
 
