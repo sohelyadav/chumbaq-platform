@@ -31,7 +31,7 @@ describe('TotpController', () => {
     new AuthCookiesService({ get: () => true } as unknown as ConfigService, jwt),
   );
   const req = { headers: {} } as Request;
-  const res = { cookie: jest.fn() } as unknown as Response;
+  const res = { cookie: jest.fn(), clearCookie: jest.fn() } as unknown as Response;
 
   it.each(['setup', 'confirm', 'disable', 'regenerate'] as const)(
     '%s needs a session and a recent sign-in',
@@ -58,7 +58,7 @@ describe('TotpController', () => {
     const body = await call();
     expect(body.tokens).toEqual({ accessToken: 'access' });
     expect(res.cookie).toHaveBeenCalledWith(
-      'chumbaq_refresh',
+      '__Host-chumbaq_refresh',
       expect.any(String),
       expect.objectContaining({ httpOnly: true, sameSite: 'strict' }),
     );

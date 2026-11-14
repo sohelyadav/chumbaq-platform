@@ -99,8 +99,8 @@ describe('Staff sign-in (integration)', () => {
   const customerApi = (method: string, path: string, opts?: Parameters<typeof send>[3]) =>
     send(customer.base, method, `/api${path}`, opts);
 
-  const refreshCookieOf = (reply: Reply) => /chumbaq_staff_refresh=([^;]*)/.exec(reply.cookie ?? '')?.[1] ?? null;
-  const asCookie = (value: string) => `chumbaq_staff_refresh=${value}`;
+  const refreshCookieOf = (reply: Reply) => /__Host-chumbaq_staff_refresh=([^;]*)/.exec(reply.cookie ?? '')?.[1] ?? null;
+  const asCookie = (value: string) => `__Host-chumbaq_staff_refresh=${value}`;
 
   const makeUser = async (name: string, { staff = true } = {}) => {
     const email = `${name}-${randomUUID().slice(0, 8)}${DOMAIN}`;
@@ -562,11 +562,12 @@ describe('Staff sign-in (integration)', () => {
       expect(signedIn.status).toBe(200);
       expect(signedIn.body.data).toMatchObject({ step: 'signed_in', session: { enrolmentOnly: false, idleTimeoutSeconds: 1800 } });
       const cookie = signedIn.cookie as string;
-      expect(cookie).toMatch(/^chumbaq_staff_refresh=[0-9a-f-]{36}\.[A-Za-z0-9_-]{43};/);
+      expect(cookie).toMatch(/^__Host-chumbaq_staff_refresh=[0-9a-f-]{36}\.[A-Za-z0-9_-]{43};/);
       expect(cookie).toContain('HttpOnly');
       expect(cookie).toContain('Secure');
       expect(cookie).toContain('SameSite=Strict');
-      expect(cookie).toContain('Path=/api/staff/auth/session');
+      expect(cookie).toContain('Path=/;');
+      expect(cookie).not.toContain('Domain=');
       expect(cookie).not.toMatch(/Domain=/i);
       // Only its hash is stored.
       const [stored] = await ds.query(`SELECT current_token_hash FROM staff_sessions WHERE id = $1`, [signedIn.body.data.session.id]);
@@ -772,7 +773,7 @@ describe('Staff sign-in (integration)', () => {
       expect((await adminApi('GET', '/overview', { token: customerAccess })).status).toBe(401);
       expect((await staffApi('GET', '/me', { token: customerAccess })).status).toBe(401);
 
-      const asCustomerCookie = await customerApi('POST', '/auth/refresh', { cookie: `chumbaq_refresh=${refresh}` });
+      const asCustomerCookie = await customerApi('POST', '/auth/refresh', { cookie: `__Host-chumbaq_refresh=${refresh}` });
       expect(asCustomerCookie.status).toBe(401);
 
       // The customer list never shows a staff key.
@@ -843,7 +844,7 @@ describe('Staff sign-in (integration)', () => {
       const refreshed = await staffApi('POST', '/session/refresh', { cookie: asCookie(refresh) });
       expect(refreshed.status).toBe(401);
       expect(refreshed.body.message).toBe(STAFF_SESSION_IDLE_MESSAGE);
-      expect(refreshed.cookie).toMatch(/chumbaq_staff_refresh=;.*Expires=Thu, 01 Jan 1970/);
+      expect(refreshed.cookie).toMatch(/__Host-chumbaq_staff_refresh=;.*Expires=Thu, 01 Jan 1970/);
     });
 
     it('counts real requests as activity, at most once a minute, and refreshes not at all', async () => {
@@ -878,7 +879,7 @@ describe('Staff sign-in (integration)', () => {
       const { user, token, refresh } = await signedInStaff('logout');
       const out = await staffApi('POST', '/session/logout', { token });
       expect(out.status).toBe(204);
-      expect(out.cookie).toMatch(/chumbaq_staff_refresh=;/);
+      expect(out.cookie).toMatch(/__Host-chumbaq_staff_refresh=;/);
       expect((await staffApi('GET', '/me', { token })).status).toBe(401);
       expect((await staffApi('POST', '/session/refresh', { cookie: asCookie(refresh) })).status).toBe(401);
       expect((await auditActions(user.id)).map((r) => r.action)).toContain('staff.signed_out');

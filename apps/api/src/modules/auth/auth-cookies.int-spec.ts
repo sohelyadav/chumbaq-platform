@@ -136,11 +136,13 @@ describe('Refresh cookie (integration)', () => {
 
       expect(Object.keys(body.tokens)).toEqual(['accessToken']);
       const cookie = setCookie(response);
-      expect(cookie).toMatch(/^chumbaq_refresh=[\w-]+\.[\w-]+\.[\w-]+;/);
+      // __Host-: no other host under the site can plant one (see SessionCookie).
+      expect(cookie).toMatch(/^__Host-chumbaq_refresh=[\w-]+\.[\w-]+\.[\w-]+;/);
       expect(cookie).toContain('HttpOnly');
       expect(cookie).toContain('Secure');
       expect(cookie).toContain('SameSite=Strict');
-      expect(cookie).toContain('Path=/api/auth');
+      expect(cookie).toContain('Path=/;');
+      expect(cookie).not.toContain('Domain=');
     });
 
     it('expires with the token', async () => {
@@ -163,6 +165,9 @@ describe('Refresh cookie (integration)', () => {
       const cookie = setCookie(await login());
       expect(cookie).not.toContain('Secure');
       expect(cookie).toContain('HttpOnly');
+      // Browsers refuse __Host- without Secure, so the bare name on its own path.
+      expect(cookie).toMatch(/^chumbaq_refresh=[\w-]+\./);
+      expect(cookie).toContain('Path=/api/auth');
     });
 
     it('is on registering too', async () => {
@@ -221,7 +226,7 @@ describe('Refresh cookie (integration)', () => {
       const response = await post('refresh', { refreshToken: token }, CLIENT);
 
       expect(response.status).toBe(401);
-      expect(setCookie(response)).not.toMatch(/^chumbaq_refresh=[\w-]+\./);
+      expect(setCookie(response)).not.toMatch(/^__Host-chumbaq_refresh=[\w-]+\./);
       expect((await post('refresh', {}, { cookie, ...CLIENT })).status).toBe(200);
     });
 
@@ -232,7 +237,7 @@ describe('Refresh cookie (integration)', () => {
         { expiresIn: '5m' },
       );
 
-      const cookie = `chumbaq_refresh=${forged}`;
+      const cookie = `__Host-chumbaq_refresh=${forged}`;
       expect((await post('refresh', {}, { cookie, ...CLIENT })).status).toBe(401);
     });
 
@@ -244,7 +249,7 @@ describe('Refresh cookie (integration)', () => {
       const replay = await post('refresh', {}, { cookie: first, ...CLIENT });
 
       expect(replay.status).toBe(401);
-      expect(setCookie(replay)).toMatch(/^chumbaq_refresh=;/);
+      expect(setCookie(replay)).toMatch(/^__Host-chumbaq_refresh=;/);
       expect((await post('refresh', {}, { cookie: second, ...CLIENT })).status).toBe(401);
     });
 
@@ -256,6 +261,33 @@ describe('Refresh cookie (integration)', () => {
 
       expect(response.status).toBe(500);
       expect(setCookie(response)).toBe('');
+    });
+
+    // Another host under the site can set `Domain=<site>; Path=/api/auth/refresh`, which
+    // browsers send first. Only a __Host- cookie can have come from this host.
+    it('uses its own cookie, not one another host planted under the bare name', async () => {
+      const victim = pair(await login());
+      const planter = pair(await login()).replace('__Host-', '');
+
+      const response = await post('refresh', {}, { cookie: `${planter}; ${victim}`, ...CLIENT });
+
+      expect(response.status).toBe(200);
+      // The session refreshed is the victim's, not the planter's.
+      const sidOf = (cookie: string) => jwt.decode<{ sid: string }>(cookie.slice(cookie.indexOf('=') + 1)).sid;
+      expect(sidOf(pair(response))).toBe(sidOf(victim));
+      expect(sidOf(pair(response))).not.toBe(sidOf(planter));
+    });
+
+    it('never takes a bare cookie, which any host under the site could have set', async () => {
+      const planted = pair(await login()).replace('__Host-', '');
+
+      const response = await post('refresh', {}, { cookie: planted, ...CLIENT });
+
+      expect(response.status).toBe(401);
+      expect(setCookie(response)).not.toMatch(/chumbaq_refresh=[\w-]+\./);
+      // Unread, it is cleared by the next sign-in.
+      const [, cleared] = (await login()).headers.getSetCookie();
+      expect(cleared).toMatch(/^chumbaq_refresh=; Path=\/api\/auth;/);
     });
   });
 
@@ -272,8 +304,9 @@ describe('Refresh cookie (integration)', () => {
       const response = await post(route, {}, { authorization });
 
       expect(response.status).toBe(204);
-      expect(setCookie(response)).toMatch(/^chumbaq_refresh=;/);
-      expect(setCookie(response)).toContain('Path=/api/auth');
+      expect(setCookie(response)).toMatch(/^__Host-chumbaq_refresh=;/);
+      expect(setCookie(response)).toContain('Path=/;');
+      expect(response.headers.getSetCookie()[1]).toMatch(/^chumbaq_refresh=; Path=\/api\/auth;/);
       expect((await post('refresh', {}, { cookie, ...CLIENT })).status).toBe(401);
     });
   });

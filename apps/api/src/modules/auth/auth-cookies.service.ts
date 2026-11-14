@@ -2,11 +2,12 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import type { Request, Response } from 'express';
-import { readCookie } from '../../common/cookies';
+import { SessionCookie } from '../../common/cookies';
 import type { AuthTokens } from './auth.service';
 
+/** `__Host-chumbaq_refresh` on `Path=/` when Secure; see `SessionCookie`. */
 const REFRESH_COOKIE = 'chumbaq_refresh';
-/** Only the routes that need it ever receive it. */
+/** The path of the bare name, used only while Secure is off. */
 const REFRESH_COOKIE_PATH = '/api/auth';
 
 /**
@@ -26,22 +27,18 @@ export class AuthCookiesService {
     private readonly jwt: JwtService,
   ) {}
 
-  private options() {
-    return {
-      httpOnly: true,
-      secure: this.config.get<boolean>('app.authCookieSecure') ?? true,
-      sameSite: 'strict' as const,
-      path: REFRESH_COOKIE_PATH,
-    };
+  private cookie(): SessionCookie {
+    return new SessionCookie(
+      REFRESH_COOKIE,
+      REFRESH_COOKIE_PATH,
+      this.config.get<boolean>('app.authCookieSecure') ?? true,
+    );
   }
 
   /** Sets the cookie and returns what may go in the response body. */
   deliver(res: Response, tokens: AuthTokens): { accessToken: string } {
     const { exp } = this.jwt.decode<{ exp: number }>(tokens.refreshToken);
-    res.cookie(REFRESH_COOKIE, tokens.refreshToken, {
-      ...this.options(),
-      maxAge: exp * 1000 - Date.now(),
-    });
+    this.cookie().set(res, tokens.refreshToken, exp * 1000 - Date.now());
     return { accessToken: tokens.accessToken };
   }
 
@@ -53,10 +50,10 @@ export class AuthCookiesService {
   }
 
   clear(res: Response): void {
-    res.clearCookie(REFRESH_COOKIE, this.options());
+    this.cookie().clear(res);
   }
 
   read(req: Request): string | undefined {
-    return readCookie(req, REFRESH_COOKIE);
+    return this.cookie().read(req);
   }
 }

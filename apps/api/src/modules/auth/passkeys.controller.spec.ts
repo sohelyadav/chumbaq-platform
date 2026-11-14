@@ -33,14 +33,14 @@ describe('PasskeysController', () => {
 
     expect(body.tokens).toEqual({ accessToken: 'access' });
     expect(res.cookie).toHaveBeenCalledWith(
-      'chumbaq_refresh',
+      '__Host-chumbaq_refresh',
       expect.any(String),
       expect.objectContaining({ httpOnly: true, sameSite: 'strict', secure: true }),
     );
   });
 });
 
-const res = { cookie: jest.fn() } as unknown as Response;
+const res = { cookie: jest.fn(), clearCookie: jest.fn() } as unknown as Response;
 
 describe('PasskeysController guards', () => {
   it.each(['verifySecondFactor', 'verifyPasswordless'] as const)(
