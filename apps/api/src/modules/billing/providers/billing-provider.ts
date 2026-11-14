@@ -111,6 +111,12 @@ export interface BillingProvider {
   readonly enabled: boolean;
   /** Public: Checkout in the browser needs it. Null while billing is off. */
   readonly keyId: string | null;
+  /**
+   * `name` is put into the provider's rules for a customer name (Razorpay: 3 to 50
+   * characters from a limited set; see `razorpay-customer.ts`), which is only a label
+   * there. A name with too little left, or an email the provider would refuse, throws
+   * `InvalidCustomerInputError` naming the field, before any request.
+   */
   createCustomer(input: { name: string; email: string; gstin: string | null; accountRef: string }): Promise<{ id: string }>;
   createSubscription(input: {
     planId: string;
@@ -122,6 +128,7 @@ export interface BillingProvider {
   cancelSubscription(id: string, atCycleEnd: boolean): Promise<ProviderSubscription>;
   fetchSubscription(id: string): Promise<ProviderSubscription>;
   fetchPlan(id: string): Promise<ProviderPlan>;
+  /** Every invoice of the subscription, newest first, however many pages the provider splits them into. */
   listSubscriptionInvoices(subscriptionId: string): Promise<ProviderInvoice[]>;
   notifyInvoiceByEmail(invoiceId: string): Promise<void>;
   /** Over the raw bytes received, before anything is parsed. */

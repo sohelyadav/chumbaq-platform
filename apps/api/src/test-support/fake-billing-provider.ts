@@ -6,14 +6,19 @@ import {
   ProviderPlan,
   ProviderSubscription,
 } from '../modules/billing/providers/billing-provider';
+import { razorpayCustomerEmail, razorpayCustomerName } from '../modules/billing/providers/razorpay-customer';
 import { RAZORPAY_ID_PATTERN, parseRazorpayEvent } from '../modules/billing/providers/razorpay-payload';
 import { verifyRazorpaySignature } from '../modules/billing/providers/razorpay-signature';
-import { InvalidProviderIdError } from '../modules/billing/providers/razorpay.provider';
+import { InvalidProviderIdError, RazorpayProvider } from '../modules/billing/providers/razorpay.provider';
 
 type Method = Exclude<keyof BillingProvider, 'enabled' | 'keyId'>;
 
 export const FAKE_BILLING_KEY_ID = 'rzp_test_FakeKey000001';
 export const FAKE_BILLING_WEBHOOK_SECRET = 'fake_webhook_secret';
+
+/** Razorpay's list defaults: 10 items a page unless `count` asks for more, and never over 100. */
+const LIST_DEFAULT_COUNT = 10;
+const LIST_MAX_COUNT = 100;
 
 /**
  * A billing provider for integration specs, held in memory: no request leaves the
@@ -23,6 +28,14 @@ export const FAKE_BILLING_WEBHOOK_SECRET = 'fake_webhook_secret';
  * are a 400 `BillingProviderError`, ids that are not Razorpay-shaped are refused
  * before anything else, and webhooks are checked with the real signature check
  * and read by the real parser, so a spec signs the bodies it posts.
+ *
+ * Invoices are listed the way Razorpay lists them, not handed over whole: the real
+ * `RazorpayProvider.listSubscriptionInvoices` runs against an in-memory
+ * `GET /v1/invoices` that answers newest first, 10 a page unless `count` asks for
+ * more (at most 100, a 400 beyond), from `skip`. So a spec with more invoices than
+ * one page holds goes red if the provider stops paging. Their times come back in
+ * whole seconds, as Razorpay's do. Customer names and emails go through Razorpay's
+ * rules (`razorpay-customer.ts`), so the fake refuses what Razorpay would.
  */
 export class FakeBillingProvider implements BillingProvider {
   readonly enabled = true;
@@ -32,6 +45,8 @@ export class FakeBillingProvider implements BillingProvider {
   readonly plans = new Map<string, ProviderPlan>();
   readonly invoices = new Map<string, ProviderInvoice>();
   readonly customers = new Map<string, { name: string; email: string; gstin: string | null; accountRef: string }>();
+  /** Every `GET /v1/invoices` URL the listing asked for, in order. */
+  readonly invoiceListRequests: string[] = [];
   private readonly failures = new Map<Method, Error[]>();
   private readonly webhookSecret: string;
   private sequence = 0;
@@ -52,6 +67,7 @@ export class FakeBillingProvider implements BillingProvider {
     this.subscriptions.set(subscription.id, { ...subscription });
   }
 
+  /** Add invoices in the order they were issued: lists answer newest first. */
   addInvoice(invoice: ProviderInvoice): void {
     this.invoices.set(invoice.id, { ...invoice });
   }
@@ -71,6 +87,7 @@ export class FakeBillingProvider implements BillingProvider {
     this.plans.clear();
     this.invoices.clear();
     this.customers.clear();
+    this.invoiceListRequests.length = 0;
     this.failures.clear();
   }
 
@@ -81,8 +98,10 @@ export class FakeBillingProvider implements BillingProvider {
     accountRef: string;
   }): Promise<{ id: string }> {
     this.enter('createCustomer', [input]);
+    const name = razorpayCustomerName(input.name);
+    const email = razorpayCustomerEmail(input.email);
     const id = this.newId('cust');
-    this.customers.set(id, { ...input });
+    this.customers.set(id, { ...input, name, email });
     return { id };
   }
 
@@ -142,10 +161,10 @@ export class FakeBillingProvider implements BillingProvider {
 
   async listSubscriptionInvoices(subscriptionId: string): Promise<ProviderInvoice[]> {
     this.enter('listSubscriptionInvoices', [subscriptionId]);
-    checkedId(subscriptionId, 'subscriptionId');
-    return [...this.invoices.values()]
-      .filter((invoice) => invoice.subscriptionId === subscriptionId)
-      .map((invoice) => ({ ...invoice }));
+    const lister = new RazorpayProvider({ keyId: this.keyId, keySecret: 'unused', webhookSecret: 'unused' }, (input) =>
+      Promise.resolve(this.answerInvoiceList(String(input))),
+    );
+    return lister.listSubscriptionInvoices(subscriptionId);
   }
 
   async notifyInvoiceByEmail(invoiceId: string): Promise<void> {
@@ -162,6 +181,29 @@ export class FakeBillingProvider implements BillingProvider {
   parseWebhook(body: unknown): BillingEvent {
     this.calls.push({ method: 'parseWebhook', args: [body] });
     return parseRazorpayEvent(body);
+  }
+
+  /** `GET /v1/invoices?subscription_id=…&count=…&skip=…`, answered as Razorpay answers it. */
+  answerInvoiceList(url: string): Response {
+    this.invoiceListRequests.push(url);
+    const parsed = new URL(url);
+    if (parsed.pathname !== '/v1/invoices') throw new Error(`Unexpected request: ${url}`);
+    const count = parsed.searchParams.has('count') ? Number(parsed.searchParams.get('count')) : LIST_DEFAULT_COUNT;
+    const skip = parsed.searchParams.has('skip') ? Number(parsed.searchParams.get('skip')) : 0;
+    if (count > LIST_MAX_COUNT) return razorpayError(400, `The count may not be greater than ${LIST_MAX_COUNT}.`);
+    if (!Number.isSafeInteger(count) || count < 1 || !Number.isSafeInteger(skip) || skip < 0) {
+      return razorpayError(400, 'The count and skip must be whole numbers.');
+    }
+    const subscriptionId = parsed.searchParams.get('subscription_id');
+    const items = [...this.invoices.values()]
+      .filter((invoice) => invoice.subscriptionId === subscriptionId)
+      .reverse()
+      .slice(skip, skip + count)
+      .map(toRazorpayInvoice);
+    return new Response(JSON.stringify({ entity: 'collection', count: items.length, items }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   private enter(method: Method, args: unknown[]): void {
@@ -187,6 +229,35 @@ export class FakeBillingProvider implements BillingProvider {
 
 function checkedId(value: string, field: string): void {
   if (typeof value !== 'string' || !RAZORPAY_ID_PATTERN.test(value)) throw new InvalidProviderIdError(field);
+}
+
+const seconds = (value: Date | null): number | null => (value === null ? null : Math.floor(value.getTime() / 1000));
+
+function toRazorpayInvoice(invoice: ProviderInvoice): Record<string, unknown> {
+  return {
+    id: invoice.id,
+    entity: 'invoice',
+    subscription_id: invoice.subscriptionId,
+    customer_id: invoice.customerId,
+    payment_id: invoice.paymentId,
+    status: invoice.status,
+    amount: invoice.amountPaise,
+    tax_amount: invoice.providerTaxPaise,
+    currency: invoice.currency,
+    billing_start: seconds(invoice.billingStart),
+    billing_end: seconds(invoice.billingEnd),
+    issued_at: seconds(invoice.issuedAt),
+    paid_at: seconds(invoice.paidAt),
+    short_url: invoice.shortUrl,
+    invoice_number: invoice.number,
+  };
+}
+
+function razorpayError(status: number, description: string): Response {
+  return new Response(JSON.stringify({ error: { code: 'BAD_REQUEST_ERROR', description } }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
 function notFound(): BillingProviderError {

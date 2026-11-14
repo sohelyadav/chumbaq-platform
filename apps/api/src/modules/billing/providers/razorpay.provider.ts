@@ -15,11 +15,21 @@ import {
   toProviderPlan,
   toProviderSubscription,
 } from './razorpay-payload';
+import { razorpayCustomerEmail, razorpayCustomerName } from './razorpay-customer';
 import { verifyRazorpaySignature } from './razorpay-signature';
 
 const API_BASE = 'https://api.razorpay.com/v1';
 const ERROR_DESCRIPTION_CHARS = 320;
 const ERROR_CODE_CHARS = 64;
+
+/** Razorpay's largest page (its default is 10). */
+export const INVOICE_LIST_PAGE_SIZE = 100;
+/**
+ * Pages read before giving up. A subscription is created for at most 120 cycles
+ * (`SUBSCRIPTION_TOTAL_COUNT`), so its invoices fill two pages; twenty is a list
+ * gone wrong, refused rather than answered with part of it.
+ */
+export const INVOICE_LIST_MAX_PAGES = 20;
 
 export interface RazorpayKeys {
   keyId: string;
@@ -32,6 +42,14 @@ export class InvalidProviderIdError extends Error {
   constructor(readonly field: string) {
     super(`Not a Razorpay id: ${field}`);
     this.name = 'InvalidProviderIdError';
+  }
+}
+
+/** A subscription with more invoices than `INVOICE_LIST_MAX_PAGES` pages hold. */
+export class InvoiceListTooLongError extends Error {
+  constructor() {
+    super(`More than ${INVOICE_LIST_MAX_PAGES * INVOICE_LIST_PAGE_SIZE} invoices on one subscription`);
+    this.name = 'InvoiceListTooLongError';
   }
 }
 
@@ -80,7 +98,11 @@ export class RazorpayProvider implements BillingProvider {
     gstin: string | null;
     accountRef: string;
   }): Promise<{ id: string }> {
-    const body: Record<string, unknown> = { name: input.name, email: input.email };
+    // Refused (`InvalidCustomerInputError`) before any request if Razorpay would refuse it.
+    const body: Record<string, unknown> = {
+      name: razorpayCustomerName(input.name),
+      email: razorpayCustomerEmail(input.email),
+    };
     if (input.gstin) body.gstin = input.gstin;
     // "0": answer with the existing customer of that email and contact rather than fail.
     body.fail_existing = '0';
@@ -125,12 +147,29 @@ export class RazorpayProvider implements BillingProvider {
     return toProviderPlan(await this.request('GET', `/plans/${checkedId(id, 'planId')}`));
   }
 
+  /**
+   * Every invoice of the subscription, newest first, read in pages of
+   * `INVOICE_LIST_PAGE_SIZE` by `skip` until a page comes back short. An invoice
+   * issued between two requests moves the later ones down by one, so the next page
+   * repeats one already read: it is listed once. Invoices are never deleted, so
+   * nothing is skipped. Past `INVOICE_LIST_MAX_PAGES` full pages it throws
+   * `InvoiceListTooLongError` rather than answer with part of the list.
+   */
   async listSubscriptionInvoices(subscriptionId: string): Promise<ProviderInvoice[]> {
     const id = checkedId(subscriptionId, 'subscriptionId');
-    const reply = await this.request('GET', `/invoices?subscription_id=${id}`);
-    const items = (reply as { items?: unknown }).items;
-    if (!Array.isArray(items)) throw new InvalidPayloadError('invoices.items');
-    return items.map((item, index) => toProviderInvoice(item, `invoices.items[${index}]`));
+    const invoices = new Map<string, ProviderInvoice>();
+    for (let page = 0; page < INVOICE_LIST_MAX_PAGES; page += 1) {
+      const skip = page * INVOICE_LIST_PAGE_SIZE;
+      const reply = await this.request('GET', `/invoices?subscription_id=${id}&count=${INVOICE_LIST_PAGE_SIZE}&skip=${skip}`);
+      const items = (reply as { items?: unknown }).items;
+      if (!Array.isArray(items)) throw new InvalidPayloadError('invoices.items');
+      items.forEach((item, index) => {
+        const invoice = toProviderInvoice(item, `invoices.items[${skip + index}]`);
+        if (!invoices.has(invoice.id)) invoices.set(invoice.id, invoice);
+      });
+      if (items.length < INVOICE_LIST_PAGE_SIZE) return [...invoices.values()];
+    }
+    throw new InvoiceListTooLongError();
   }
 
   async notifyInvoiceByEmail(invoiceId: string): Promise<void> {

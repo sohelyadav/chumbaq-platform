@@ -3,7 +3,14 @@ import { join } from 'path';
 import { PROVIDER_REQUEST_TIMEOUT_MS, isUnreachableError } from '../../push-notifications/services/per-recipient-provider';
 import { BillingProviderError } from './billing-provider';
 import { InvalidPayloadError } from './razorpay-payload';
-import { InvalidProviderIdError, RazorpayProvider } from './razorpay.provider';
+import { InvalidCustomerInputError } from './razorpay-customer';
+import {
+  INVOICE_LIST_MAX_PAGES,
+  INVOICE_LIST_PAGE_SIZE,
+  InvalidProviderIdError,
+  InvoiceListTooLongError,
+  RazorpayProvider,
+} from './razorpay.provider';
 
 const DIR = join(__dirname, '__fixtures__/razorpay');
 const fixture = (name: string): any => JSON.parse(readFileSync(join(DIR, name), 'utf8'));
@@ -96,8 +103,63 @@ describe('RazorpayProvider', () => {
 
   it('leaves gstin out of the customer when there is none', async () => {
     const { impl, calls } = stubFetch({ [`POST ${BASE}/customers`]: () => json(fixture('customer.json')) });
-    await provider(impl).createCustomer({ name: 'A', email: 'a@acme.test', gstin: null, accountRef: 'acct-1' });
+    await provider(impl).createCustomer({ name: 'Acme', email: 'a@acme.test', gstin: null, accountRef: 'acct-1' });
     expect(calls[0].body).not.toHaveProperty('gstin');
+  });
+
+  const sentName = async (name: string) => {
+    const { impl, calls } = stubFetch({ [`POST ${BASE}/customers`]: () => json(fixture('customer.json')) });
+    await provider(impl).createCustomer({ name, email: 'a@acme.test', gstin: null, accountRef: 'acct-1' });
+    return (calls[0].body as { name: string }).name;
+  };
+
+  it('sends a legal name of 51 characters cut to 50, at a word boundary', async () => {
+    const name = 'Northern Coastal Software and Analytics Private Ltd';
+    expect(name).toHaveLength(51);
+    expect(await sentName(name)).toBe('Northern Coastal Software and Analytics Private');
+    expect(await sentName('A'.repeat(51))).toBe('A'.repeat(50));
+  });
+
+  it("keeps a name Razorpay accepts as it is", async () => {
+    const name = "O'Brien (India) Pvt. Ltd. / R@D";
+    expect(await sentName(name)).toBe(name);
+  });
+
+  it("puts a name with characters Razorpay refuses into ones it accepts", async () => {
+    expect(await sentName('Smith & Sons-Co, Ltd.')).toBe('Smith and Sons Co Ltd.');
+    expect(await sentName('Café Société')).toBe('Cafe Societe');
+    expect(await sentName('  Acme\tLabs\n ')).toBe('Acme Labs');
+  });
+
+  it.each([
+    ['nothing Razorpay accepts', 'देवनागरी'],
+    ['too short', 'Ab-'],
+    ['punctuation only', "... ''"],
+  ])('refuses a name with %s before any request, naming the field and not the value', async (_why, name) => {
+    const { impl } = stubFetch({});
+    const error = await provider(impl)
+      .createCustomer({ name, email: 'a@acme.test', gstin: null, accountRef: 'acct-1' })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(InvalidCustomerInputError);
+    expect(error).toMatchObject({ field: 'name' });
+    expect((error as Error).message).not.toContain(name);
+    expect(impl).not.toHaveBeenCalled();
+  });
+
+  it('refuses an email longer than 64 characters before any request, and sends one of 64', async () => {
+    const long = `${'a'.repeat(54)}@acme.test`;
+    expect(long).toHaveLength(64);
+    const { impl, calls } = stubFetch({ [`POST ${BASE}/customers`]: () => json(fixture('customer.json')) });
+    await provider(impl).createCustomer({ name: 'Acme', email: long, gstin: null, accountRef: 'acct-1' });
+    expect(calls[0].body).toMatchObject({ email: long });
+    const tooLong = `a${long}`;
+    const error = await provider(impl)
+      .createCustomer({ name: 'Acme', email: tooLong, gstin: null, accountRef: 'acct-1' })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(InvalidCustomerInputError);
+    expect(error).toMatchObject({ field: 'email' });
+    expect((error as Error).message).not.toContain(tooLong);
+    expect(calls).toHaveLength(1);
   });
 
   it('creates a subscription that starts later, with whole seconds', async () => {
@@ -179,20 +241,75 @@ describe('RazorpayProvider', () => {
     });
   });
 
-  it("lists a subscription's invoices", async () => {
-    const { impl } = stubFetch({
-      [`GET ${BASE}/invoices?subscription_id=sub_00000000000001`]: () => json(fixture('invoices.list.json')),
-    });
+  const invoicesUrl = (skip: number) =>
+    `${BASE}/invoices?subscription_id=sub_00000000000001&count=100&skip=${skip}`;
+
+  /** A page of `n` invoices of the subscription, each a copy of the documented one with its own id. */
+  const invoicePage = (n: number, from = 0) => {
+    const [first] = fixture('invoices.list.json').items;
+    const items = Array.from({ length: n }, (_, k) => ({ ...first, id: `inv_page${String(from + k).padStart(10, '0')}` }));
+    return { entity: 'collection', count: items.length, items };
+  };
+
+  it("lists a subscription's invoices, asking for Razorpay's largest page", async () => {
+    const { impl, calls } = stubFetch({ [`GET ${invoicesUrl(0)}`]: () => json(fixture('invoices.list.json')) });
     const invoices = await provider(impl).listSubscriptionInvoices('sub_00000000000001');
     expect(invoices.map((i) => [i.id, i.subscriptionId, i.status, i.amountPaise])).toEqual([
       ['inv_00000000000003', 'sub_00000000000001', 'paid', 99900],
       ['inv_00000000000001', 'sub_00000000000001', 'paid', 129900],
     ]);
+    // A page shorter than asked for is the last one.
+    expect(calls.map((c) => c.url)).toEqual([invoicesUrl(0)]);
+    expect(INVOICE_LIST_PAGE_SIZE).toBe(100);
+  });
+
+  it('pages through more invoices than one page holds, by skip', async () => {
+    const { impl, calls } = stubFetch({
+      [`GET ${invoicesUrl(0)}`]: () => json(invoicePage(100, 0)),
+      [`GET ${invoicesUrl(100)}`]: () => json(invoicePage(100, 100)),
+      [`GET ${invoicesUrl(200)}`]: () => json(invoicePage(5, 200)),
+    });
+    const invoices = await provider(impl).listSubscriptionInvoices('sub_00000000000001');
+    expect(invoices).toHaveLength(205);
+    expect(new Set(invoices.map((i) => i.id)).size).toBe(205);
+    expect(calls.map((c) => c.url)).toEqual([invoicesUrl(0), invoicesUrl(100), invoicesUrl(200)]);
+  });
+
+  it('asks once more after a full page, and stops at an empty one', async () => {
+    const { impl, calls } = stubFetch({
+      [`GET ${invoicesUrl(0)}`]: () => json(invoicePage(100, 0)),
+      [`GET ${invoicesUrl(100)}`]: () => json(invoicePage(0)),
+    });
+    expect(await provider(impl).listSubscriptionInvoices('sub_00000000000001')).toHaveLength(100);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('lists an invoice once when a new one pushed it onto the next page as well', async () => {
+    // Newest first: an invoice issued between two requests moves every later one down by one.
+    const { impl } = stubFetch({
+      [`GET ${invoicesUrl(0)}`]: () => json(invoicePage(100, 0)),
+      [`GET ${invoicesUrl(100)}`]: () => json(invoicePage(3, 99)),
+    });
+    const invoices = await provider(impl).listSubscriptionInvoices('sub_00000000000001');
+    expect(invoices.map((i) => i.id)).toEqual(invoicePage(102, 0).items.map((i: { id: string }) => i.id));
+  });
+
+  it('refuses, rather than answer with part of the list, after the page cap', async () => {
+    const routes: Record<string, () => Response> = {};
+    for (let page = 0; page <= INVOICE_LIST_MAX_PAGES; page += 1) {
+      routes[`GET ${invoicesUrl(page * 100)}`] = () => json(invoicePage(100, page * 100));
+    }
+    const { impl, calls } = stubFetch(routes);
+    await expect(provider(impl).listSubscriptionInvoices('sub_00000000000001')).rejects.toBeInstanceOf(
+      InvoiceListTooLongError,
+    );
+    expect(INVOICE_LIST_MAX_PAGES).toBe(20);
+    expect(calls).toHaveLength(INVOICE_LIST_MAX_PAGES);
   });
 
   it('refuses an invoice list reply without items', async () => {
     const { impl } = stubFetch({
-      [`GET ${BASE}/invoices?subscription_id=sub_00000000000001`]: () => json({ entity: 'collection', count: 0 }),
+      [`GET ${invoicesUrl(0)}`]: () => json({ entity: 'collection', count: 0 }),
     });
     await expect(provider(impl).listSubscriptionInvoices('sub_00000000000001')).rejects.toBeInstanceOf(
       InvalidPayloadError,
