@@ -88,6 +88,8 @@ export function assertE2eRedisDb(env: Record<string, string>): number {
 export interface RunSecrets {
   jwtSecret: string;
   jwtRefreshSecret: string;
+  /** CREDENTIALS_ENCRYPTION_KEY: the seed helpers store channel credentials with it. */
+  credentialsKey: string;
   razorpayKeyId: string;
   razorpayKeySecret: string;
   razorpayWebhookSecret: string;
@@ -97,6 +99,7 @@ export function newRunSecrets(): RunSecrets {
   return {
     jwtSecret: randomBytes(32).toString('hex'),
     jwtRefreshSecret: randomBytes(32).toString('hex'),
+    credentialsKey: randomBytes(32).toString('hex'),
     // Obviously fake: Razorpay's key shape, a test-mode prefix and a mock-only body.
     razorpayKeyId: 'rzp_test_E2eMockOnly000',
     razorpayKeySecret: `e2e-fake-${randomBytes(8).toString('hex')}`,
@@ -107,6 +110,7 @@ export function newRunSecrets(): RunSecrets {
 const SECRET_VARS: Record<keyof RunSecrets, string> = {
   jwtSecret: 'E2E_JWT_SECRET',
   jwtRefreshSecret: 'E2E_JWT_REFRESH_SECRET',
+  credentialsKey: 'E2E_CREDENTIALS_ENCRYPTION_KEY',
   razorpayKeyId: 'E2E_RAZORPAY_KEY_ID',
   razorpayKeySecret: 'E2E_RAZORPAY_KEY_SECRET',
   razorpayWebhookSecret: 'E2E_RAZORPAY_WEBHOOK_SECRET',
@@ -140,6 +144,8 @@ export function appEnvironment(secrets: RunSecrets, ports: StackPorts): Record<s
     NODE_ENV: 'test',
     JWT_SECRET: secrets.jwtSecret,
     JWT_REFRESH_SECRET: secrets.jwtRefreshSecret,
+    // The database starts empty each run, so nothing is encrypted under the .env's key.
+    CREDENTIALS_ENCRYPTION_KEY: secrets.credentialsKey,
     // Billing on, against the local mock only. Fake keys; the mock checks the pair.
     BILLING_ENABLED: 'true',
     RAZORPAY_KEY_ID: secrets.razorpayKeyId,
