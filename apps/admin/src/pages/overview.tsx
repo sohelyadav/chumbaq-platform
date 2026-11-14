@@ -180,7 +180,10 @@ function UsageSection({ data }: { data: AdminOverview }) {
     <>
       <div>
         <h2 className="text-xl font-semibold">Usage, last 30 days</h2>
-        <p className="text-sm text-muted-foreground">{countedThroughLabel(coverage)} (UTC days)</p>
+        <p className="text-sm text-muted-foreground">
+          {countedThroughLabel(coverage)}
+          {coverage?.countedThrough ? ' (UTC days)' : ''}
+        </p>
       </div>
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <StatCard

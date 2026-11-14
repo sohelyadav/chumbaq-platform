@@ -23,6 +23,9 @@ import {
 
 type Point = { date: string; value: number | null };
 
+// "60K" rather than "60,000", which the axis would clip; exact numbers are in the tooltip and table.
+const COMPACT = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
+
 function TrendTooltip({ active, payload, metric }: TooltipProps<number, string> & { metric: UsageMetric }) {
   const point = payload?.[0]?.payload as Point | undefined;
   if (!active || !point) return null;
@@ -76,7 +79,7 @@ export function UsageTrendChart({
       </Select>
       <div className="h-64">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={points} margin={{ top: 5, right: 5, bottom: 0, left: -20 }} accessibilityLayer>
+          <LineChart data={points} margin={{ top: 5, right: 5, bottom: 0, left: -12 }} accessibilityLayer>
             <CartesianGrid vertical={false} stroke="var(--border)" />
             <XAxis
               dataKey="date"
@@ -90,7 +93,7 @@ export function UsageTrendChart({
             />
             <YAxis
               allowDecimals={false}
-              tickFormatter={(value: number) => value.toLocaleString('en-US')}
+              tickFormatter={(value: number) => COMPACT.format(value)}
               tick={{ fill: 'var(--muted-foreground)', fontSize: 11 }}
               tickLine={false}
               axisLine={false}
@@ -99,7 +102,7 @@ export function UsageTrendChart({
             <Tooltip content={<TrendTooltip metric={metric} />} cursor={{ stroke: 'var(--border)' }} />
             {/* chart-2 for the same contrast reason as the signups chart. */}
             <Line
-              type="monotone"
+              type="linear"
               dataKey="value"
               name={USAGE_METRIC_LABELS[metric]}
               stroke="var(--chart-2)"

@@ -342,7 +342,7 @@ export default function TenantsListPage() {
                       {!counted ? '—' : tenant.lastUsageDay ? formatDay(tenant.lastUsageDay) : 'None'}
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
-                      {format(new Date(tenant.createdAt), 'MMM d, yyyy')}
+                      {format(new Date(tenant.createdAt), 'd MMM yyyy')}
                     </TableCell>
                   </TableRow>
                 ))}
