@@ -338,7 +338,7 @@ export class TotpService {
     const state = await this.preAuth.peekFor(handle, 'customer');
     if (!state) throw new UnauthorizedException(FLOW_EXPIRED);
     const user = await this.requireUser(state.userId);
-    await this.auth.assertUnderLoginLimit(user.email, context);
+    await this.auth.assertUnderLoginLimit(user.email, context, { secondFactor: true });
     return user;
   }
 
@@ -392,7 +392,7 @@ export class TotpService {
   }
 
   private async reauthUser(principal: Principal, context: RequestContext): Promise<UserEntity> {
-    await this.auth.assertUnderLoginLimit(principal.email, context);
+    await this.auth.assertUnderLoginLimit(principal.email, context, { secondFactor: true });
     if (!principal.sessionId) throw new UnauthorizedException('Session has been revoked');
     return this.requireUser(principal.userId);
   }

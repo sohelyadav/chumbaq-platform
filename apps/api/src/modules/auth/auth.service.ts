@@ -86,8 +86,9 @@ export const INVALID_HANDLE_MESSAGE = 'Your sign-in has expired. Please start ag
 
 const LOGIN_FAILURE_LIMIT = 10;
 const LOGIN_FAILURE_WINDOW_MINUTES = 15;
-/** Attempts on one address from any number of networks in the window. */
+/** First-step attempts on one address from any number of networks in the window. */
 const LOGIN_ATTEMPT_CEILING = 100;
+const SECOND_FACTOR_FIELD = 'second-factor';
 
 /** Compared against for an unknown address, so timing does not reveal which exist. */
 let dummyHash: Promise<string> | undefined;
@@ -162,36 +163,37 @@ export class AuthService {
   /**
    * Every factor counts against this, so no route can be used to guess free of it.
    *
-   * Counts the attempt before the guess is checked (atomically, in Redis), so attempts
-   * sent together cannot all slip under the limit. Two limits: `LOGIN_FAILURE_LIMIT`
-   * attempts per address from one network (an IPv6 /64 counts as one), so a stranger
-   * who knows an address cannot lock its owner out from elsewhere; and
-   * `LOGIN_ATTEMPT_CEILING` per address from anywhere, which bounds guessing spread
-   * over many networks. A complete sign-in or a password reset clears both. Fails open
-   * to the old count of recorded failures if Redis is away.
+   * Admits or refuses the attempt atomically in Redis before the guess is checked, so
+   * attempts sent together are held to the limits exactly, and refused attempts are
+   * not counted. A password (or other first step) is limited to `LOGIN_FAILURE_LIMIT`
+   * per address from one network (an IPv6 /64 counts as one), so a stranger who knows
+   * an address cannot lock its owner out from elsewhere, and to `LOGIN_ATTEMPT_CEILING`
+   * per address from anywhere. A second factor (an authenticator or recovery code, a
+   * passkey after a password) is limited to `LOGIN_FAILURE_LIMIT` per account from
+   * anywhere: reaching it takes the password, and a code is far easier to guess. A
+   * right password gives its attempt back, a complete sign-in clears the window, and
+   * a step that is not a guess (passkey options) only checks. Fails open to the old
+   * count of recorded failures if Redis is away.
    */
   async assertUnderLoginLimit(
     email: string,
     context: RequestContext = {},
-    { count = true }: { count?: boolean } = {},
+    { count = true, secondFactor = false }: { count?: boolean; secondFactor?: boolean } = {},
   ): Promise<void> {
     const address = email.trim().toLowerCase();
-    const network = rateLimitKey(context.ipAddress ?? '');
-    let limited: boolean;
+    let admitted: boolean;
     try {
-      // A step that is not a guess (asking for passkey options) is checked, not counted.
-      const counts = count
-        ? await this.preAuth.countSignInAttempt(address, network, LOGIN_FAILURE_WINDOW_MINUTES * 60)
-        : await this.preAuth.signInAttempts(address, network);
-      // Counted: this attempt is included, so the one past the limit is refused. Only
-      // checked: refused once the limit has been reached.
-      const over = (n: number, limit: number) => (count ? n > limit : n >= limit);
-      limited = over(counts.fromNetwork, LOGIN_FAILURE_LIMIT) || over(counts.total, LOGIN_ATTEMPT_CEILING);
+      admitted = await this.preAuth.admitSignInAttempt(
+        address,
+        secondFactor ? [{ field: SECOND_FACTOR_FIELD, limit: LOGIN_FAILURE_LIMIT }] : this.firstStepLimits(context),
+        LOGIN_FAILURE_WINDOW_MINUTES * 60,
+        count,
+      );
     } catch (error) {
       this.logger.error(`Sign-in attempts not counted: ${logValue((error as Error).message)}`);
-      limited = (await this.events.recentLoginFailures(email, LOGIN_FAILURE_WINDOW_MINUTES)) >= LOGIN_FAILURE_LIMIT;
+      admitted = (await this.events.recentLoginFailures(email, LOGIN_FAILURE_WINDOW_MINUTES)) < LOGIN_FAILURE_LIMIT;
     }
-    if (limited) {
+    if (!admitted) {
       await this.events.record({ type: 'login.limited', email, ...context });
       throw new HttpException(
         'Too many failed attempts. Try again in a few minutes.',
@@ -200,14 +202,24 @@ export class AuthService {
     }
   }
 
+  private firstStepLimits(context: RequestContext): Array<{ field: string; limit: number }> {
+    return [
+      { field: `net:${rateLimitKey(context.ipAddress ?? '')}`, limit: LOGIN_FAILURE_LIMIT },
+      { field: 'total', limit: LOGIN_ATTEMPT_CEILING },
+    ];
+  }
+
   /**
-   * Gives back the attempt `assertUnderLoginLimit` counted, when the guess was right but
-   * sign-in is not complete yet (a password before its second factor), so only wrong
-   * guesses use up the allowance. Never throws.
+   * Gives back the first-step attempt `assertUnderLoginLimit` counted, when the
+   * password was right but sign-in is not complete yet (a second factor follows), so
+   * only wrong guesses use up the allowance. Never throws.
    */
   async releaseLoginAttempt(email: string, context: RequestContext = {}): Promise<void> {
     try {
-      await this.preAuth.releaseSignInAttempt(email.trim().toLowerCase(), rateLimitKey(context.ipAddress ?? ''));
+      await this.preAuth.releaseSignInAttempt(
+        email.trim().toLowerCase(),
+        this.firstStepLimits(context).map((limit) => limit.field),
+      );
     } catch (error) {
       this.logger.error(`Sign-in attempt not released: ${logValue((error as Error).message)}`);
     }

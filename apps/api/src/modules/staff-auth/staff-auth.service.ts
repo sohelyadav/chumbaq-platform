@@ -337,7 +337,7 @@ export class StaffAuthService {
     if (!state) throw new UnauthorizedException(INVALID_HANDLE_MESSAGE);
     const user = await this.users.findById(state.userId);
     if (!user) throw new UnauthorizedException(INVALID_HANDLE_MESSAGE);
-    await this.auth.assertUnderLoginLimit(user.email, context);
+    await this.auth.assertUnderLoginLimit(user.email, context, { secondFactor: true });
     return user;
   }
 
@@ -508,7 +508,7 @@ export class StaffAuthService {
   async reauthWithTotp(staff: AuthenticatedStaff, code: string, context: RequestContext = {}): Promise<StaffReauthenticated> {
     // 403, not 401, as for a wrong code below.
     if (this.passkeyRequired) throw new ForbiddenException(STAFF_PASSKEY_NEEDED_MESSAGE);
-    await this.auth.assertUnderLoginLimit(staff.email, context);
+    await this.auth.assertUnderLoginLimit(staff.email, context, { secondFactor: true });
     const user = await this.users.findById(staff.userId);
     if (!user) throw new UnauthorizedException(STAFF_SESSION_ENDED_MESSAGE);
     if (!(await this.totp.acceptCode(user.id, code))) {

@@ -36,8 +36,8 @@ describe('Sign-in attempt limit (integration)', () => {
   afterAll(() => preAuth.onModuleDestroy());
 
   const address = () => `limit-${randomUUID()}@example.test`;
-  const attempt = (email: string, ipAddress: string) =>
-    auth.assertUnderLoginLimit(email, { ipAddress }).then(
+  const attempt = (email: string, ipAddress: string, opts: { secondFactor?: boolean } = {}) =>
+    auth.assertUnderLoginLimit(email, { ipAddress }, opts).then(
       () => 'allowed',
       (error: unknown) => (error instanceof HttpException && error.getStatus() === 429 ? 'limited' : 'error'),
     );
@@ -68,10 +68,24 @@ describe('Sign-in attempt limit (integration)', () => {
     expect(await attempt(email, '198.51.100.99')).toBe('limited');
   });
 
-  it('gives a right guess back, and a complete sign-in clears the window', async () => {
+  it('does not let a stranger\'s refused attempts count towards the owner\'s ceiling', async () => {
     const email = address();
-    for (let i = 0; i < 9; i++) await attempt(email, '198.51.100.5');
-    await attempt(email, '198.51.100.5');
+    for (let i = 0; i < 500; i++) await attempt(email, '203.0.113.66');
+    expect(await attempt(email, '198.51.100.21')).toBe('allowed');
+  });
+
+  // A code is far easier to guess than a password, and reaching it takes the password.
+  it('holds second-factor guesses to the limit per account, from any network', async () => {
+    const email = address();
+    for (let i = 0; i < 10; i++) expect(await attempt(email, `192.0.2.${i}`, { secondFactor: true })).toBe('allowed');
+    expect(await attempt(email, '198.51.100.30', { secondFactor: true })).toBe('limited');
+  });
+
+  it('gives a right guess back (never below zero), and a complete sign-in clears the window', async () => {
+    const email = address();
+    for (let i = 0; i < 5; i++) await auth.releaseLoginAttempt(email, { ipAddress: '198.51.100.5' });
+    for (let i = 0; i < 10; i++) expect(await attempt(email, '198.51.100.5')).toBe('allowed');
+    expect(await attempt(email, '198.51.100.5')).toBe('limited');
     await auth.releaseLoginAttempt(email, { ipAddress: '198.51.100.5' });
     expect(await attempt(email, '198.51.100.5')).toBe('allowed');
     expect(await attempt(email, '198.51.100.5')).toBe('limited');

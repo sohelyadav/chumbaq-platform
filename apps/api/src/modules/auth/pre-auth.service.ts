@@ -36,6 +36,27 @@ const keyFor = (handle: string) =>
 const signInAttemptsKey = (address: string) =>
   `chumbaq:signin-attempts:${createHash('sha256').update(address).digest('hex')}`;
 
+/** KEYS[1]: the address's hash. ARGV: window, count (1/0), n, n fields, n limits. */
+const ADMIT_SCRIPT = `
+local n = tonumber(ARGV[3])
+for i = 1, n do
+  local current = tonumber(redis.call('HGET', KEYS[1], ARGV[3 + i]) or '0')
+  if current >= tonumber(ARGV[3 + n + i]) then return 0 end
+end
+if ARGV[2] == '1' then
+  for i = 1, n do redis.call('HINCRBY', KEYS[1], ARGV[3 + i], 1) end
+  redis.call('EXPIRE', KEYS[1], ARGV[1], 'NX')
+end
+return 1`;
+
+const RELEASE_SCRIPT = `
+for i = 1, #ARGV do
+  if tonumber(redis.call('HGET', KEYS[1], ARGV[i]) or '0') > 0 then
+    redis.call('HINCRBY', KEYS[1], ARGV[i], -1)
+  end
+end
+return 1`;
+
 const challengeKey = (ceremony: string, id: string) =>
   `chumbaq:webauthn:${ceremony}:${createHash('sha256').update(id).digest('hex')}`;
 
@@ -69,38 +90,37 @@ export class PreAuthService implements OnModuleDestroy {
   }
 
   /**
-   * Counts one sign-in attempt for this address, before the guess is checked, and
-   * returns the attempts in the current window from this network and from anywhere.
-   * One atomic transaction, so attempts arriving together are all counted: a check
-   * that read a count and recorded the failure afterwards let parallel guesses past.
-   * The window starts at the first attempt and is not extended by later ones.
+   * Admits one sign-in attempt for this address, or refuses it, in one atomic step
+   * before the guess is checked, so attempts sent together are held to the limits
+   * exactly. An attempt is admitted while every named counter is under its limit, and
+   * only an admitted attempt is counted (with `count`), so refused requests from one
+   * network never use up anyone else's allowance. The window starts at the first
+   * attempt and is not extended by later ones.
    */
-  async countSignInAttempt(
+  async admitSignInAttempt(
     address: string,
-    network: string,
+    limits: Array<{ field: string; limit: number }>,
     windowSeconds: number,
-  ): Promise<{ fromNetwork: number; total: number }> {
-    const key = signInAttemptsKey(address);
-    const results = await this.redis
-      .multi()
-      .hincrby(key, `net:${network}`, 1)
-      .hincrby(key, 'total', 1)
-      .expire(key, windowSeconds, 'NX')
-      .exec();
-    if (!results || results.some(([error]) => error)) throw new Error('Could not count the sign-in attempt');
-    return { fromNetwork: Number(results[0][1]), total: Number(results[1][1]) };
+    count: boolean,
+  ): Promise<boolean> {
+    const fields = limits.map((l) => l.field);
+    const caps = limits.map((l) => String(l.limit));
+    const admitted = await this.redis.eval(
+      ADMIT_SCRIPT,
+      1,
+      signInAttemptsKey(address),
+      String(windowSeconds),
+      count ? '1' : '0',
+      String(limits.length),
+      ...fields,
+      ...caps,
+    );
+    return admitted === 1;
   }
 
-  /** The attempts counted so far, without counting one (for steps that are not a guess). */
-  async signInAttempts(address: string, network: string): Promise<{ fromNetwork: number; total: number }> {
-    const [fromNetwork, total] = await this.redis.hmget(signInAttemptsKey(address), `net:${network}`, 'total');
-    return { fromNetwork: Number(fromNetwork ?? 0), total: Number(total ?? 0) };
-  }
-
-  /** Gives back an attempt that turned out right (a correct password before a second factor). */
-  async releaseSignInAttempt(address: string, network: string): Promise<void> {
-    const key = signInAttemptsKey(address);
-    await this.redis.multi().hincrby(key, `net:${network}`, -1).hincrby(key, 'total', -1).exec();
+  /** The counters an admitted attempt that turned out right gives back; never below zero. */
+  async releaseSignInAttempt(address: string, fields: string[]): Promise<void> {
+    await this.redis.eval(RELEASE_SCRIPT, 1, signInAttemptsKey(address), ...fields);
   }
 
   /** A complete sign-in or a password reset ends the address's window. */
