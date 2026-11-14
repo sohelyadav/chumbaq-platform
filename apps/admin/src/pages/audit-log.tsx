@@ -56,6 +56,7 @@ const ACTION_LABELS: Record<AdminAuditAction, string> = {
   'super_admin.passkeys_reset': 'Passkeys reset by CLI',
   'account.factors_reset': 'Second factors reset',
   'audit_log.exported': 'Audit log exported',
+  'tenants.exported': 'Tenants list exported',
   'account.factors_reset_requested': 'Second factor reset requested',
   'account.factors_reset_cancelled': 'Second factor reset cancelled',
   'account.password_reset_refused': 'Password reset refused after factor reset',

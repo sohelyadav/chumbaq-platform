@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import type { UsageCoverage as SharedUsageCoverage } from '@chumbaq/shared';
 import { DataSource, EntityManager, QueryRunner } from 'typeorm';
 import { addDays, dayStart, monthStart, utcDay } from './usage-days';
 import {
@@ -47,6 +48,15 @@ export interface UsageCoverage {
   countedThrough: string | null;
   mauFrom: string;
 }
+
+// The admin API returns this as the shared type; held equal both ways.
+type _SameCoverage = [UsageCoverage] extends [SharedUsageCoverage]
+  ? [SharedUsageCoverage] extends [UsageCoverage]
+    ? true
+    : never
+  : never;
+const _usageCoverageMatches: _SameCoverage = true;
+void _usageCoverageMatches;
 
 interface RollupState {
   startedOn: string;

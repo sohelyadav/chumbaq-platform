@@ -54,6 +54,8 @@
  * save of the row, dashboard edits included.
  */
 
+import type { UsageMetric } from '@chumbaq/shared';
+
 export const USAGE_METRICS = [
   'push_sent',
   'email_sent',
@@ -69,6 +71,16 @@ export const USAGE_METRICS = [
 ] as const;
 
 export type UsageMetricName = (typeof USAGE_METRICS)[number];
+
+// Held equal to the shared union, which the admin app reads: a metric added on
+// one side only fails compilation here.
+type _SameMetrics = [UsageMetric] extends [UsageMetricName]
+  ? [UsageMetricName] extends [UsageMetric]
+    ? true
+    : never
+  : never;
+const _usageMetricsMatch: _SameMetrics = true;
+void _usageMetricsMatch;
 
 /** Counted from the rows written in a window; a recount never lowers them. */
 export const COUNTED_METRICS = [

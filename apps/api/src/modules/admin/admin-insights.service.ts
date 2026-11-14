@@ -110,6 +110,11 @@ export class AdminInsightsService {
       identities: Number(totals.identities),
       clicksLast30d: Number(totals.clicks),
       signupsByDay,
+      usageCoverage: null,
+      usage30d: null,
+      usageTrend: [],
+      topTenants: [],
+      quietTenants: { count: 0, tenants: [] },
     };
   }
 

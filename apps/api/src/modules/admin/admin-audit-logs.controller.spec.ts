@@ -97,6 +97,7 @@ describe('AdminAuditLogsController over HTTP', () => {
     'super_admin.passkeys_reset',
     'account.factors_reset',
     'audit_log.exported',
+    'tenants.exported',
   ])('accepts the action %s, as a one-item list', async (action) => {
     const response = await fetch(`${base}/audit-logs?action=${action}`);
 

@@ -164,6 +164,8 @@ export class AdminTenantsService {
       seatsUsed,
       projects,
       recentAudit: recentAudit.map(toAuditLog),
+      lastSignInAt: null,
+      plan: 'free',
     };
   }
 
@@ -406,6 +408,9 @@ export class AdminTenantsService {
       identityCount: identities.get(user.id) ?? 0,
       clicksLast30d: clicks.get(user.id) ?? 0,
       lastActivityAt: lastClicks.get(user.id)?.toISOString() ?? null,
+      mauThisMonth: 0,
+      messagesSent30d: 0,
+      lastUsageDay: null,
     }));
   }
 

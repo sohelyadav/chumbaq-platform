@@ -61,6 +61,7 @@ const AUDIT_LABELS: Record<AdminAuditAction, string> = {
   'account.factors_reset': 'Second factors reset',
   'tenant.viewed': 'Viewed by staff',
   'audit_log.exported': 'Audit log exported',
+  'tenants.exported': 'Tenants list exported',
   'account.factors_reset_requested': 'Second factor reset requested',
   'account.factors_reset_cancelled': 'Second factor reset cancelled',
   'account.password_reset_refused': 'Password reset refused after factor reset',

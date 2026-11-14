@@ -592,6 +592,8 @@ export type AdminAuditAction =
   /** A staff read of a tenant's detail, at most one per staff member and tenant per window. */
   | 'tenant.viewed'
   | 'audit_log.exported'
+  /** Staff downloaded the tenants list as CSV; `metadata` has the filters, `rowCount` and `truncated`. */
+  | 'tenants.exported'
   | 'account.factors_reset_requested'
   | 'account.factors_reset_cancelled'
   /** A password reset refused because staff removed the account's factors recently. */
@@ -632,6 +634,83 @@ export type AdminAuditAction =
 
 export type AdminTenantStatus = 'active' | 'suspended';
 
+// ─── Usage (daily roll-up, admin API) ───────────────────────────────────────
+
+/**
+ * What the usage roll-up counts per project per UTC day. The first nine are
+ * counted from the day's rows; `mau_month_to_date` (devices active so far that
+ * month) and `api_keys_active` are snapshots.
+ */
+export type UsageMetric =
+  | 'push_sent'
+  | 'email_sent'
+  | 'sms_sent'
+  | 'whatsapp_sent'
+  | 'messages_failed'
+  | 'in_app_impressions'
+  | 'clicks'
+  | 'events'
+  | 'new_people'
+  | 'mau_month_to_date'
+  | 'api_keys_active';
+
+/** One value per metric; null means not counted (outside what the roll-up covers), never 0. */
+export type UsageValues = Record<UsageMetric, number | null>;
+
+/** What the usage tables cover, as UTC days (`YYYY-MM-DD`). */
+export interface UsageCoverage {
+  /** The roll-up's first run. */
+  startedOn: string;
+  /** The first day counted. */
+  countedFrom: string;
+  /** The last closed day, null until one is closed. Nothing after it is shown. */
+  countedThrough: string | null;
+  /** The first day of the month active devices are counted from. */
+  mauFrom: string;
+}
+
+export interface UsageDay {
+  date: string;
+  values: UsageValues;
+}
+
+/** A calendar month: counted metrics summed, snapshots as on `through`. */
+export interface UsageMonth {
+  /** `YYYY-MM`. */
+  month: string;
+  from: string;
+  through: string;
+  /** The month is not wholly inside the counted range. */
+  partial: boolean;
+  values: UsageValues;
+}
+
+export interface AdminTenantUsageRef {
+  id: string;
+  email: string;
+  name: string;
+  mauThisMonth: number;
+  messagesSent30d: number;
+  lastUsageDay: string | null;
+}
+
+/** Overlapping filters, not states: a tenant can be new and never have used anything. */
+export type AdminTenantActivity = 'new' | 'quiet' | 'never_used';
+export type AdminTenantSort = 'created_at' | 'mau_this_month' | 'messages_sent_30d' | 'last_usage_day';
+export type AdminSortOrder = 'asc' | 'desc';
+export type AdminTenantPlan = 'free';
+
+/** One tenant's usage, all of it from closed days of rows billed to that account. */
+export interface AdminTenantUsage {
+  coverage: UsageCoverage | null;
+  days: number;
+  series: UsageDay[];
+  thisMonth: UsageMonth | null;
+  lastMonth: UsageMonth | null;
+  /** Per project over the series' days; `name` is null for a deleted project. */
+  projects: { projectId: string; name: string | null; values: UsageValues }[];
+}
+
 export interface AdminTenantSummary {
   id: string;
   email: string;
@@ -646,6 +725,12 @@ export interface AdminTenantSummary {
   identityCount: number;
   clicksLast30d: number;
   lastActivityAt: string | null;
+  /** Monthly active devices on the last counted day, across the account's projects. */
+  mauThisMonth: number;
+  /** Messages sent in the 30 counted days ending on the last counted day. */
+  messagesSent30d: number;
+  /** The last counted day with any counted usage, or null if none. */
+  lastUsageDay: string | null;
 }
 
 export interface AdminTenantProject {
@@ -686,6 +771,9 @@ export interface AdminTenantDetail extends AdminTenantSummary {
   seatsUsed: number;
   projects: AdminTenantProject[];
   recentAudit: AdminAuditLog[];
+  /** The latest successful sign-in still in the sign-in history, or null. */
+  lastSignInAt: string | null;
+  plan: AdminTenantPlan;
 }
 
 /**
@@ -840,6 +928,16 @@ export interface AdminOverview {
   identities: number;
   clicksLast30d: number;
   signupsByDay: { date: string; count: number }[];
+  /** Null before the usage roll-up first runs. */
+  usageCoverage: UsageCoverage | null;
+  /** Counted metrics summed over the 30 counted days to `countedThrough`; snapshots on that day. */
+  usage30d: UsageValues | null;
+  /** The last 90 counted days, all tenants together. */
+  usageTrend: UsageDay[];
+  /** Up to 10, by messages sent in 30 days plus monthly active devices. */
+  topTenants: AdminTenantUsageRef[];
+  /** Tenants with usage before but none in the last 14 counted days; the first 10 of `count`. */
+  quietTenants: { count: number; tenants: AdminTenantUsageRef[] };
 }
 
 export interface AdminHealth {

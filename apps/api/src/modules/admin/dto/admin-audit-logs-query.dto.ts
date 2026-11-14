@@ -32,6 +32,7 @@ const AUDIT_ACTIONS: Record<AdminAuditAction, true> = {
   'super_admin.passkeys_reset': true,
   'account.factors_reset': true,
   'audit_log.exported': true,
+  'tenants.exported': true,
   'account.factors_reset_requested': true,
   'account.factors_reset_cancelled': true,
   'account.password_reset_refused': true,
