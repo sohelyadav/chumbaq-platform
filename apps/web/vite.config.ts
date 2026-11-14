@@ -19,7 +19,12 @@ const repoRoot = path.resolve(__dirname, '../..');
  * Razorpay Checkout (the billing page, only when billing is on) loads its script from
  * checkout.razorpay.com and opens its payment form in frames from there and from
  * api.razorpay.com. Card and bank details are typed into those frames, never this page.
- * frame-src keeps the 'self' that default-src gave frames before it was set.
+ * frame-src keeps the 'self' that default-src gave frames before it was set. The
+ * script itself also calls Razorpay from this page (api.razorpay.com, and
+ * lumberjack.razorpay.com for its own error and analytics reports), so connect-src
+ * allows those two. Razorpay publishes no list of the origins Checkout needs: before
+ * billing goes on, open Checkout in a production build (`npm run build:web`,
+ * `npx vite preview`) with test keys and add any origin the console reports blocked.
  */
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
@@ -28,7 +33,7 @@ const CONTENT_SECURITY_POLICY = [
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' data: https://fonts.gstatic.com",
   "img-src 'self' data: blob: https:",
-  "connect-src 'self'",
+  "connect-src 'self' https://api.razorpay.com https://lumberjack.razorpay.com",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",

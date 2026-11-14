@@ -82,7 +82,11 @@ secret in `RAZORPAY_WEBHOOK_SECRET`, subscribed to `subscription.authenticated`,
 `.charged`, `.pending`, `.halted`, `.cancelled`, `.completed` and `.updated`, `payment.failed`,
 `invoice.paid`, `invoice.expired` and `refund.processed`. Subscription state changes only from
 those verified webhooks and the server's own calls to Razorpay, so run the worker too: it sends
-cancellations and catches up on missed events. Test with `rzp_test_` keys first.
+cancellations and catches up on missed events. Test with `rzp_test_` keys first, in a
+production build of the dashboard (`npm run build:web`, then `npx vite preview` in `apps/web`):
+its Content Security Policy applies only there, and Checkout must open and pay without the
+browser console reporting a blocked request. Add any Razorpay origin it reports to the policy
+in `apps/web/vite.config.ts`.
 
 ## Security
 
