@@ -55,9 +55,10 @@ export function effectivePlanCodeSql(now: string): string {
     nxt.status = 'authenticated'
     AND nxt.start_at IS NOT NULL
     AND ${at} < nxt.start_at + interval '${SUCCESSOR_START_SLACK_MS} milliseconds'
+    AND nxt.start_at <= ${at} + interval '${SUCCESSOR_LEAD_MS} milliseconds'
     AND CASE
       WHEN ${currentLive} THEN COALESCE(np.sort_order > ${currentRank}, false)
-      ELSE nxt.start_at <= ${at} + interval '${SUCCESSOR_LEAD_MS} milliseconds'
+      ELSE true
     END)`;
   return `(CASE
     WHEN ba.comp_plan_code IS NOT NULL AND (ba.comp_until IS NULL OR ba.comp_until > ${at}) THEN ba.comp_plan_code

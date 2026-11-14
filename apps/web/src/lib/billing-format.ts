@@ -80,7 +80,7 @@ export const BILLING_STATE_LABELS: Record<BillingAccountState, string> = {
   halted: 'Payment failed',
   cancelling: 'Ends at the period end',
   change_scheduled: 'Plan change scheduled',
-  upgrade_pending: 'Upgraded, billed from the next period',
+  upgrade_pending: 'Upgraded, first charge due',
   comped: 'Complimentary',
 };
 

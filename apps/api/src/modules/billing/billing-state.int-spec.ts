@@ -264,12 +264,21 @@ describe('BillingStateService (integration)', () => {
     expect(await planOf(w.userId)).toEqual({ plan: 'free', state: 'free' });
   });
 
-  it('an upgrade successor counts once authenticated, queues the old cancel, and replaces it on activation', async () => {
+  it('an upgrade successor counts from a day before its start, queues the old cancel, and replaces it on activation', async () => {
     const { w, sub: old, period } = await activeOnA();
     const next = await checkout(w, w.planB, w.priceB, period[1]);
 
     await apply(authenticated(next.providerId, w.priceB.rzp, at(-60_000), period[1]));
-    expect(await planOf(w.userId)).toEqual({ plan: w.planB, state: 'upgrade_pending' });
+    // A mandate only, nothing charged yet: the current plan until a day before the start.
+    expect(await planOf(w.userId)).toEqual({ plan: w.planA, state: 'change_scheduled' });
+    expect(await planOf(w.userId, new Date(period[1].getTime() - DAY - 60_000))).toEqual({
+      plan: w.planA,
+      state: 'change_scheduled',
+    });
+    expect(await planOf(w.userId, new Date(period[1].getTime() - DAY + 60_000))).toEqual({
+      plan: w.planB,
+      state: 'upgrade_pending',
+    });
     const queued = await subscription(old.id);
     expect(queued.cancel_requested_at.getTime()).toBe(NOW.getTime());
     expect(queued).toMatchObject({ cancel_at_cycle_end: true, cancel_requested_by: null, cancel_sent_at: null });

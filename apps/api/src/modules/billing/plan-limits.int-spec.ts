@@ -343,6 +343,43 @@ describe('plan limits (integration)', () => {
       expect(await countOf(owner)).toBe(3);
     });
 
+    it('projects: an authorised upgrade that has not charged yet gives no room until a day before its start', async () => {
+      // Authorising is a mandate only, and the successor can be dropped before it
+      // charges; anything made on its limits would then stay for good.
+      const owner = await account();
+      await subscribe(owner, PAID);
+      await existing(owner, 3);
+      const [next] = await ds.query(
+        `INSERT INTO billing_subscriptions
+           (user_id, provider_subscription_id, price_id, plan_code, interval, status, start_at)
+         VALUES ($1, $2, $3, $4, 'monthly', 'authenticated', now() + interval '20 days') RETURNING id`,
+        [owner, `sub_${randomBytes(7).toString('hex')}`, priceOf[UNLIMITED_SEATS], UNLIMITED_SEATS],
+      );
+      await ds.query(`UPDATE billing_accounts SET next_subscription_id = $2 WHERE user_id = $1`, [owner, next.id]);
+
+      expect((await refusal(create(on, owner)) as Error).message).toBe(projectLimitMessage(3, true));
+      expect(await countOf(owner)).toBe(3);
+
+      // The customer drops it (cancel, or a revoked mandate) before it ever charges: still nothing gained.
+      await ds.query(`UPDATE billing_accounts SET next_subscription_id = NULL WHERE user_id = $1`, [owner]);
+      expect((await refusal(create(on, owner)) as Error).message).toBe(projectLimitMessage(3, true));
+      expect(await countOf(owner)).toBe(3);
+
+      // Authorised again, and now about to charge: the upgrade's limit applies.
+      await ds.query(
+        `UPDATE billing_subscriptions SET start_at = now() + interval '12 hours' WHERE id = $1`,
+        [next.id],
+      );
+      await ds.query(
+        `UPDATE billing_subscriptions SET current_end = now() + interval '12 hours'
+          WHERE user_id = $1 AND status = 'active'`,
+        [owner],
+      );
+      await ds.query(`UPDATE billing_accounts SET next_subscription_id = $2 WHERE user_id = $1`, [owner, next.id]);
+      await create(on, owner);
+      expect(await countOf(owner)).toBe(4);
+    });
+
     it('seats: people already on the account stay, and only someone new is refused', async () => {
       const owner = await account();
       const [projectId] = await existing(owner, 1);

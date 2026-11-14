@@ -22,7 +22,7 @@ export function showBillingNav(billingEnabled: boolean | undefined, impersonatin
 /**
  * What a plan card offers, for the interval shown:
  * - `current`: the plan the account is on (no button). While an upgrade is granted
- *   ahead of its start (`upgrade_pending`), that is the upgrade's plan.
+ *   in the day before its first charge (`upgrade_pending`), that is the upgrade's plan.
  * - `none`: the free plan while on another (moving to it is cancelling).
  * - `coming_soon`: a paid plan with no price for this interval.
  * - `choose`: a first subscription (also after a failed payment, or on a comp).

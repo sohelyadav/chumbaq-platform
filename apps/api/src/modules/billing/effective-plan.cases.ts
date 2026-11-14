@@ -63,13 +63,48 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     'comped',
   ],
   // Rule 2: an authenticated successor.
+  // A successor is only a mandate until it charges, and can be dropped before then,
+  // so even an upgrade counts only from a day before its start.
   [
-    'authenticated upgrade successor',
+    'authenticated upgrade successor starting in 10 days waits',
     state({ current: sub({ planCode: 'a' }), next: sub({ planCode: 'b', status: 'authenticated', startAt: at(10 * DAY) }) }),
+    'a',
+    'subscription',
+    null,
+    'change_scheduled',
+  ],
+  [
+    'authenticated upgrade successor over a yearly current starting in 300 days waits',
+    state({
+      current: sub({ planCode: 'a', interval: 'yearly', currentEnd: at(300 * DAY) }),
+      next: sub({ planCode: 'b', interval: 'yearly', status: 'authenticated', startAt: at(300 * DAY) }),
+    }),
+    'a',
+    'subscription',
+    null,
+    'change_scheduled',
+  ],
+  [
+    'authenticated upgrade successor starting in 23 hours (inside the lead)',
+    state({
+      current: sub({ planCode: 'a', currentEnd: at(23 * HOUR) }),
+      next: sub({ planCode: 'b', status: 'authenticated', startAt: at(23 * HOUR) }),
+    }),
     'b',
     'subscription',
     null,
     'upgrade_pending',
+  ],
+  [
+    'authenticated upgrade successor starting in 25 hours (just outside the lead)',
+    state({
+      current: sub({ planCode: 'a', currentEnd: at(25 * HOUR) }),
+      next: sub({ planCode: 'b', status: 'authenticated', startAt: at(25 * HOUR) }),
+    }),
+    'a',
+    'subscription',
+    null,
+    'change_scheduled',
   ],
   [
     'authenticated downgrade successor',
@@ -123,10 +158,21 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     'change_scheduled',
   ],
   [
-    'upgrade over a cancelling current counts at once, with no end',
+    'upgrade over a cancelling current keeps the current until a day before its end',
     state({
       current: sub({ planCode: 'a', cancelAtPeriodEnd: true, currentEnd: at(10 * DAY) }),
       next: sub({ planCode: 'b', status: 'authenticated', startAt: at(10 * DAY) }),
+    }),
+    'a',
+    'subscription',
+    at(10 * DAY),
+    'change_scheduled',
+  ],
+  [
+    'upgrade over a cancelling current counts inside the lead, with no end',
+    state({
+      current: sub({ planCode: 'a', cancelAtPeriodEnd: true, currentEnd: at(12 * HOUR) }),
+      next: sub({ planCode: 'b', status: 'authenticated', startAt: at(12 * HOUR) }),
     }),
     'b',
     'subscription',
@@ -177,9 +223,8 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     null,
     'change_scheduled',
   ],
-  // With no live current subscription paying for the time before it starts, an
-  // authenticated successor (a mandate, no charge yet) counts only once it is
-  // about to charge, never for months on a mandate alone.
+  // With no live current subscription either, an authenticated successor counts
+  // only once it is about to charge, never for months on a mandate alone.
   [
     'current halted past grace, authenticated successor starting in 300 days',
     state({
