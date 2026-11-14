@@ -590,7 +590,15 @@ describe('AnalyticsService', () => {
 
       expect(csv.split('\n')[0]).toContain('id,clicked_at');
       expect(csv).toContain('c1');
-      expect(csv).toContain('"https://google.com"');
+      expect(csv).toContain(',https://google.com,');
+    });
+
+    it('neutralises a referrer that would run as a spreadsheet formula', async () => {
+      clickQb.getMany.mockResolvedValueOnce([
+        { id: 'c1', clickedAt: new Date('2025-01-01T00:00:00Z'), referrer: '=HYPERLINK("https://evil.example","x")' },
+      ]);
+      const csv = await service.exportClicksAsCsv('link-1');
+      expect(csv).toContain(`"'=HYPERLINK(""https://evil.example"",""x"")"`);
     });
 
     it('escapes quotes in referrers', async () => {

@@ -28,7 +28,10 @@ function compose(
   paragraphs: string[],
   action?: { label: string; url: string },
 ): PlatformEmail {
-  const greeting = name === null ? 'Hi,' : `Hi ${name},`;
+  // The account name is whatever the registrant typed, and the address may not be
+  // theirs: cleaned like any other typed name, so our sender delivers no link in it.
+  const shown = name === null ? '' : safeDisplayName(name);
+  const greeting = shown === '' ? 'Hi,' : `Hi ${shown},`;
   const html = [
     `<p>${escapeHtml(greeting)}</p>`,
     ...paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`),

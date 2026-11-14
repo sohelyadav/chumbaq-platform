@@ -10,6 +10,7 @@ import { LinksService } from '../links/links.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
 import { ProjectAccessService } from '../project-access/project-access.service';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+import { csvCell } from '../admin/audit-csv';
 
 /** The most clicks one link export returns; the response says when it stopped there. */
 export const CLICK_EXPORT_ROW_CAP = 50_000;
@@ -453,6 +454,8 @@ export class AnalyticsService {
     const clicks = await qb.take(CLICK_EXPORT_ROW_CAP).getMany();
 
     const header = 'id,clicked_at,ip_address,platform,device_type,os,browser,country,city,referrer,redirect_type';
+    // Every cell through csvCell: the referrer (and the user agent's parts) come from
+    // anonymous visitors, and a cell starting = + - @ would run as a formula.
     const rows = clicks.map((c) =>
       [
         c.id,
@@ -464,9 +467,11 @@ export class AnalyticsService {
         c.browser || '',
         c.country || '',
         c.city || '',
-        `"${(c.referrer || '').replace(/"/g, '""')}"`,
+        c.referrer || '',
         c.redirectType || '',
-      ].join(','),
+      ]
+        .map(csvCell)
+        .join(','),
     );
 
     return [header, ...rows].join('\n');

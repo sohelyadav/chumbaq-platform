@@ -35,6 +35,7 @@ import { RecoveryCodeEntity } from './entities/recovery-code.entity';
 import { SessionsService } from './sessions.service';
 import { assertSessionStillCurrent } from './session-still-current';
 import { STAFF_KEEP_CUSTOMER_FACTOR_MESSAGE } from '../staff-auth/staff-messages';
+import { logValue } from '../../common/log-value';
 
 /** Enough for every device someone owns, and a limit on what one account can store. */
 export const MAX_PASSKEYS_PER_USER = 10;
@@ -367,7 +368,7 @@ export class PasskeysService {
         .execute();
       return Boolean(moved.affected);
     } catch (error) {
-      this.logger.warn(`Passkey assertion refused: ${(error as Error).message}`);
+      this.logger.warn(`Passkey assertion refused: ${logValue((error as Error).message)}`);
       return false;
     }
   }
@@ -409,7 +410,7 @@ export class PasskeysService {
     } catch (error) {
       // The reason stays here: it says what the verifier expected, and a mismatched
       // origin or RP ID in deployment config shows up nowhere else.
-      this.logger.warn(`Passkey registration refused: ${(error as Error).message}`);
+      this.logger.warn(`Passkey registration refused: ${logValue((error as Error).message)}`);
       info = undefined;
     }
     if (!info) throw new BadRequestException('Could not verify that passkey.');

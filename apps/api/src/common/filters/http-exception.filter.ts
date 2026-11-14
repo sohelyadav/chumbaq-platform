@@ -8,6 +8,8 @@ import {
 } from '@nestjs/common';
 import { Response, Request } from 'express';
 import { requestIdOf } from '../request-id';
+import { logValue } from '../log-value';
+import { maskPathSecrets } from '../mask-path-secrets';
 
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
@@ -39,7 +41,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
       // message can name hosts, columns and values. The detail goes to the log.
       const id = requestIdOf(request);
       this.logger.error(
-        `${id ? `[${id}] ` : ''}${request.method} ${request.path}: ${exception instanceof Error ? exception.message : String(exception)}`,
+        `${id ? `[${id}] ` : ''}${request.method} ${maskPathSecrets(request.path)}: ${logValue(exception instanceof Error ? exception.message : String(exception))}`,
         exception instanceof Error ? exception.stack : undefined,
       );
     }

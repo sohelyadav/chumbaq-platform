@@ -1,4 +1,11 @@
-import { accountLink, mauNoticeEmail, paymentHaltedEmail, projectInviteEmail, safeDisplayName } from './account-emails';
+import {
+  accountLink,
+  mauNoticeEmail,
+  passwordChangedEmail,
+  paymentHaltedEmail,
+  projectInviteEmail,
+  safeDisplayName,
+} from './account-emails';
 
 describe('accountLink', () => {
   it('puts the token in the fragment, which browsers never send to a server', () => {
@@ -145,7 +152,7 @@ describe('projectInviteEmail with names that are links', () => {
 });
 
 describe('billing emails', () => {
-  const user = { email: 'owner@example.com', name: 'Asha <b>Rao</b>' };
+  const user = { email: 'owner@example.com', name: 'Asha <b>Rao' };
   const link = accountLink('https://app.example', '/account/billing');
 
   describe('mauNoticeEmail', () => {
@@ -173,7 +180,7 @@ describe('billing emails', () => {
       const email = build(100);
       expect(email.html).not.toContain('<b>');
       expect(email.html).toContain('Team &lt;b&gt;plan&lt;/b&gt;');
-      expect(email.html).toContain('Asha &lt;b&gt;Rao&lt;/b&gt;');
+      expect(email.html).toContain('Asha &lt;b&gt;Rao');
       expect(email.text).toContain('Team <b>plan</b>');
     });
 
@@ -196,7 +203,21 @@ describe('billing emails', () => {
 
     it('escapes the name in the HTML part', () => {
       expect(email.html).not.toContain('<b>');
-      expect(email.html.startsWith('<p>Hi Asha &lt;b&gt;Rao&lt;/b&gt;,</p>')).toBe(true);
+      expect(email.html.startsWith('<p>Hi Asha &lt;b&gt;Rao,</p>')).toBe(true);
     });
+  });
+});
+
+describe('the greeting in account mail', () => {
+  // Registration takes any name, and the address it is mailed to may not be the
+  // registrant's: a name must not carry a link into mail from our sender.
+  it('drops anything link-like from the account name', () => {
+    const email = passwordChangedEmail(
+      { email: 'someone@example.com', name: 'Claim your prize at evil.example/win now' } as never,
+      'https://app.example/forgot-password',
+    );
+    expect(email.text).not.toContain('evil.example');
+    expect(email.html).not.toContain('evil.example');
+    expect(email.text.startsWith('Hi Claim your prize at now,')).toBe(true);
   });
 });

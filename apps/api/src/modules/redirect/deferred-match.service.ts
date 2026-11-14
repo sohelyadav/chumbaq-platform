@@ -4,6 +4,7 @@ import { Repository, MoreThan, In } from 'typeorm';
 import { ClickEventEntity } from '../analytics/entities/click-event.entity';
 import { LinksService } from '../links/links.service';
 import { DeferredMatchDto } from './dto/deferred-match.dto';
+import { logValue } from '../../common/log-value';
 
 /**
  * How far back either strategy will claim a click.
@@ -111,7 +112,7 @@ export class DeferredMatchService {
           };
         }
       } catch {
-        this.logger.debug(`Cookie ref match failed for: ${dto.cookieRef}`);
+        this.logger.debug(`Cookie ref match failed for: ${logValue(dto.cookieRef)}`);
       }
     }
 
