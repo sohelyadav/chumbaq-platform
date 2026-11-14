@@ -15,10 +15,16 @@ const repoRoot = path.resolve(__dirname, '../..');
  * style-src allows inline because charts and the map set style attributes. img-src
  * allows any https because tenants' banners and link previews come from their own hosts.
  * Email previews are sandboxed srcdoc frames, which inherit this policy.
+ *
+ * Razorpay Checkout (the billing page, only when billing is on) loads its script from
+ * checkout.razorpay.com and opens its payment form in frames from there and from
+ * api.razorpay.com. Card and bank details are typed into those frames, never this page.
+ * frame-src keeps the 'self' that default-src gave frames before it was set.
  */
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
-  "script-src 'self'",
+  "script-src 'self' https://checkout.razorpay.com",
+  "frame-src 'self' https://api.razorpay.com https://checkout.razorpay.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' data: https://fonts.gstatic.com",
   "img-src 'self' data: blob: https:",
