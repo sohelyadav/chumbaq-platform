@@ -50,6 +50,7 @@ import staffConfig from './config/staff.config';
 import billingConfig from './config/billing.config';
 import { QueueModule } from './queue/queue.module';
 import { throttleTracker } from './common/throttle-tracker';
+import { API_DB_POOL } from './common/db-pool';
 
 @Module({
   imports: [
@@ -89,9 +90,11 @@ import { throttleTracker } from './common/throttle-tracker';
           synchronize: allowSynchronize,
           migrations: [__dirname + '/migrations/*{.ts,.js}'],
           // Dev and test build the schema with synchronize; every other
-          // environment applies migrations at boot instead. The API owns this —
-          // the worker never runs migrations (see worker.module.ts).
-          migrationsRun: !allowSynchronize,
+          // environment applies migrations at boot, before this pool exists
+          // (run-migrations.ts, from main.ts), so they are not held to its
+          // statement timeout. The worker never runs migrations.
+          migrationsRun: false,
+          extra: API_DB_POOL,
           logging: nodeEnv === 'development',
         };
       },

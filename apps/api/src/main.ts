@@ -10,8 +10,10 @@ import { VALIDATION_PIPE_OPTIONS } from './common/validation-pipe.options';
 import { TRUST_PROXY } from './common/client-ip';
 import { requestId } from './common/request-id';
 import { applySecurityHeaders } from './common/security-headers';
+import { runMigrationsBeforeBoot } from './run-migrations';
 
 async function bootstrap() {
+  await runMigrationsBeforeBoot(process.env.NODE_ENV);
   // rawBody keeps the request bytes beside the parsed JSON. Webhook
   // signatures (Resend's Svix HMAC) are computed over those exact bytes, and
   // re-serialising the parsed body does not reproduce them.
