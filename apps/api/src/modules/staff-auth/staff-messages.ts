@@ -10,6 +10,13 @@ export const STAFF_ENROLMENT_BLOCKED_MESSAGE =
   'Staff sign-in is not set up for this account. Enter the enrolment code from your operator.';
 export const STAFF_SESSION_IDLE_MESSAGE = 'Signed out after a period of inactivity.';
 export const STAFF_SESSION_ENDED_MESSAGE = 'Your staff session has ended. Sign in again.';
+/**
+ * While passkeys are required for staff, an authenticator app is not a staff factor: a
+ * phishing page can collect a code but cannot make a passkey sign for the admin host, so
+ * a code must not sign in, re-authenticate, or vouch for a new passkey there.
+ */
+export const STAFF_PASSKEY_NEEDED_MESSAGE =
+  'Staff sign-in needs a passkey. Use your passkey, or ask your operator for an enrolment code.';
 export const STAFF_LAST_FACTOR_MESSAGE = 'Add another sign-in method before removing this one.';
 export const PASSKEY_NOT_RECOGNISED_MESSAGE = 'That passkey is not recognised.';
 /** Answered by the customer API to a super admin changing what is also their staff sign-in. */

@@ -34,6 +34,7 @@ import { UsersService } from '../users/users.service';
 import type { AuthenticatedStaff } from './staff-principal';
 import {
   STAFF_ENROLMENT_BLOCKED_MESSAGE,
+  STAFF_PASSKEY_NEEDED_MESSAGE,
   STAFF_SESSION_ENDED_MESSAGE,
   STAFF_SESSION_IDLE_MESSAGE,
 } from './staff-messages';
@@ -85,6 +86,21 @@ export class StaffAuthService {
     private readonly config: ConfigService,
     private readonly dataSource: DataSource,
   ) {}
+
+  private get passkeyRequired(): boolean {
+    return this.config.get<boolean>('webauthn.superAdminPasskeyRequired') === true;
+  }
+
+  /**
+   * The staff factors that may sign in and re-authenticate here. While passkeys are
+   * required that is staff passkeys only (`STAFF_PASSKEY_NEEDED_MESSAGE`): an account
+   * whose only staff factor is an authenticator app is treated as having none, so it
+   * enrols a passkey with an operator's code like anyone else.
+   */
+  async staffSignInMethods(userId: string): Promise<StaffSecondFactor[]> {
+    const methods = await this.secondFactors.staffMethodsFor(userId);
+    return this.passkeyRequired ? methods.filter((m) => m !== 'totp') : methods;
+  }
 
   // ---- Session plumbing
 
@@ -186,7 +202,7 @@ export class StaffAuthService {
       throw await fail(user.suspendedAt ? 'suspended' : 'not_staff', user);
     }
 
-    const methods: StaffSecondFactor[] = await this.secondFactors.staffMethodsFor(user.id);
+    const methods = await this.staffSignInMethods(user.id);
     if (methods.length > 0) {
       // No `login.succeeded` yet: that lifts the failure limit, and the password alone must not.
       await this.events.record({ type: 'login.password_accepted', userId: user.id, email, ...context });
@@ -205,9 +221,7 @@ export class StaffAuthService {
     // Anyone else needs an operator's one-time code (`admin:staff-enrolment`), handed
     // over out of band: a password can be reset by whoever holds the mailbox, so a
     // password alone, even within an operator's allowance, must not plant a staff factor.
-    const needsCode =
-      this.config.get<boolean>('webauthn.superAdminPasskeyRequired') === true ||
-      (await this.secondFactors.hasAnyPasskey(user.id));
+    const needsCode = this.passkeyRequired || (await this.secondFactors.hasAnyPasskey(user.id));
     if (!needsCode) return this.startEnrolment(user, context, null);
 
     // Only reached with the right password, so the code is never tested for anyone who
@@ -281,6 +295,8 @@ export class StaffAuthService {
   /** The second step after a password, with an authenticator app code. */
   async loginWithTotp(handle: string, code: string, context: RequestContext = {}): Promise<StaffSignInResult> {
     const user = await this.pendingUser(handle, context);
+    // Never offered while passkeys are required; refused here too, before the code is tried.
+    if (this.passkeyRequired) throw new UnauthorizedException(STAFF_PASSKEY_NEEDED_MESSAGE);
     if (!(await this.totp.acceptCode(user.id, code))) {
       await this.events.record({
         type: 'login.failed',
@@ -451,7 +467,7 @@ export class StaffAuthService {
       this.users.findById(staff.userId),
       this.sessions.find(staff.sessionId, staff.userId),
       this.secondFactors.passkeyCount(staff.userId, 'staff'),
-      this.secondFactors.staffMethodsFor(staff.userId),
+      this.staffSignInMethods(staff.userId),
     ]);
     if (!user || !row) throw new UnauthorizedException(STAFF_SESSION_ENDED_MESSAGE);
     const accessExpiresAt = new Date((staff.accessExp ?? Math.floor(Date.now() / 1000)) * 1000);
@@ -468,6 +484,8 @@ export class StaffAuthService {
   // ---- Re-authentication
 
   async reauthWithTotp(staff: AuthenticatedStaff, code: string, context: RequestContext = {}): Promise<StaffReauthenticated> {
+    // 403, not 401, as for a wrong code below.
+    if (this.passkeyRequired) throw new ForbiddenException(STAFF_PASSKEY_NEEDED_MESSAGE);
     await this.auth.assertUnderLoginLimit(staff.email, context);
     const user = await this.users.findById(staff.userId);
     if (!user) throw new UnauthorizedException(STAFF_SESSION_ENDED_MESSAGE);

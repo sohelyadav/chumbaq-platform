@@ -205,7 +205,7 @@ export class StaffPasskeysService {
   // ---- Managing
 
   async registrationOptions(staff: AuthenticatedStaff) {
-    await this.factors.assertMayAdd(staff, false);
+    await this.factors.assertMayAdd(staff, false, 'webauthn');
     const user = await this.factors.requireUser(staff.userId);
     const existing = await this.staffKeys(user.id);
     if (existing.length >= MAX_PASSKEYS_PER_USER) {
@@ -232,7 +232,7 @@ export class StaffPasskeysService {
     name: string,
     context: RequestContext = {},
   ): Promise<StaffEnrolled> {
-    await this.factors.assertMayAdd(staff, true);
+    await this.factors.assertMayAdd(staff, true, 'webauthn');
     const challenge = await this.preAuth.takeChallenge(CEREMONY.register, staff.sessionId);
     if (!challenge) throw new BadRequestException(TOO_SLOW);
     const info = await this.passkeys.verifyRegistration(response, challenge, 'staff', true);

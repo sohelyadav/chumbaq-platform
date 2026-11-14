@@ -15,6 +15,7 @@ import {
   STAFF_ENROLMENT_ONLY_MESSAGE,
   STAFF_LAST_FACTOR_MESSAGE,
   STAFF_MANAGE_IN_ADMIN_MESSAGE,
+  STAFF_PASSKEY_NEEDED_MESSAGE,
   STAFF_SESSION_ENDED_MESSAGE,
   STAFF_SESSION_IDLE_MESSAGE,
   STAFF_KEYS_ONLY_MESSAGE,
@@ -682,6 +683,82 @@ describe('Staff sign-in (integration)', () => {
       const codes = await customerApi('POST', '/auth/recovery-codes', { token: customerAccess });
       expect(codes.status).toBe(403);
       expect(codes.body.message).toBe(STAFF_MANAGE_IN_ADMIN_MESSAGE);
+    });
+  });
+
+  describe('an authenticator app, when passkeys are required', () => {
+    // SUPER_ADMIN_PASSKEY_REQUIRED for the callback only, as in the cases above.
+    const whileRequired = async (run: () => Promise<void>) => {
+      const config = admin.app.get(ConfigService);
+      const realGet = config.get.bind(config);
+      const required = jest
+        .spyOn(config, 'get')
+        .mockImplementation(((path: string, ...rest: unknown[]) =>
+          path === 'webauthn.superAdminPasskeyRequired' ? true : (realGet as any)(path, ...rest)) as never);
+      try {
+        await run();
+      } finally {
+        required.mockRestore();
+      }
+    };
+    const enrolTotp = async (token: string) => {
+      const setup = await staffApi('POST', '/totp/setup', { token, body: {} });
+      expect(setup.status).toBe(200);
+      const secret = base32Decode(setup.body.data.secret);
+      const confirmed = await staffApi('POST', '/totp/confirm', { token, body: { code: codeAt(secret, -1) } });
+      expect(confirmed.status).toBe(200);
+      return secret;
+    };
+
+    it('cannot sign in, re-authenticate or vouch for a new passkey', async () => {
+      const { user, key, token } = await signedInStaff('required-totp');
+      const options = await staffApi('POST', '/reauth/passkey/options', { token, body: {} });
+      const reauthed = await staffApi('POST', '/reauth/passkey/verify', {
+        token,
+        body: { response: key.assert(options.body.data.options.challenge) },
+      });
+      const secret = await enrolTotp(reauthed.body.data.accessToken);
+      // A session that showed only the password and a code, from before the requirement.
+      const step = await login(user.email);
+      const codeOnly = await staffApi('POST', '/login/totp', { body: { handle: step.body.data.handle, code: codeAt(secret) } });
+      expect(codeOnly.status).toBe(200);
+      const codeToken = codeOnly.body.data.accessToken as string;
+
+      await whileRequired(async () => {
+        const reauth = await staffApi('POST', '/reauth/totp', { token: codeToken, body: { code: codeAt(secret, 1) } });
+        expect(reauth.status).toBe(403);
+        expect(reauth.body.message).toBe(STAFF_PASSKEY_NEEDED_MESSAGE);
+        const plant = await staffApi('POST', '/passkeys/options', { token: codeToken, body: {} });
+        expect(plant.status).toBe(403);
+        expect(plant.body.message).toBe(STAFF_PASSKEY_NEEDED_MESSAGE);
+
+        const again = await login(user.email);
+        expect(again.body.data).toMatchObject({ step: 'second_factor', methods: ['webauthn'] });
+        const byCode = await staffApi('POST', '/login/totp', { body: { handle: again.body.data.handle, code: codeAt(secret, 1) } });
+        expect(byCode.status).toBe(401);
+        expect(byCode.body.message).toBe(STAFF_PASSKEY_NEEDED_MESSAGE);
+      });
+      const added = (await auditActions(user.id)).filter((r) => r.action === 'staff.factor_added');
+      expect(added).toHaveLength(2);
+    });
+
+    it('sends someone whose only staff factor is the app to an operator code, which can add a passkey', async () => {
+      const staff = await makeUser('required-totp-only');
+      await enrolTotp((await login(staff.email)).body.data.accessToken);
+
+      await whileRequired(async () => {
+        const refused = await login(staff.email);
+        expect(refused.status).toBe(403);
+        expect(refused.body.message).toBe(STAFF_ENROLMENT_BLOCKED_MESSAGE);
+        const { code } = await staffEnrolment(ds, staff.email);
+        const enrol = await login(staff.email, PASSWORD, code);
+        expect(enrol.body.data.step).toBe('enrol');
+        const token = enrol.body.data.accessToken as string;
+        const factors = await staffApi('GET', '/factors', { token });
+        expect(factors.body.data.totp).toEqual({ enabled: true, available: false });
+        expect((await staffApi('POST', '/totp/setup', { token, body: {} })).status).toBe(403);
+        expect((await enrolPasskey(token, authenticator())).body.data).toEqual({ enrolled: true, signInAgain: true });
+      });
     });
   });
 

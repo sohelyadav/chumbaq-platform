@@ -6,6 +6,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, IsNull, Not, Repository } from 'typeorm';
 import type { StaffEnrolled, StaffFactors } from '@chumbaq/shared';
@@ -27,6 +28,7 @@ import type { AuthenticatedStaff } from './staff-principal';
 import {
   STAFF_ENROLMENT_ONLY_MESSAGE,
   STAFF_LAST_FACTOR_MESSAGE,
+  STAFF_PASSKEY_NEEDED_MESSAGE,
   STAFF_SESSION_ENDED_MESSAGE,
 } from './staff-messages';
 
@@ -67,7 +69,12 @@ export class StaffFactorsService {
     private readonly events: AuthEventsService,
     private readonly audit: AdminAuditService,
     private readonly notices: SecurityNoticesService,
+    private readonly config: ConfigService,
   ) {}
+
+  private get passkeyRequired(): boolean {
+    return this.config.get<boolean>('webauthn.superAdminPasskeyRequired') === true;
+  }
 
   async requireUser(userId: string): Promise<UserEntity> {
     const user = await this.users.findById(userId);
@@ -75,8 +82,19 @@ export class StaffFactorsService {
     return user;
   }
 
-  /** Before adding: the proof is looked at here and spent by the finishing step. */
-  async assertMayAdd(staff: AuthenticatedStaff, spend: boolean): Promise<void> {
+  /**
+   * Before adding: the proof is looked at here and spent by the finishing step.
+   *
+   * While passkeys are required, only a passkey vouches for a new staff factor: an
+   * enrolment session (started with an operator's code) may add a passkey, and a full
+   * session may add anything only once it has shown a passkey. Otherwise a password and
+   * phished authenticator codes could plant passkeys and then pass `SuperAdminGuard`.
+   */
+  async assertMayAdd(staff: AuthenticatedStaff, spend: boolean, factor: 'webauthn' | 'totp'): Promise<void> {
+    if (this.passkeyRequired) {
+      const vouched = staff.enrolmentOnly ? factor === 'webauthn' : staff.amr.includes('webauthn');
+      if (!vouched) throw new ForbiddenException(STAFF_PASSKEY_NEEDED_MESSAGE);
+    }
     if (staff.enrolmentOnly) return;
     assertRecentAuth(staff);
     const holder = { userId: staff.userId, sessionId: staff.sessionId, audience: 'staff' as const };
@@ -111,9 +129,11 @@ export class StaffFactorsService {
     // An enrolment session exists to add the first staff factor, nothing more. If another
     // of this person's enrolment sessions got there first (the user row lock orders
     // them), this one is spent too, however it was left alive.
+    // While passkeys are required an authenticator app is no staff factor, so a person
+    // who has only that enrols a passkey this way.
     if (staff.enrolmentOnly) {
       const { passkeys, totp } = await staffFactorCount(manager, locked.id);
-      if (passkeys > 0 || totp) throw ended();
+      if (passkeys > 0 || (totp && !this.passkeyRequired)) throw ended();
     }
     return locked;
   }
@@ -209,7 +229,11 @@ export class StaffFactorsService {
         deviceType: row.deviceType,
         backedUp: row.backedUp,
       })),
-      totp: { enabled: totpEnabled, available: this.crypto.isConfigured },
+      // An enrolment session may not add one while passkeys are required (`assertMayAdd`).
+      totp: {
+        enabled: totpEnabled,
+        available: this.crypto.isConfigured && !(staff.enrolmentOnly && this.passkeyRequired),
+      },
       canRemove: rows.length + (totpEnabled ? 1 : 0) > 1,
     };
   }
@@ -218,7 +242,7 @@ export class StaffFactorsService {
 
   /** Staff get no recovery codes and need no verified address: staff are made by CLI. */
   async totpSetup(staff: AuthenticatedStaff): Promise<{ secret: string; uri: string }> {
-    await this.assertMayAdd(staff, false);
+    await this.assertMayAdd(staff, false, 'totp');
     if (!this.crypto.isConfigured) {
       throw new ForbiddenException('Two-factor sign-in is not available right now.');
     }
@@ -227,10 +251,10 @@ export class StaffFactorsService {
 
   /** A mistyped code leaves the proof unspent: mistyping is ordinary just after setup. */
   async totpConfirm(staff: AuthenticatedStaff, code: string, context: RequestContext = {}): Promise<StaffEnrolled> {
-    await this.assertMayAdd(staff, false);
+    await this.assertMayAdd(staff, false, 'totp');
     const step = await this.totp.matchPendingCode(staff.userId, code);
     if (step === null) throw new BadRequestException(CODE_REFUSED);
-    await this.assertMayAdd(staff, true);
+    await this.assertMayAdd(staff, true, 'totp');
 
     const user = await this.secrets.manager.transaction(async (manager) => {
       const locked = await this.assertStillCurrent(manager, staff);
