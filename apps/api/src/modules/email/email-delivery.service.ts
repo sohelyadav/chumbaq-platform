@@ -8,7 +8,6 @@ import { PushCampaignStateService } from '../push-notifications/push-campaign-st
 import { ChannelRecipient } from '../push-notifications/services/channel-provider';
 import { DeviceIdentityEntity } from '../identity/entities/device-identity.entity';
 import {
-  MAX_THROTTLE_WAIT_MS,
   PushCampaignJobData,
 } from '../../queue/queue.constants';
 import { EmailAudienceService } from './email-audience.service';
@@ -25,6 +24,7 @@ import {
   IDENTITY_TAG,
   renderEmail,
 } from './email-rendering';
+import { yieldForPacing } from '../../queue/campaign-pacing';
 
 /**
  * Recipients per page. Smaller than push's 500: each email is its own HTTP
@@ -155,14 +155,15 @@ export class EmailDeliveryService {
         );
       }
 
-      await this.throttle(result.resolvedCount, maxPerMinute);
-
       if (result.retryReason) {
         throw new Error(
           `${settings.provider} stopped after ${result.resolvedCount}/${page.length} ` +
             `recipients of email campaign ${log.id}: ${result.retryReason}`,
         );
       }
+
+      // After the checkpoint: gives the worker slot up until the next page may go.
+      await yieldForPacing(job, result.resolvedCount, maxPerMinute);
     }
 
     const status = await this.state.finalize(log.id);
@@ -184,11 +185,5 @@ export class EmailDeliveryService {
         tags: { [CAMPAIGN_TAG]: log.id, [IDENTITY_TAG]: identity.id },
       }),
     }));
-  }
-
-  private async throttle(sent: number, maxPerMinute: number | null): Promise<void> {
-    if (!maxPerMinute || maxPerMinute <= 0 || sent <= 0) return;
-    const waitMs = Math.min((sent / maxPerMinute) * 60_000, MAX_THROTTLE_WAIT_MS);
-    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
 }

@@ -10,7 +10,6 @@ import { SuppressionReason } from '../push-notifications/entities/channel-suppre
 import { ChannelFailure, ChannelRecipient } from '../push-notifications/services/channel-provider';
 import { DeviceIdentityEntity } from '../identity/entities/device-identity.entity';
 import {
-  MAX_THROTTLE_WAIT_MS,
   PushCampaignJobData,
 } from '../../queue/queue.constants';
 import {
@@ -23,6 +22,7 @@ import { SmsProviderRegistry } from './sms-provider.registry';
 import { renderSms, SmsMessage } from './sms-rendering';
 import { SmsSettingsEntity } from './entities/sms-settings.entity';
 import { TWILIO_UNREACHABLE, TWILIO_UNSUBSCRIBED } from './providers/twilio.provider';
+import { yieldForPacing } from '../../queue/campaign-pacing';
 
 /** Recipients per page. As for email: one HTTP call each, so kept small. */
 export const SMS_BATCH_SIZE = 100;
@@ -142,14 +142,15 @@ export class SmsDeliveryService {
         );
       }
 
-      await this.throttle(result.resolvedCount, maxPerMinute);
-
       if (result.retryReason) {
         throw new Error(
           `${settings.provider} stopped after ${result.resolvedCount}/${page.length} ` +
             `recipients of SMS campaign ${log.id}: ${result.retryReason}`,
         );
       }
+
+      // After the checkpoint: gives the worker slot up until the next page may go.
+      await yieldForPacing(job, result.resolvedCount, maxPerMinute);
     }
 
     const status = await this.state.finalize(log.id);
@@ -203,11 +204,5 @@ export class SmsDeliveryService {
         statusCallback: this.settings.statusCallbackUrl(settings, log.id, identity.id),
       }),
     }));
-  }
-
-  private async throttle(sent: number, maxPerMinute: number | null): Promise<void> {
-    if (!maxPerMinute || maxPerMinute <= 0 || sent <= 0) return;
-    const waitMs = Math.min((sent / maxPerMinute) * 60_000, MAX_THROTTLE_WAIT_MS);
-    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
 }

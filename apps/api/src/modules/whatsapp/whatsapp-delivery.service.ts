@@ -9,7 +9,6 @@ import { SuppressionsService } from '../push-notifications/suppressions.service'
 import { ChannelRecipient } from '../push-notifications/services/channel-provider';
 import { DeviceIdentityEntity } from '../identity/entities/device-identity.entity';
 import {
-  MAX_THROTTLE_WAIT_MS,
   PushCampaignJobData,
 } from '../../queue/queue.constants';
 import {
@@ -20,6 +19,7 @@ import { WhatsAppAudienceService } from './whatsapp-audience.service';
 import { WhatsAppSettingsService } from './whatsapp-settings.service';
 import { WhatsAppProviderRegistry } from './whatsapp-provider.registry';
 import { renderWhatsApp, WhatsAppMessage } from './whatsapp-rendering';
+import { yieldForPacing } from '../../queue/campaign-pacing';
 
 /** Recipients per page: one HTTP call each, as for email and SMS. */
 export const WHATSAPP_BATCH_SIZE = 100;
@@ -141,14 +141,15 @@ export class WhatsAppDeliveryService {
         );
       }
 
-      await this.throttle(result.resolvedCount, maxPerMinute);
-
       if (result.retryReason) {
         throw new Error(
           `${settings.provider} stopped after ${result.resolvedCount}/${page.length} ` +
             `recipients of WhatsApp campaign ${log.id}: ${result.retryReason}`,
         );
       }
+
+      // After the checkpoint: gives the worker slot up until the next page may go.
+      await yieldForPacing(job, result.resolvedCount, maxPerMinute);
     }
 
     const status = await this.state.finalize(log.id);
@@ -177,11 +178,5 @@ export class WhatsAppDeliveryService {
           : undefined,
       }),
     }));
-  }
-
-  private async throttle(sent: number, maxPerMinute: number | null): Promise<void> {
-    if (!maxPerMinute || maxPerMinute <= 0 || sent <= 0) return;
-    const waitMs = Math.min((sent / maxPerMinute) * 60_000, MAX_THROTTLE_WAIT_MS);
-    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
 }

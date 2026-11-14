@@ -2,7 +2,7 @@ import { CAMPAIGN_STOPPED_BY_SUSPENSION } from '../../modules/projects/project-s
 import { ProjectSuspensionService } from '../../modules/projects/project-suspension.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Job } from 'bullmq';
+import { DelayedError, Job } from 'bullmq';
 import { PushCampaignProcessor } from './push-campaign.processor';
 import { PushNotificationLogEntity } from '../../modules/push-notifications/entities/push-notification-log.entity';
 import { PushConfigEntity } from '../../modules/push-notifications/entities/push-config.entity';
@@ -849,28 +849,41 @@ describe('PushCampaignProcessor', () => {
       expect(Date.now() - started).toBeLessThan(200);
     });
 
-    it('paces a page to stay under the configured rate', async () => {
-      // 60/min means one message per second, so a one-message page waits ~1s.
-      arrange(60);
+    // Parked after its first page, the job never asks for a second one.
+    const arrangeOnePage = (maxSendsPerMinute: number) => {
+      logRepo.findOne.mockResolvedValueOnce(queuedLog);
+      configRepo.findOne.mockResolvedValueOnce({ ...activeConfig, maxSendsPerMinute });
+      pushTokensService.getActiveTokensPage.mockResolvedValueOnce([{ id: 'tok-1', token: 't1', deviceIdentityId: 'id-1' }]);
+      fcmProvider.sendToRecipients.mockResolvedValueOnce(fcmResult({ successCount: 1, failureCount: 0 }));
+    };
+
+    // Two slots serve every tenant: a paced campaign must give its slot up between
+    // pages, not sleep in it.
+    it('parks the job until its next page may go, instead of holding the worker', async () => {
+      // 60/min: a one-message page means the next may go in a second.
+      arrangeOnePage(60);
+      const job = { ...makeJob({ logId: 'log-1', projectId: 'proj-1' }), token: 'lock', moveToDelayed: jest.fn() } as never;
       const started = Date.now();
 
-      await processor.process(makeJob({ logId: 'log-1', projectId: 'proj-1' }));
+      await expect(processor.process(job)).rejects.toBeInstanceOf(DelayedError);
 
-      const elapsed = Date.now() - started;
-      expect(elapsed).toBeGreaterThanOrEqual(900);
-      expect(elapsed).toBeLessThan(3000);
+      expect(Date.now() - started).toBeLessThan(500);
+      const [until, token] = (job as unknown as { moveToDelayed: jest.Mock }).moveToDelayed.mock.calls[0];
+      expect(token).toBe('lock');
+      expect(until - started).toBeGreaterThanOrEqual(900);
+      expect(until - started).toBeLessThan(2000);
     });
 
-    it('caps the wait so a low rate cannot park the worker', async () => {
-      // 1/min would ideally wait a full minute for one message. BullMQ would
-      // reclaim the job as stalled long before that, so the wait is bounded.
-      arrange(1);
+    it('parks a slow campaign for as long as its rate needs, holding nothing meanwhile', async () => {
+      arrangeOnePage(1);
+      const job = { ...makeJob({ logId: 'log-1', projectId: 'proj-1' }), token: 'lock', moveToDelayed: jest.fn() } as never;
       const started = Date.now();
 
-      await processor.process(makeJob({ logId: 'log-1', projectId: 'proj-1' }));
+      await expect(processor.process(job)).rejects.toBeInstanceOf(DelayedError);
 
-      expect(Date.now() - started).toBeLessThan(35_000);
-    }, 40_000);
+      const [until] = (job as unknown as { moveToDelayed: jest.Mock }).moveToDelayed.mock.calls[0];
+      expect(until - started).toBeGreaterThanOrEqual(59_000);
+    });
   });
 
   describe('multi-language copy', () => {

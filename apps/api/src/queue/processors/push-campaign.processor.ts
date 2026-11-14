@@ -4,7 +4,6 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Job, UnrecoverableError } from 'bullmq';
 import {
-  MAX_THROTTLE_WAIT_MS,
   QUEUE_PUSH_CAMPAIGN,
   PUSH_BATCH_SIZE,
   PushCampaignJobData,
@@ -43,6 +42,7 @@ import {
   CAMPAIGN_STOPPED_BY_SUSPENSION,
   ProjectSuspensionService,
 } from '../../modules/projects/project-suspension.service';
+import { yieldForPacing } from '../campaign-pacing';
 
 /**
  * Delivers a queued push campaign.
@@ -279,8 +279,6 @@ export class PushCampaignProcessor extends WorkerHost {
        * nothing left to retry them — which is exactly what the old code did,
        * silently, while reporting the campaign as complete.
        */
-      await this.throttle(result.resolvedCount, maxSendsPerMinute);
-
       if (result.retryReason) {
         throw new Error(
           `FCM still failing for campaign ${logId} after ` +
@@ -288,6 +286,9 @@ export class PushCampaignProcessor extends WorkerHost {
             result.retryReason,
         );
       }
+
+      // After the checkpoint: gives the worker slot up until the next page may go.
+      await yieldForPacing(job, result.resolvedCount, maxSendsPerMinute);
     }
 
     const status = await this.state.finalize(logId);
@@ -419,34 +420,6 @@ export class PushCampaignProcessor extends WorkerHost {
 
     cache.set(channel, parsed);
     return parsed;
-  }
-
-  /**
-   * Paces delivery to the project's configured rate.
-   *
-   * Applied after a page rather than between individual sends: the provider
-   * already caps concurrency, so the page is the natural unit, and sleeping
-   * once per page keeps the worker off the event loop instead of thousands of
-   * short timers.
-   *
-   * The wait is bounded. A pathologically low rate should slow a campaign
-   * down, not park a worker for an hour holding a job lock that BullMQ will
-   * then reclaim as stalled.
-   */
-  private async throttle(
-    sentInPage: number,
-    maxSendsPerMinute: number | null,
-  ): Promise<void> {
-    if (!maxSendsPerMinute || maxSendsPerMinute <= 0 || sentInPage <= 0) return;
-
-    const idealMs = (sentInPage / maxSendsPerMinute) * 60_000;
-    const waitMs = Math.min(idealMs, MAX_THROTTLE_WAIT_MS);
-    if (waitMs <= 0) return;
-
-    this.logger.debug(
-      `Throttling ${waitMs}ms after ${sentInPage} sends to stay under ${maxSendsPerMinute}/min`,
-    );
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
 
   /**

@@ -8,14 +8,6 @@ export const JOB_SYNC_COHORT = 'sync-cohort';
 export const PUSH_BATCH_SIZE = 500;
 
 /**
- * Longest a throttled campaign will pause between pages.
- *
- * A pathologically low rate should slow delivery down, not park a worker
- * holding a job lock long enough for BullMQ to reclaim it as stalled.
- */
-export const MAX_THROTTLE_WAIT_MS = 30_000;
-
-/**
  * Cap on per-token failure records persisted to the log row. Without a cap a
  * large campaign with a high failure rate would write an unbounded jsonb blob.
  * Aggregate counts (successCount / failureCount) stay exact regardless.
