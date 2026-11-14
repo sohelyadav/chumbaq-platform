@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountLimitsService } from './account-limits.service';
+import { BillingStateService } from './billing-state.service';
 import { BillingAccountEntity } from './entities/billing-account.entity';
 import { BillingEventEntity } from './entities/billing-event.entity';
 import { BillingInvoiceEntity } from './entities/billing-invoice.entity';
@@ -32,6 +33,7 @@ import { createBillingProvider } from './providers/create-billing-provider';
   ],
   providers: [
     AccountLimitsService,
+    BillingStateService,
     FreePlanSeeder,
     {
       // Razorpay when billing is on, the null provider otherwise (`createBillingProvider`).
@@ -40,6 +42,6 @@ import { createBillingProvider } from './providers/create-billing-provider';
       useFactory: (config: ConfigService) => createBillingProvider(config.get<BillingConfig>('billing')),
     },
   ],
-  exports: [TypeOrmModule, AccountLimitsService, BILLING_PROVIDER],
+  exports: [TypeOrmModule, AccountLimitsService, BillingStateService, BILLING_PROVIDER],
 })
 export class BillingCoreModule {}
