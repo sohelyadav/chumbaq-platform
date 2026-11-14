@@ -5,7 +5,8 @@ import { MigrationInterface, QueryRunner } from "typeorm";
  * the roll-up has got to.
  *
  * - `usage_daily` holds counts only (no person, address or device), one row
- *   per non-zero value. No foreign key: the counts are kept after a project
+ *   per non-zero value (the API key snapshot stores zeros too, so a missing
+ *   row there means no snapshot). No foreign key: the counts are kept after a project
  *   is deleted.
  * - `monthly_active_devices` holds internal device ids, so erasure deletes
  *   from it (person inventory); it goes with its project.

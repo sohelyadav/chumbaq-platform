@@ -20,6 +20,14 @@
  * | `mau_month_to_date`  | `monthly_active_devices`      | snapshot: devices active in the month up to and including the day    |
  * | `api_keys_active`    | `api_keys`                    | snapshot: active, unexpired keys when the day was closed             |
  *
+ * **Missing rows.** Zeros are not stored, so inside the counted range a
+ * missing row reads as 0, with one exception: `api_keys_active` is taken only
+ * when the day closed is yesterday (it cannot be rebuilt for the past), so a
+ * day closed late, after downtime, has none. It is stored for every project
+ * whenever it is taken, 0 included, so a missing `api_keys_active` is unknown
+ * (null), never 0. `mau_month_to_date` is written for every closed day from
+ * the coverage's `mauFrom`, so before that it is unknown too.
+ *
  * **Finished** is `completed_at` in the window and a finished status (`sent`,
  * `partial`, `failed`). Every parent campaign (an A/B test, a timezone or
  * send-time split, a finished recurring template) ends `expanded` and sends
@@ -81,6 +89,12 @@ export type CountedMetric = (typeof COUNTED_METRICS)[number];
 export const SNAPSHOT_METRICS = ['mau_month_to_date', 'api_keys_active'] as const satisfies readonly UsageMetricName[];
 
 export type SnapshotMetric = (typeof SNAPSHOT_METRICS)[number];
+
+/**
+ * Snapshots not taken every closed day, so stored for every project when they
+ * are, zeros included: a missing row means not taken (unknown), never 0.
+ */
+export const ZERO_STORED_METRICS = ['api_keys_active'] as const satisfies readonly SnapshotMetric[];
 
 /** Messages that reached people, one metric per channel. */
 export const MESSAGE_SENT_METRICS = [

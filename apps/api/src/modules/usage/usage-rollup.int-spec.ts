@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { closeIntDb, openIntDb } from '../../test-support/int-db';
+import { readDay } from './usage-counting';
 import { USAGE_LOCK_SQL, UsageRollupService } from './usage-rollup.service';
 
 /**
@@ -153,6 +154,32 @@ describe('UsageRollupService (integration)', () => {
     ]);
     // One device, active every day: one for every day closed.
     expect(all.filter((r: { metric: string }) => r.metric === 'mau_month_to_date').map((r: { value: number }) => r.value)).toEqual([1, 1, 1]);
+  });
+
+  it('catch-up: a day closed without a key snapshot reads as unknown, a snapshot with no keys as 0', async () => {
+    const withKeys = await project(await user());
+    const keyless = await project(await user());
+    await ds.query(
+      `INSERT INTO api_keys (project_id, name, key_hash, prefix) VALUES ($1, 'k', $2, 'ck_live')`,
+      [withKeys, randomUUID()],
+    );
+    await state('2026-11-10');
+
+    await rollup.runTick(new Date('2026-11-14T00:31:00Z'));
+
+    // The worker was down on the 11th and 12th: no snapshot was taken.
+    for (const day of ['2026-11-11', '2026-11-12']) {
+      const values = await readDay(ds.manager, [withKeys, keyless], day);
+      expect(values.get(withKeys)?.api_keys_active).toBeUndefined();
+      expect(values.get(keyless)?.api_keys_active).toBeUndefined();
+    }
+    // Yesterday's snapshot was taken: a project with no keys has a stored 0.
+    const yesterday = await readDay(ds.manager, [withKeys, keyless], '2026-11-13');
+    expect(yesterday.get(withKeys)?.api_keys_active).toBe(1);
+    expect(yesterday.get(keyless)?.api_keys_active).toBe(0);
+    expect(await rows(keyless, 'api_keys_active')).toEqual([
+      { day: '2026-11-13', metric: 'api_keys_active', value: 0, ownerId: owners[1] },
+    ]);
   });
 
   it('a closed day is never written again', async () => {

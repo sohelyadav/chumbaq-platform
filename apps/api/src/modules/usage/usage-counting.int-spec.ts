@@ -282,6 +282,7 @@ describe('usage counting (integration)', () => {
 
     await writeApiKeySnapshot(m, projects, DAY, now);
     expect((await readDay(m, [P1, P2], DAY)).get(P1)).toEqual({ api_keys_active: 2 });
-    expect((await readDay(m, [P1, P2], DAY)).get(P2)).toBeUndefined();
+    // Taken, so a project with no working key is a stored 0, not a missing row.
+    expect((await readDay(m, [P1, P2], DAY)).get(P2)).toEqual({ api_keys_active: 0 });
   });
 });

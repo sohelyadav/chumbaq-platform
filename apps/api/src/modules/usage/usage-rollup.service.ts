@@ -36,6 +36,10 @@ export type RollupTick = { status: 'skipped' } | { status: 'ran'; closedDays: st
  * - `countedThrough`: the last closed day; null until one is closed. Nothing
  *   after it is shown.
  * - `mauFrom`: the first day of the month active devices are counted from.
+ *
+ * Active API keys have no range here: they are snapshotted only when the day
+ * closed is yesterday, and stored for every project then, zeros included, so
+ * a day without an `api_keys_active` row was not snapshotted (unknown).
  */
 export interface UsageCoverage {
   startedOn: string;

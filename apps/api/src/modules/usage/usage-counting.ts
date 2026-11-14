@@ -6,6 +6,7 @@ import {
   REACHED_EVENT_TYPES,
   SnapshotMetric,
   UsageMetricName,
+  ZERO_STORED_METRICS,
   inWindow,
 } from './usage-metrics';
 
@@ -17,18 +18,25 @@ export interface ProjectOwner {
 
 /**
  * Writes `metricSql`'s `(project_id, value)` rows into `usage_daily` for one
- * day, with each project's billing owner. Zeros are not stored. The metric
- * query uses `$1` (project ids) to `$<used>`; the next three are the day, the
- * metric and the owners (in project order).
+ * day, with each project's billing owner. Zeros are not stored, unless
+ * `zeros`: then every project given gets a row, 0 where the query has none.
+ * The metric query uses `$1` (project ids) to `$<used>`; the next three are
+ * the day, the metric and the owners (in project order).
  */
-function upsert(metricSql: string, used: number, onConflict: string): string {
+function upsert(metricSql: string, used: number, onConflict: string, zeros = false): string {
   const [day, metric, owners] = [used + 1, used + 2, used + 3].map((n) => `$${n}`);
+  const projects = `unnest($1::uuid[], ${owners}::uuid[]) AS o(project_id, owner_id)`;
+  const select = zeros
+    ? `SELECT o.project_id, o.owner_id, ${day}::date, ${metric}, COALESCE(m.value, 0), now()
+         FROM ${projects}
+         LEFT JOIN (${metricSql}) m ON m.project_id = o.project_id`
+    : `SELECT m.project_id, o.owner_id, ${day}::date, ${metric}, m.value, now()
+         FROM (${metricSql}) m
+         JOIN ${projects} ON o.project_id = m.project_id
+        WHERE m.value > 0`;
   return `
     INSERT INTO usage_daily (project_id, owner_id, day, metric, value, computed_at)
-    SELECT m.project_id, o.owner_id, ${day}::date, ${metric}, m.value, now()
-      FROM (${metricSql}) m
-      JOIN unnest($1::uuid[], ${owners}::uuid[]) AS o(project_id, owner_id) ON o.project_id = m.project_id
-     WHERE m.value > 0
+    ${select}
     ON CONFLICT (project_id, day, metric) DO UPDATE SET ${onConflict}`;
 }
 
@@ -62,7 +70,8 @@ export async function countWindow(
 
 /**
  * Writes a snapshot metric for `day`, replacing what was there, from a
- * `(project_id, value)` query over `$1::uuid[]` and then `params`.
+ * `(project_id, value)` query over `$1::uuid[]` and then `params`. A metric in
+ * `ZERO_STORED_METRICS` gets a row for every project, 0 included.
  */
 export async function writeSnapshot(
   manager: EntityManager,
@@ -74,7 +83,8 @@ export async function writeSnapshot(
 ): Promise<void> {
   if (projects.length === 0) return;
   const [ids, owners] = split(projects);
-  await manager.query(upsert(metricSql, 1 + params.length, REPLACE), [ids, ...params, day, metric, owners]);
+  const zeros = (ZERO_STORED_METRICS as readonly string[]).includes(metric);
+  await manager.query(upsert(metricSql, 1 + params.length, REPLACE, zeros), [ids, ...params, day, metric, owners]);
 }
 
 /** Keys that work at `$2` (an instant): active and not expired. */
@@ -86,7 +96,10 @@ const ACTIVE_KEYS_SQL = `
      AND (expires_at IS NULL OR expires_at > $2::timestamptz::timestamp)
    GROUP BY project_id`;
 
-/** `api_keys_active` for `day`: the keys that work at `now`. */
+/**
+ * `api_keys_active` for `day`: the keys that work at `now`. Stored for every
+ * project, 0 included, so a day with no row is a day with no snapshot.
+ */
 export async function writeApiKeySnapshot(
   manager: EntityManager,
   projects: ProjectOwner[],

@@ -7,7 +7,9 @@ import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
  * outlive raw-data retention and erasure. Kept after a project is deleted (no
  * foreign key), so a billing owner's history does not change when a project
  * goes. Only non-zero values are stored: within the counted range a missing
- * row means zero.
+ * row means zero. The exception is `ZERO_STORED_METRICS` (`api_keys_active`),
+ * stored for every project, 0 included, on the days its snapshot was taken:
+ * a missing row there means not taken, never zero.
  *
  * `owner_id` is the project's billing owner when the row was written, so a
  * billing transfer moves only days written after it.
