@@ -297,10 +297,10 @@ export class EmailPublicController {
     @Query('s') signature: string,
     @Res() res: Response,
   ): void {
-    const address = this.confirmations.verify(projectId, encoded, signature);
+    const link = this.confirmations.verify(projectId, encoded, signature);
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Content-Security-Policy', FORM_PAGE_POLICY);
-    if (!address) {
+    if (!link) {
       res
         .status(400)
         .type('html')
@@ -311,7 +311,7 @@ export class EmailPublicController {
     res.type('html').send(
       page(
         'Confirm',
-        `<h1>Confirm your email</h1><p>Receive this sender's email at <strong>${escapeHtml(address)}</strong>.</p>
+        `<h1>Confirm your email</h1><p>Receive this sender's email at <strong>${escapeHtml(link.address)}</strong>.</p>
 <form method="post" action="${escapeHtml(action)}"><button type="submit">Yes, send me emails</button></form>`,
       ),
     );
@@ -325,15 +325,17 @@ export class EmailPublicController {
     @Query('s') signature: string,
     @Res() res: Response,
   ): Promise<void> {
-    const address = this.confirmations.verify(projectId, encoded, signature);
-    if (!address) {
-      res.status(400).type('text').send('This confirmation link is not valid.');
+    const link = this.confirmations.verify(projectId, encoded, signature);
+    if (!link) {
+      res.status(400).type('text').send('This confirmation link is not valid or has expired.');
       return;
     }
-    await this.confirmations.confirm(projectId, address);
+    const confirmed = await this.confirmations.confirm(projectId, link.address, link.sentAt);
     res.setHeader('Content-Security-Policy', STATIC_PAGE_POLICY);
     res.type('html').send(
-      page('Confirmed', `<h1>Thank you</h1><p><strong>${escapeHtml(address)}</strong> will receive this sender's email.</p>`),
+      confirmed > 0
+        ? page('Confirmed', `<h1>Thank you</h1><p><strong>${escapeHtml(link.address)}</strong> will receive this sender's email.</p>`)
+        : page('Link not current', '<h1>This link is no longer current</h1><p>Use the latest confirmation email you received.</p>'),
     );
   }
 

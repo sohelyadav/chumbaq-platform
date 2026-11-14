@@ -24,6 +24,7 @@ import { ConsentModule } from '../consent/consent.module';
 import { EmailController } from './email.controller';
 import { EmailPublicController } from './email-public.controller';
 import { ProjectActivityModule } from '../project-activity/project-activity.module';
+import { EmailConfirmationSendEntity } from './entities/email-confirmation-send.entity';
 
 /**
  * The email channel, on top of the shared campaign machinery.
@@ -37,6 +38,7 @@ import { ProjectActivityModule } from '../project-activity/project-activity.modu
   imports: [
     TypeOrmModule.forFeature([
       EmailSettingsEntity,
+      EmailConfirmationSendEntity,
       DeviceIdentityEntity,
       PushNotificationLogEntity,
       PushNotificationEventEntity,

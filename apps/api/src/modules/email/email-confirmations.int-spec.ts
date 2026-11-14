@@ -64,7 +64,7 @@ describe('Email double opt-in (integration)', () => {
 
   beforeEach(async () => {
     sent = [];
-    await ds.query('TRUNCATE channel_suppressions RESTART IDENTITY CASCADE');
+    await ds.query('TRUNCATE channel_suppressions, email_confirmation_sends RESTART IDENTITY CASCADE');
     await resetFixtures(ds);
     await ds.query(`DELETE FROM email_settings WHERE project_id = $1`, [INT_PROJECT_ID]);
     await ds.query(
@@ -107,9 +107,9 @@ describe('Email double opt-in (integration)', () => {
 
     await service.sendPending();
     const link = linkIn(sent[0].text);
-    const address = service.verify(link.searchParams.get('p'), link.searchParams.get('e'), link.searchParams.get('s'));
-    expect(address).toBe('priya@example.com');
-    await service.confirm(INT_PROJECT_ID, address as string);
+    const signed = service.verify(link.searchParams.get('p'), link.searchParams.get('e'), link.searchParams.get('s'));
+    expect(signed?.address).toBe('priya@example.com');
+    expect(await service.confirm(INT_PROJECT_ID, signed!.address, signed!.sentAt)).toBe(2);
 
     expect(await audience.listRecipientIds(scope)).toEqual([A]);
     const history = await ds.query(
@@ -117,6 +117,47 @@ describe('Email double opt-in (integration)', () => {
       [[A, B]],
     );
     expect(history).toEqual([{ source: 'email_confirmation', granted: true }]);
+  });
+
+  // Following review: a link is for one send, so an old one cannot undo a later "no".
+  it('does not let a confirmation override a refusal made after the link was sent', async () => {
+    await person(A, 'priya@example.com', true);
+    await service.sendPending();
+    const link = linkIn(sent[0].text);
+    const signed = service.verify(link.searchParams.get('p'), link.searchParams.get('e'), link.searchParams.get('s'))!;
+    await ds.query(`UPDATE device_identities SET email_opt_in = false, consent_updated_at = now() + interval '1 second' WHERE id = $1`, [A]);
+
+    expect(await service.confirm(INT_PROJECT_ID, signed.address, signed.sentAt)).toBe(0);
+    const scope = { projectId: INT_PROJECT_ID, deviceIdentityIds: null, requireOptIn: true };
+    expect(await audience.listRecipientIds(scope)).toEqual([]);
+  });
+
+  it('takes only the latest send\'s link, and none older than a week', async () => {
+    await person(A, 'priya@example.com', true);
+    await service.sendPending();
+    const old = linkIn(sent[0].text);
+    const signed = service.verify(old.searchParams.get('p'), old.searchParams.get('e'), old.searchParams.get('s'))!;
+    // A later send (a week on) replaces it.
+    await ds.query(`UPDATE email_confirmation_sends SET last_sent_at = now() - interval '8 days'`);
+    await ds.query(`UPDATE device_identities SET email_confirm_sent_at = now() - interval '8 days' WHERE id = $1`, [A]);
+    await service.sendPending();
+    expect(await service.confirm(INT_PROJECT_ID, signed.address, signed.sentAt)).toBe(0);
+
+    const stale = service.url(INT_PROJECT_ID, 'priya@example.com', new Date(Date.now() - 8 * 86_400_000));
+    const u = new URL(stale);
+    expect(service.verify(u.searchParams.get('p'), u.searchParams.get('e'), u.searchParams.get('s'))).toBeNull();
+  });
+
+  // Following review: rows are made and changed by anyone with the app's key; the
+  // weekly limit is the address's, not the row's.
+  it('mails an address at most once a week however its rows change', async () => {
+    await person(A, 'victim@example.com', true);
+    expect(await service.sendPending()).toBe(1);
+    await ds.query(`UPDATE device_identities SET email = 'elsewhere@example.com', email_confirm_sent_at = NULL WHERE id = $1`, [A]);
+    await ds.query(`UPDATE device_identities SET email = 'victim@example.com', email_confirm_sent_at = NULL WHERE id = $1`, [A]);
+    await person(B, 'victim@example.com', true);
+    expect(await service.sendPending()).toBe(0);
+    expect(sent.map((m) => m.to)).toEqual(['victim@example.com']);
   });
 
   it('does not take a link for another address or project', async () => {

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { createHmac } from 'crypto';
 import { CredentialsCryptoService } from '../../common/credentials-crypto.service';
 import { logValue } from '../../common/log-value';
 import { ConsentEventsService } from '../consent/consent-events.service';
@@ -14,8 +15,12 @@ import { CONFIRM_KEY_PURPOSE, UnsubscribeLinks } from './unsubscribe-link';
 /** Confirmation mails one tick sends at most, and per project, so one project cannot take every slot. */
 export const CONFIRMATIONS_PER_TICK = 100;
 export const CONFIRMATIONS_PER_PROJECT_PER_TICK = 20;
-/** A pending address is mailed again after this long, never sooner. */
+/** A pending address is mailed again after this long, never sooner; a link works this long. */
 const RESEND_AFTER = '7 days';
+const LINK_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
+/** Confirmations one project mails in a day at most, whoever reports the opt-ins. */
+export const CONFIRMATIONS_PER_PROJECT_PER_DAY = 500;
+const SENDS_KEY_PURPOSE = 'chumbaq/email-confirm-sends/v1';
 
 /**
  * Double opt-in for email. While a project requires opt-in (the default), an email
@@ -29,6 +34,7 @@ const RESEND_AFTER = '7 days';
 export class EmailConfirmationsService {
   private readonly logger = new Logger(EmailConfirmationsService.name);
   private readonly links: UnsubscribeLinks;
+  private readonly sendsKey: Buffer;
 
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
@@ -44,41 +50,62 @@ export class EmailConfirmationsService {
       String(config.get('app.baseUrl') ?? ''),
       '/api/email/confirm',
     );
+    this.sendsKey = crypto.deriveKey(SENDS_KEY_PURPOSE);
   }
 
-  url(projectId: string, address: string): string {
-    return this.links.url(projectId, address);
+  /** The link for one send: it names the send's time, and works only for that send, for a week. */
+  url(projectId: string, address: string, sentAt: Date): string {
+    return this.links.url(projectId, `${address}\n${sentAt.getTime()}`);
   }
 
-  /** The address a confirmation link was signed for, or null. */
-  verify(projectId: unknown, encodedAddress: unknown, signature: unknown): string | null {
-    return this.links.verify(projectId, encodedAddress, signature);
+  /** The address and send a confirmation link was signed for, or null (forged or expired). */
+  verify(projectId: unknown, encoded: unknown, signature: unknown): { address: string; sentAt: Date } | null {
+    const signed = this.links.verify(projectId, encoded, signature);
+    if (!signed) return null;
+    const cut = signed.lastIndexOf('\n');
+    const sentAtMs = Number(signed.slice(cut + 1));
+    if (cut < 1 || !Number.isFinite(sentAtMs) || Date.now() - sentAtMs > LINK_LIFETIME_MS) return null;
+    return { address: signed.slice(0, cut), sentAt: new Date(sentAtMs) };
   }
 
-  /** Records the holder's confirmation for every row holding the address. Returns how many. */
-  async confirm(projectId: string, address: string): Promise<number> {
+  /**
+   * Records the holder's confirmation, if the link is for the address's latest send and
+   * it is still pending. Every row holding the address is marked, except one that
+   * refused after the link was sent: a later refusal outweighs an older link (and keeps
+   * the address out, since any refusal does). Returns how many rows were confirmed.
+   */
+  async confirm(projectId: string, address: string, sentAt: Date): Promise<number> {
     return this.dataSource.transaction(async (manager) => {
-      const rows: Array<{ id: string }> = await manager.query(
-        `SELECT id FROM device_identities WHERE project_id = $1 AND email = $2 ORDER BY id FOR UPDATE`,
-        [projectId, address],
+      const rows: Array<{ id: string; sent: boolean }> = await manager.query(
+        `SELECT id, date_trunc('milliseconds', email_confirm_sent_at) = $3::timestamptz AS sent
+           FROM device_identities WHERE project_id = $1 AND email = $2 ORDER BY id FOR UPDATE`,
+        [projectId, address, sentAt],
       );
-      if (rows.length === 0) return 0;
-      await manager.query(
+      if (!rows.some((row) => row.sent)) return 0;
+      const result: unknown = await manager.query(
         `UPDATE device_identities
             SET email_confirmed_at = COALESCE(email_confirmed_at, now()), email_opt_in = true, consent_updated_at = now()
-          WHERE project_id = $1 AND email = $2`,
-        [projectId, address],
+          WHERE project_id = $1 AND email = $2
+            AND (email_opt_in IS DISTINCT FROM false OR consent_updated_at IS NULL OR consent_updated_at <= $3::timestamptz)
+          RETURNING id`,
+        [projectId, address, sentAt],
       );
-      await this.consentEvents.recordForAddress(projectId, 'email', address, true, 'email_confirmation', manager);
-      return rows.length;
+      // pg answers an UPDATE ... RETURNING as [rows, count].
+      const confirmed = Array.isArray(result) && Array.isArray(result[0]) ? (result[0] as unknown[]).length : 0;
+      if (confirmed > 0) {
+        await this.consentEvents.recordForAddress(projectId, 'email', address, true, 'email_confirmation', manager);
+      }
+      return confirmed;
     });
   }
 
   /**
    * Mails the confirmation to addresses that opted in and are not confirmed yet, in
-   * projects that require opt-in and have a provider connected. Each address is claimed
-   * with one conditional UPDATE before it is mailed, so two workers never mail it twice,
-   * and is mailed again only after `RESEND_AFTER`. Returns how many were sent.
+   * projects that require opt-in and have a provider connected. An address is claimed
+   * in `email_confirmation_sends`, per address and atomically, so it is mailed at most
+   * once a week however its rows are made or changed, and two workers never mail it
+   * twice; a project mails at most `CONFIRMATIONS_PER_PROJECT_PER_DAY`. Returns how many
+   * were sent.
    */
   async sendPending(): Promise<number> {
     const due: Array<{ project_id: string; email: string }> = await this.dataSource.query(
@@ -104,16 +131,10 @@ export class EmailConfirmationsService {
 
     let sent = 0;
     for (const { project_id: projectId, email } of due) {
-      const claimed: unknown[] = await this.dataSource.query(
-        `UPDATE device_identities SET email_confirm_sent_at = now()
-          WHERE project_id = $1 AND email = $2 AND email_confirmed_at IS NULL
-            AND (email_confirm_sent_at IS NULL OR email_confirm_sent_at < now() - interval '${RESEND_AFTER}')
-          RETURNING id`,
-        [projectId, email],
-      );
-      if (claimed.length === 0) continue;
+      const sentAt = await this.claim(projectId, email);
+      if (!sentAt) continue;
       try {
-        if (await this.mail(projectId, email)) sent++;
+        if (await this.mail(projectId, email, sentAt)) sent++;
       } catch (error) {
         this.logger.warn(`Confirmation not sent for a project ${projectId} address: ${logValue((error as Error).message)}`);
       }
@@ -121,9 +142,37 @@ export class EmailConfirmationsService {
     return sent;
   }
 
-  private async mail(projectId: string, address: string): Promise<boolean> {
+  /** The send's time if this address may be mailed now (and is now marked), else null. */
+  private async claim(projectId: string, address: string): Promise<Date | null> {
+    return this.dataSource.transaction(async (manager) => {
+      const [{ today }] = await manager.query(
+        `SELECT count(*)::int AS today FROM email_confirmation_sends WHERE project_id = $1 AND last_sent_at > now() - interval '1 day'`,
+        [projectId],
+      );
+      if (today >= CONFIRMATIONS_PER_PROJECT_PER_DAY) return null;
+      const hash = createHmac('sha256', this.sendsKey).update(`${projectId}\n${address}`).digest('hex');
+      const claimed: Array<{ last_sent_at: Date }> = await manager.query(
+        `INSERT INTO email_confirmation_sends (project_id, address_hash, last_sent_at)
+         VALUES ($1, $2, date_trunc('milliseconds', now()))
+         ON CONFLICT (project_id, address_hash) DO UPDATE SET last_sent_at = date_trunc('milliseconds', now())
+           WHERE email_confirmation_sends.last_sent_at < now() - interval '${RESEND_AFTER}'
+         RETURNING last_sent_at`,
+        [projectId, hash],
+      );
+      if (claimed.length === 0) return null;
+      const sentAt = new Date(claimed[0].last_sent_at);
+      await manager.query(
+        `UPDATE device_identities SET email_confirm_sent_at = $3
+          WHERE project_id = $1 AND email = $2 AND email_confirmed_at IS NULL`,
+        [projectId, address, sentAt],
+      );
+      return sentAt;
+    });
+  }
+
+  private async mail(projectId: string, address: string, sentAt: Date): Promise<boolean> {
     const { settings, credentials } = await this.settings.requireSendable(projectId);
-    const link = this.url(projectId, address);
+    const link = this.url(projectId, address, sentAt);
     const from = settings.fromName || settings.fromEmail;
     const message = renderEmail({
       content: {
