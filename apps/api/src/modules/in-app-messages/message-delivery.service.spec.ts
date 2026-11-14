@@ -698,6 +698,20 @@ describe('MessageDeliveryService', () => {
           expect(trackingConsent.recordDrop).not.toHaveBeenCalled();
         },
       );
+
+      // The usage roll-up reads "no client address" as "stored for a do-not-track
+      // person" and then never ties the row back to a device (`ACTIVITY_SQL` in
+      // usage-counting.ts). A do-not-track row stored with an address would quietly
+      // count that person again, so every event type is held to it here.
+      it.each(['delivered', 'impression', 'click', 'dismiss', 'cta_click', 'auto_dismiss', 'expired'])(
+        'never stores a %s row with the client address',
+        async (eventType) => {
+          await service.recordEvent({ ...dto, eventType, distinctId: 'user-1' } as any, context);
+          for (const [row] of mockImpressionRepo.create.mock.calls) {
+            expect(row).toMatchObject({ ipAddress: null, deviceIdentityId: null, distinctId: null });
+          }
+        },
+      );
     });
 
     it('stores the address and browser for someone who is not do-not-track', async () => {
