@@ -12,6 +12,7 @@ describe('SegmentRefreshScheduler', () => {
     where: jest.fn().mockReturnThis(),
     andWhere: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
     getMany: jest.fn(),
   };
   const segmentRepo = { createQueryBuilder: jest.fn(() => qb), update: jest.fn() };
@@ -126,5 +127,20 @@ describe('SegmentRefreshScheduler', () => {
     qb.getMany.mockResolvedValueOnce([]);
     await expect(scheduler.enqueueDueSegments()).resolves.toBe(0);
     expect(queue.add).not.toHaveBeenCalled();
+  });
+
+  // One lane serves every tenant: one project's many segments must not queue ahead of all.
+  it('enqueues at most five segments of one project a tick, stalest first', async () => {
+    qb.getMany.mockResolvedValueOnce([
+      ...Array.from({ length: 8 }, (_, i) => ({ id: `big-${i}`, projectId: 'big' })),
+      { id: 'small-1', projectId: 'small' },
+    ]);
+
+    await expect(scheduler.enqueueDueSegments()).resolves.toBe(6);
+
+    const ids = queue.add.mock.calls.map(([, data]: [string, { segmentId: string }]) => data.segmentId);
+    expect(ids.filter((id: string) => id.startsWith('big-'))).toEqual(['big-0', 'big-1', 'big-2', 'big-3', 'big-4']);
+    expect(ids).toContain('small-1');
+    expect(qb.orderBy).toHaveBeenCalledWith('s.last_materialized_at', 'ASC', 'NULLS FIRST');
   });
 });

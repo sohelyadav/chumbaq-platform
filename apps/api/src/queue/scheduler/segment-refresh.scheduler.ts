@@ -13,6 +13,9 @@ import {
   SegmentMaterializeJobData,
 } from '../queue.constants';
 
+/** Segments of one project enqueued per tick at most; see enqueueDueSegments. */
+export const SEGMENT_JOBS_PER_PROJECT_PER_TICK = 5;
+
 @Injectable()
 export class SegmentRefreshScheduler {
   private readonly logger = new Logger(SegmentRefreshScheduler.name);
@@ -61,9 +64,21 @@ export class SegmentRefreshScheduler {
         lockCutoff,
       })
       .select(['s.id', 's.projectId'])
+      // Stalest first, and at most SEGMENT_JOBS_PER_PROJECT_PER_TICK per project below:
+      // one lane serves every tenant, so one project's many segments must not queue
+      // ahead of everyone else's. The rest are due again next tick.
+      .orderBy('s.last_materialized_at', 'ASC', 'NULLS FIRST')
       .getMany();
 
-    for (const segment of due) {
+    const perProject = new Map<string, number>();
+    const taken = due.filter((segment) => {
+      const count = perProject.get(segment.projectId) ?? 0;
+      if (count >= SEGMENT_JOBS_PER_PROJECT_PER_TICK) return false;
+      perProject.set(segment.projectId, count + 1);
+      return true;
+    });
+
+    for (const segment of taken) {
       // Claim the run here, not in the processor. Claiming on pick-up left a
       // window the whole length of the queue wait: neither materializing_at
       // nor last_materialized_at was set while the job sat queued, so the next
@@ -81,6 +96,6 @@ export class SegmentRefreshScheduler {
       });
     }
 
-    return due.length;
+    return taken.length;
   }
 }
