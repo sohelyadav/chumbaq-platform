@@ -184,9 +184,9 @@ export async function confirmIfAsked(page: Page, password: string, next: Locator
 
 /**
  * Adds a passkey on /settings with the tab's virtual authenticator (add one first, with
- * `addAuthenticator`), confirming with the password, which adding a factor always asks
- * for. Answers the recovery codes a first factor comes with (empty when none were shown).
- * The page must be signed in.
+ * `addAuthenticator`), confirming with the password when "Confirm it is you" asks (the
+ * account must have no second factor yet for that). Answers the recovery codes a first
+ * factor comes with (empty when none were shown). The page must be signed in.
  */
 export async function enrolTenantPasskey(
   page: Page,
