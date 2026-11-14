@@ -1,9 +1,11 @@
 import path from 'path';
 import type { FullConfig } from '@playwright/test';
 import { portInUse, run, runToEnd, stopAll, waitForOutput, waitForUrl, type Started } from './processes';
+import { startProviderStub } from './provider-stub';
 import { startRazorpayMock } from './razorpay-mock';
 import { resetStores } from './reset';
 import {
+  accountEmailEnvironment,
   appEnvironment,
   assertE2eDatabase,
   assertE2eRedisDb,
@@ -35,7 +37,8 @@ const TYPEORM_CLI = path.join(REPO_ROOT, 'node_modules/typeorm/cli.js');
  * 3. drops and recreates the e2e schema, flushes the e2e Redis database, and applies the
  *    migrations, as production does: some tables (the security tripwires, alarms and
  *    incidents) exist only in migrations, so synchronize alone would leave them out;
- * 4. starts the mock Razorpay API, then the customer API (NODE_ENV=test, whose
+ * 4. starts the mock Razorpay API and the provider stub (account email and every channel
+ *    provider, `provider-stub.ts`), then the customer API (NODE_ENV=test, whose
  *    synchronize then finds next to nothing to change), then the admin API, the worker
  *    and both Vite dev servers, waiting for each.
  */
@@ -72,13 +75,17 @@ export default async function globalSetup(_config: FullConfig): Promise<() => Pr
   process.env.E2E_API_URL = `http://localhost:${ports.api}`;
   process.env.E2E_ADMIN_API_URL = `http://127.0.0.1:${ports.adminApi}`;
   process.env.E2E_RAZORPAY_MOCK_URL = `http://127.0.0.1:${ports.razorpayMock}`;
+  process.env.E2E_PROVIDER_STUB_URL = `http://127.0.0.1:${ports.providerStub}`;
+  Object.assign(process.env, accountEmailEnvironment(ports));
 
   const mock = await startRazorpayMock(ports.razorpayMock, secrets.razorpayKeyId, secrets.razorpayKeySecret);
+  const providerStub = await startProviderStub(ports.providerStub);
   const appEnv = { ...process.env, ...appEnvironment(secrets, ports) };
   const started: Started[] = [];
   const teardown = async () => {
     await stopAll(started);
     await mock.close();
+    await providerStub.close();
   };
 
   try {

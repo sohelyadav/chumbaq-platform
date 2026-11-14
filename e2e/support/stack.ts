@@ -2,6 +2,7 @@ import { randomBytes } from 'crypto';
 import { readFileSync } from 'fs';
 import path from 'path';
 import { parse } from 'dotenv';
+import { providerStubEnvironment } from './provider-stub';
 
 /**
  * Where the end-to-end stack lives and what it is started with.
@@ -66,6 +67,8 @@ export interface StackPorts {
   web: number;
   admin: number;
   razorpayMock: number;
+  /** The stub for every other outbound provider and account email (`provider-stub.ts`). */
+  providerStub: number;
 }
 
 /**
@@ -84,6 +87,7 @@ export function stackPorts(env: Record<string, string> = stackEnv(), lane = LANE
     razorpayMock: process.env.E2E_RAZORPAY_MOCK_PORT
       ? Number(process.env.E2E_RAZORPAY_MOCK_PORT) + lane * LANE_PORT_STEP
       : api + 90,
+    providerStub: api + 91,
   };
 }
 
@@ -241,8 +245,23 @@ export function appEnvironment(secrets: RunSecrets, ports: StackPorts): Record<s
     RAZORPAY_API_BASE_URL: `http://127.0.0.1:${ports.razorpayMock}/v1`,
     // No tax, whatever the .env says, so a price's charged amount is the price itself.
     BILLING_TAX_RATE_BPS: '0',
-    // No account email can leave the machine, whatever the .env holds.
-    PLATFORM_BREVO_API_KEY: '',
-    PLATFORM_EMAIL_FROM: '',
+    ...accountEmailEnvironment(ports),
+  };
+}
+
+/**
+ * Account email on, and every outbound provider (account email's Brevo and the tenants'
+ * channel providers) sent to the local provider stub through the API's test-only
+ * `*_API_BASE_URL` overrides, so nothing leaves the machine whatever the .env holds. The
+ * key is fake; the stub records each mail for `mailbox.ts`. globalSetup also puts these
+ * in its own environment, so a CLI a test runs never mails with the .env's settings: run
+ * without NODE_ENV=test it refuses the override and sends nothing; with it, it mails the
+ * stub.
+ */
+export function accountEmailEnvironment(ports: StackPorts): Record<string, string> {
+  return {
+    PLATFORM_BREVO_API_KEY: 'xkeysib-e2e-fake-provider-stub-only',
+    PLATFORM_EMAIL_FROM: 'Chumbaq E2E <no-reply@e2e.example.test>',
+    ...providerStubEnvironment(`http://127.0.0.1:${ports.providerStub}`),
   };
 }

@@ -1,13 +1,14 @@
 import { PASSWORD, signupLinkToken, uniqueEmail } from '../support/api';
 import { expect, test } from '../support/fixtures';
+import { extractLink, waitForMail } from '../support/mailbox';
 
 /**
  * Sign up, sign in, sign out, and the wrong-password message, through the customer app.
  *
- * Account email is off in the e2e stack, so the sign-up link the API would have mailed
- * is made by the test with the run's signing secret (support/api.ts) and opened the way
- * the email's link would be. That link verifies the address, so the separate
- * verify-email flow (which needs an emailed token stored by the API) is not covered.
+ * The sign-up link is read from the mail the API sent (the provider stub's mailbox,
+ * support/mailbox.ts) and opened as the email's link would be. The used-link case makes
+ * its token with the run's signing secret instead (`signupLinkToken`, support/api.ts).
+ * That link verifies the address, so the separate verify-email flow is not covered here.
  */
 test.describe('auth', () => {
   test('sign up, sign out, sign in again, and a wrong password is refused', async ({ page }) => {
@@ -23,7 +24,8 @@ test.describe('auth', () => {
     await expect(page.getByText(`We sent an email to ${email}`)).toBeVisible();
 
     // The emailed link: choose a password, which creates the account and signs in.
-    await page.goto(`/complete-signup#token=${signupLinkToken(email, name)}`);
+    const mail = await waitForMail(email, { subjectIncludes: 'Finish creating your Chumbaq account' });
+    await page.goto(extractLink(mail, '/complete-signup'));
     await expect(page.getByText('Choose a password')).toBeVisible();
     await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
     await page.getByLabel('Confirm password').fill(PASSWORD);

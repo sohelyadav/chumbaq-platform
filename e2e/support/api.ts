@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { signSignupToken, signupKey } from '../../apps/api/src/modules/auth/signup-token';
+import { extractLink, tokenFromLink, waitForMail } from './mailbox';
 import { runSecrets } from './stack';
 
 /**
@@ -59,9 +60,10 @@ export async function api<T = unknown>(
 }
 
 /**
- * The link the API would have mailed for a sign-up, made with the run's JWT secret
- * (globalSetup hands it to the API). Account email is off in the e2e stack, so this is
- * how a test gets the second step of signing up.
+ * A sign-up link's token made with the run's JWT secret (globalSetup hands it to the
+ * API), the way the API makes it, without registering. The mailed link is the one to
+ * prefer (`createAccount` reads it from the mailbox); this is for a token the API never
+ * mailed, such as one for an address nobody registered.
  */
 export function signupLinkToken(email: string, name: string): string {
   return signSignupToken(signupKey(runSecrets().jwtSecret), { email, name });
@@ -75,14 +77,19 @@ export interface Account {
   accessToken: string;
 }
 
-/** Registers and completes the sign-up through the API, as the form and the emailed link would. */
+/**
+ * Registers through the API, reads the sign-up link from the mail it sent (the provider
+ * stub's mailbox), and completes the sign-up with it, as the form and the emailed link
+ * would.
+ */
 export async function createAccount(ip: string, label = 'user', name = 'E2E Person'): Promise<Account> {
   const email = uniqueEmail(label);
   await api('POST', '/api/auth/register', { email, name }, { ip });
+  const mail = await waitForMail(email, { subjectIncludes: 'Finish creating your Chumbaq account' });
   const signedIn = await api<{ user: { id: string }; tokens: { accessToken: string } }>(
     'POST',
     '/api/auth/complete-signup',
-    { token: signupLinkToken(email, name), password: PASSWORD },
+    { token: tokenFromLink(extractLink(mail, '/complete-signup')), password: PASSWORD },
     { ip },
   );
   return { email, name, password: PASSWORD, userId: signedIn.user.id, accessToken: signedIn.tokens.accessToken };

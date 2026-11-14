@@ -1,10 +1,11 @@
 import { createAccount, createProject } from '../support/api';
 import { expect, newPersonContext, openSidebarGroup, sidebarLink, signIn, test } from '../support/fixtures';
+import { extractLink, waitForMail } from '../support/mailbox';
 
 /**
- * An owner invites a teammate as a member; the invite link is shown once in the
- * dashboard (account email is off in the e2e stack, so it is not mailed). The teammate
- * opens it signed out, signs in, comes back to it and accepts. As a member they cannot
+ * An owner invites a teammate as a member; the invite is mailed, and its link is also
+ * shown once in the dashboard. The teammate opens the mailed link signed out, signs in,
+ * comes back to it and accepts. As a member they cannot
  * see API keys, invite anyone or open the activity log. The owner then removes them,
  * and the project is gone from their list.
  */
@@ -26,10 +27,14 @@ test('owner invites a member, who accepts, sees no owner-only pages, and is remo
   await page.getByRole('button', { name: 'Send invite' }).click();
   const linkDialog = page.getByRole('dialog', { name: `Invite link for ${mate.email}` });
   await expect(linkDialog).toBeVisible();
-  await expect(linkDialog.getByText('Email not sent — copy the link')).toBeVisible();
-  const inviteUrl = (await linkDialog.getByText(/\/invite#token=/).textContent())!.trim();
-  expect(inviteUrl).toMatch(/\/invite#token=[A-Za-z0-9_-]{43}$/);
+  await expect(linkDialog.getByText('Email sent. You can also share this link yourself.')).toBeVisible();
+  const shownUrl = (await linkDialog.getByText(/\/invite#token=/).textContent())!.trim();
+  expect(shownUrl).toMatch(/\/invite#token=[A-Za-z0-9_-]{43}$/);
   await linkDialog.getByRole('button', { name: 'Done' }).click();
+  // The mail carries the same one-time link.
+  const invite = await waitForMail(mate.email, { subjectIncludes: 'You have been invited to a Chumbaq project' });
+  const inviteUrl = extractLink(invite, '/invite');
+  expect(inviteUrl).toBe(shownUrl);
   await expect(page.getByRole('row', { name: new RegExp(mate.email) })).toBeVisible();
 
   // Teammate, in their own browser: open the link signed out, sign in, accept.
