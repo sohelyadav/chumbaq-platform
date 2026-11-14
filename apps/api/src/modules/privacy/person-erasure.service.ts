@@ -9,6 +9,7 @@ import { PrivacyRequestsService } from './privacy-requests.service';
 import { activityActorOf, personTarget, type PrivacyActor } from './privacy-actor';
 import { ProjectActivityService } from '../project-activity/project-activity.service';
 import type { ActivityContext } from '../project-activity/activity-context';
+import { lockActiveDevicesForErasure } from '../usage/usage-counting';
 
 /**
  * Erases everything a project holds about one person (DPDP s.8(7)).
@@ -80,6 +81,9 @@ export class PersonErasureService {
     ctx: ActivityContext,
   ): Promise<PersonErasureResult> {
     return this.dataSource.transaction(async (manager) => {
+      // Before anything else: the usage roll-up records active devices from
+      // a snapshot, so without this it could write an erased device back.
+      await lockActiveDevicesForErasure(manager, projectId);
       const keys = await resolvePersonScope(manager, projectId, subject, { lock: true });
       const counts: Record<string, number> = {};
       let suppressionsKept = 0;

@@ -124,10 +124,31 @@ const ACTIVITY_SQL = `
     FROM device_identities
    WHERE project_id = ANY($1::uuid[]) AND ${inWindow('first_seen_at')}`;
 
+/** A project's active-device rows, as a transaction advisory lock key; `param` is a project id. */
+const activeDevicesLockKey = (param: string) => `hashtextextended('usage_active_devices:' || ${param}::text, 0)`;
+
+/**
+ * Person erasure calls this first in its transaction: it waits for a roll-up
+ * recording the project's active devices to commit, and holds the next one
+ * off until the erasure commits (see `recordActiveDevices`).
+ */
+export async function lockActiveDevicesForErasure(manager: EntityManager, projectId: string): Promise<void> {
+  await manager.query(`SELECT pg_advisory_xact_lock(${activeDevicesLockKey('$1')})`, [projectId]);
+}
+
 /**
  * Adds the devices active in `[from, to)` to `monthly_active_devices`, one row
  * per device per UTC month, keeping the earliest day seen. Safe to repeat and
  * to run windows in any order. Returns the rows added or moved earlier.
+ *
+ * Must run in a transaction. It first takes each project's active-devices
+ * lock shared, and an erasure takes it exclusive, so the two never overlap:
+ * an erasure that started first has committed before the insert takes its
+ * snapshot (its devices and their activity are gone, so nothing of theirs is
+ * written back), and one that comes later waits for this commit and then
+ * deletes what was written. Device rows themselves are not locked: identify
+ * holds them FOR UPDATE, and SDK calls must not wait on the roll-up. A device
+ * row that no longer exists is never recorded.
  */
 export async function recordActiveDevices(
   manager: EntityManager,
@@ -136,10 +157,18 @@ export async function recordActiveDevices(
   to: Date,
 ): Promise<number> {
   if (projectIds.length === 0) return 0;
+  await manager.query(
+    `SELECT count(pg_advisory_xact_lock_shared(k))
+       FROM (SELECT DISTINCT ${activeDevicesLockKey('u.p')} AS k FROM unnest($1::uuid[]) AS u(p) ORDER BY k) keys`,
+    [projectIds],
+  );
   const [row] = await manager.query(
     `WITH activity AS (${ACTIVITY_SQL}),
           days AS (
-            SELECT project_id, device, ${utcDate('at')} AS day FROM activity WHERE device IS NOT NULL
+            SELECT a.project_id, a.device, ${utcDate('a.at')} AS day
+              FROM activity a
+             WHERE a.device IS NOT NULL
+               AND EXISTS (SELECT 1 FROM device_identities d WHERE d.id = a.device AND d.project_id = a.project_id)
           ),
           written AS (
             INSERT INTO monthly_active_devices (project_id, month, device_identity_id, first_day)

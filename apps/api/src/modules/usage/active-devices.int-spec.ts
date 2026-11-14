@@ -188,6 +188,14 @@ describe('monthly active devices (integration)', () => {
       expect(await madRows(P)).toEqual([{ device: d1.id, month: '2026-11-01', firstDay: '2026-11-03' }]);
     });
 
+    it('never records a device row that no longer exists', async () => {
+      // Push events have no foreign key to the device: a row naming a deleted
+      // device must not bring its id back.
+      await pushEvent(P, randomUUID(), 'delivered', '2026-11-10T10:00:00Z');
+      expect(await recordActiveDevices(m, [P], ...range('2026-11-01', '2026-12-01'))).toBe(0);
+      expect(await madRows(P)).toEqual([]);
+    });
+
     it('records only the projects it is given', async () => {
       const d = await device(Q, '2026-11-20T10:00:00Z');
       await recordActiveDevices(m, [P], ...range('2026-11-01', '2026-12-01'));
@@ -212,13 +220,14 @@ describe('monthly active devices (integration)', () => {
   describe('erasure', () => {
     const TEST_KEY = 'cd'.repeat(32);
     let erasure: PersonErasureService;
+    let requests: PrivacyRequestsService;
     let owner: string;
     let P: string;
 
     beforeAll(() => {
       const config = { get: (key: string) => (key === 'CREDENTIALS_ENCRYPTION_KEY' ? TEST_KEY : undefined) };
       const hashes = new PrivacyHashService(new CredentialsCryptoService(config as ConfigService));
-      const requests = new PrivacyRequestsService(ds.getRepository(PrivacyRequestLogEntity), hashes);
+      requests = new PrivacyRequestsService(ds.getRepository(PrivacyRequestLogEntity), hashes);
       erasure = new PersonErasureService(
         ds,
         new ErasedSuppressionsService(ds, hashes),
@@ -238,6 +247,7 @@ describe('monthly active devices (integration)', () => {
     });
 
     afterEach(async () => {
+      jest.restoreAllMocks();
       await ds.query(`DELETE FROM usage_daily WHERE project_id = $1`, [P]);
       await ds.query(`DELETE FROM projects WHERE id = $1`, [P]);
       await ds.query(`DELETE FROM users WHERE id = $1`, [owner]);
@@ -292,6 +302,117 @@ describe('monthly active devices (integration)', () => {
       expect(
         await ds.query(`SELECT metric, value FROM usage_daily WHERE project_id = $1 ORDER BY metric`, [P]),
       ).toEqual(before);
+    });
+
+    describe('racing the roll-up', () => {
+      const day = '2026-11-10';
+      const from = dayStart(day);
+      const to = dayStart(addDays(day, 1));
+
+      /** Two devices active on `day`, each with an external id; returns [gone, stays]. */
+      const seedTwo = async (): Promise<string[]> => {
+        const ids: string[] = [];
+        for (const tag of ['gone', 'stays']) {
+          const [row] = await ds.query(
+            `INSERT INTO device_identities (project_id, device_fingerprint, platform, external_user_id, first_seen_at)
+             VALUES ($1, $2, 'ios', $3, '2026-10-01T10:00:00Z'::timestamptz::timestamp) RETURNING id`,
+            [P, `fp-race-${tag}-${P}`, `user-${tag}`],
+          );
+          ids.push(row.id);
+          await ds.query(
+            `INSERT INTO user_events (project_id, device_identity_id, event_name, created_at)
+             VALUES ($1, $2, 'opened', '2026-11-10T12:00:00Z'::timestamptz::timestamp)`,
+            [P, row.id],
+          );
+        }
+        return ids;
+      };
+
+      const eraseGone = () =>
+        erasure.erase(
+          P,
+          { type: 'externalUserId', value: 'user-gone' },
+          { type: 'user', id: owner },
+          { ipAddress: null, userAgent: null },
+        );
+
+      const activeDevices = async () =>
+        (
+          await ds.query(`SELECT device_identity_id AS id FROM monthly_active_devices WHERE project_id = $1`, [P])
+        ).map((r: { id: string }) => r.id);
+
+      /**
+       * Resolves once `work` has finished or some session is waiting for an
+       * advisory lock, whichever comes first, so the other side can go on.
+       */
+      const finishedOrWaiting = async (work: Promise<unknown>): Promise<void> => {
+        let done = false;
+        work.then(
+          () => (done = true),
+          () => (done = true),
+        );
+        for (let i = 0; i < 250 && !done; i++) {
+          const [{ n }] = await ds.query(
+            `SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`,
+          );
+          if (n > 0) return;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      };
+
+      it('an erasure waiting on an uncommitted roll-up still removes what it wrote', async () => {
+        const [, stays] = await seedTwo();
+        const rollupTx = ds.createQueryRunner();
+        await rollupTx.connect();
+        try {
+          await rollupTx.startTransaction();
+          await recordActiveDevices(rollupTx.manager, [P], from, to);
+
+          const erasing = eraseGone();
+          await finishedOrWaiting(erasing);
+          await rollupTx.commitTransaction();
+          await erasing;
+        } finally {
+          await rollupTx.release();
+        }
+
+        expect(await activeDevices()).toEqual([stays]);
+      });
+
+      it('a roll-up that read before the erasure committed does not write the erased device back', async () => {
+        const [, stays] = await seedTwo();
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        let reached!: () => void;
+        const atGate = new Promise<void>((resolve) => (reached = resolve));
+        const record = requests.record.bind(requests);
+        // Holds the erasure open after its deletes, before its commit.
+        jest.spyOn(requests, 'record').mockImplementationOnce(async (...args) => {
+          reached();
+          await gate;
+          return record(...args);
+        });
+
+        const erasing = eraseGone();
+        await atGate;
+        const rollupTx = ds.createQueryRunner();
+        await rollupTx.connect();
+        try {
+          await rollupTx.startTransaction();
+          const recording = recordActiveDevices(rollupTx.manager, [P], from, to);
+          await finishedOrWaiting(recording);
+          release();
+          await erasing;
+          await recording;
+          await rollupTx.commitTransaction();
+        } finally {
+          release();
+          if (rollupTx.isTransactionActive) await rollupTx.rollbackTransaction();
+          await rollupTx.release();
+        }
+
+        expect(await activeDevices()).toEqual([stays]);
+      });
     });
   });
 });
