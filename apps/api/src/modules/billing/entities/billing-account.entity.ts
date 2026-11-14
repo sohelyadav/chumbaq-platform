@@ -11,6 +11,7 @@ import {
 import { UserEntity } from '../../users/entities/user.entity';
 import { BillingSubscriptionEntity } from './billing-subscription.entity';
 import { PlanEntity } from './plan.entity';
+import type { BillingAddress } from '@chumbaq/shared';
 
 /**
  * One per account that has touched billing (a tenant is a user). It holds
@@ -76,7 +77,7 @@ export class BillingAccountEntity {
   gstin: string | null;
 
   @Column({ type: 'jsonb', nullable: true })
-  address: Record<string, unknown> | null;
+  address: BillingAddress | null;
 
   /** The place of supply, as the two-digit GST state code. */
   @Column({ type: 'char', length: 2, name: 'state_code', nullable: true })

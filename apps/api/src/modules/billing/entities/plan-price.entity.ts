@@ -1,5 +1,6 @@
 import { Check, Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn } from 'typeorm';
 import { PlanEntity } from './plan.entity';
+import type { BillingInterval } from '@chumbaq/shared';
 
 /**
  * A price of a plan for one interval. Versioned: a price is never edited, a new
@@ -34,7 +35,7 @@ export class PlanPriceEntity {
   plan: PlanEntity;
 
   @Column({ type: 'varchar', length: 7 })
-  interval: 'monthly' | 'yearly';
+  interval: BillingInterval;
 
   /** Excluding GST. */
   @Column({ type: 'int', name: 'price_paise' })

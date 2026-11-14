@@ -12,6 +12,7 @@ import {
 import { UserEntity } from '../../users/entities/user.entity';
 import { PlanEntity } from './plan.entity';
 import { PlanPriceEntity } from './plan-price.entity';
+import type { BillingInterval, BillingSubscriptionStatus } from '@chumbaq/shared';
 
 /**
  * A subscription at the billing provider, mirrored. `status` is the provider's
@@ -68,10 +69,10 @@ export class BillingSubscriptionEntity {
   plan: PlanEntity;
 
   @Column({ type: 'varchar', length: 7 })
-  interval: 'monthly' | 'yearly';
+  interval: BillingInterval;
 
   @Column({ type: 'varchar', length: 16 })
-  status: 'created' | 'authenticated' | 'active' | 'pending' | 'halted' | 'cancelled' | 'completed' | 'expired';
+  status: BillingSubscriptionStatus;
 
   /** How the customer pays (card, upi, emandate, ...), once the provider says. */
   @Column({ type: 'varchar', length: 20, nullable: true })

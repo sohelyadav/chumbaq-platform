@@ -698,7 +698,8 @@ export interface AdminTenantUsageRef {
 export type AdminTenantActivity = 'new' | 'quiet' | 'never_used';
 export type AdminTenantSort = 'created_at' | 'mau_this_month' | 'messages_sent_30d' | 'last_usage_day';
 export type AdminSortOrder = 'asc' | 'desc';
-export type AdminTenantPlan = 'free';
+/** The tenant's effective plan code: `free`, or a plan staff created. */
+export type AdminTenantPlan = string;
 
 /** One tenant's usage, all of it from closed days of rows billed to that account. */
 export interface AdminTenantUsage {
@@ -1418,3 +1419,132 @@ export const CERT_IN_ANNEXURE_I: readonly { id: CertInIncidentType; label: strin
       'Attacks or malicious/ suspicious activities affecting systems/ servers/software/ applications related to Artificial Intelligence and Machine Learning',
   },
 ];
+
+// ---------------------------------------------------------------------------
+// Plans and billing. Money is integer paise everywhere; prices exclude GST and
+// `amountPaise` is what is charged.
+// ---------------------------------------------------------------------------
+
+export type BillingInterval = 'monthly' | 'yearly';
+
+/** The billing provider's own subscription statuses, mirrored as they arrive. */
+export type BillingSubscriptionStatus =
+  | 'created'
+  | 'authenticated'
+  | 'active'
+  | 'pending'
+  | 'halted'
+  | 'cancelled'
+  | 'completed'
+  | 'expired';
+
+/** Where an account's plan comes from. */
+export type BillingPlanSource = 'free' | 'subscription' | 'comp';
+
+/** An account's billing state, derived from its subscriptions and comp. */
+export type BillingAccountState =
+  | 'free'
+  | 'checkout'
+  | 'active'
+  | 'past_due'
+  | 'halted'
+  | 'cancelling'
+  | 'change_scheduled'
+  | 'upgrade_pending'
+  | 'comped';
+
+/** A plan's limits; null is unlimited (a null project limit is the install's default). */
+export interface PlanLimits {
+  mauLimit: number | null;
+  projectLimit: number | null;
+  seatLimit: number | null;
+}
+
+export interface BillingPrice {
+  id: string;
+  interval: BillingInterval;
+  /** Excluding GST. */
+  pricePaise: number;
+  taxPaise: number;
+  /** Including GST: what is charged. */
+  amountPaise: number;
+  taxRateBps: number;
+}
+
+export interface BillingPlanOption extends PlanLimits {
+  code: string;
+  name: string;
+  sortOrder: number;
+  monthly: BillingPrice | null;
+  yearly: BillingPrice | null;
+}
+
+export interface BillingAddress {
+  line1: string;
+  line2: string | null;
+  city: string;
+  postalCode: string;
+  country: 'IN';
+}
+
+export interface BillingDetails {
+  legalName: string;
+  gstin: string | null;
+  address: BillingAddress;
+  /** Two-digit GST state code: the place of supply. */
+  stateCode: string;
+}
+
+export interface BillingSubscriptionView {
+  id: string;
+  planCode: string;
+  planName: string;
+  interval: BillingInterval;
+  status: BillingSubscriptionStatus;
+  amountPaise: number;
+  currentPeriodEnd: string | null;
+  startAt: string | null;
+  cancelAtPeriodEnd: boolean;
+  graceUntil: string | null;
+}
+
+export interface BillingInvoiceView {
+  id: string;
+  number: string | null;
+  status: string;
+  amountPaise: number;
+  taxPaise: number;
+  currency: 'INR';
+  periodStart: string | null;
+  periodEnd: string | null;
+  issuedAt: string | null;
+  paidAt: string | null;
+  shortUrl: string | null;
+}
+
+export interface BillingUsage {
+  mau: { used: number | null; limit: number | null; month: string | null; countedThrough: string | null };
+  projects: { used: number; limit: number };
+  seats: { used: number; limit: number | null };
+}
+
+export interface BillingOverview {
+  state: BillingAccountState;
+  effectivePlan: { code: string; name: string; source: BillingPlanSource; until: string | null };
+  current: BillingSubscriptionView | null;
+  next: BillingSubscriptionView | null;
+  comp: { planCode: string; until: string | null } | null;
+  usage: BillingUsage;
+  plans: BillingPlanOption[];
+  details: BillingDetails | null;
+  /** The provider's public key id, for its checkout. Never a secret. */
+  keyId: string;
+}
+
+export interface BillingCheckout {
+  subscriptionId: string;
+  keyId: string;
+  customerId: string | null;
+  prefill: { name: string; email: string };
+  startsAt: string | null;
+}
