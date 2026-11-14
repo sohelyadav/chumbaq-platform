@@ -41,3 +41,10 @@ export async function signIn(page: Page, account: Pick<Account, 'email' | 'passw
 export function sidebarLink(page: Page, name: string) {
   return page.locator('[data-sidebar="sidebar"]').getByRole('link', { name, exact: true });
 }
+
+/** Opens a collapsed group of the project sidebar ("Configure", "Engagement", ...). */
+export async function openSidebarGroup(page: Page, group: string): Promise<void> {
+  const toggle = page.locator('[data-sidebar="sidebar"]').getByRole('button', { name: group, exact: true });
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+}
