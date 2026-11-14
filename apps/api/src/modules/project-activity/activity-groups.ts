@@ -38,6 +38,7 @@ export const ACTIVITY_ACTION_GROUPS = Object.freeze({
   'project.deleted': 'project',
   'api_key.created': 'api_keys',
   'api_key.revoked': 'api_keys',
+  'identity.secret_rotated': 'api_keys',
   'channel.settings_changed': 'channels',
   'channel.provider_changed': 'channels',
   'channel.credentials_uploaded': 'channels',

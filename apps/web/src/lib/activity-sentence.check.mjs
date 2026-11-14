@@ -108,6 +108,7 @@ const CASES = {
     `${PRIYA} created the API key "Server"`,
   ],
   'api_key.revoked': [entry('api_key.revoked', { targetLabel: 'Server' }), `${PRIYA} revoked the API key "Server"`],
+  'identity.secret_rotated': [entry('identity.secret_rotated', {}), `${PRIYA} rotated the identity verification secret`],
   'channel.settings_changed': [
     entry('channel.settings_changed', { targetLabel: 'Email', details: { channel: 'email', fields: ['fromName'] } }),
     `${PRIYA} changed the email settings`,

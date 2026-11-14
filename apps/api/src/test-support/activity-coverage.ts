@@ -12,6 +12,7 @@ export const ACTIVITY_COVERAGE: Record<string, ActivityCoverageEntry> = {
   'PATCH /api/projects/:id': { logs: ['project.renamed', 'project.app_links_changed'] },
   'DELETE /api/projects/:id': { logs: ['project.deleted'] },
   'POST /api/projects/:id/domain/verify': { logs: ['project.app_links_changed'] },
+  'POST /api/projects/:projectId/identity-secret/rotate': { logs: ['identity.secret_rotated'] },
   'PATCH /api/projects/:projectId/members/:memberId': { logs: ['member.role_changed'] },
   'DELETE /api/projects/:projectId/members/:memberId': { logs: ['member.removed'] },
   'POST /api/projects/:projectId/leave': { logs: ['member.left'] },

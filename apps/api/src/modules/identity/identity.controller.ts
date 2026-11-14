@@ -29,6 +29,7 @@ import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { PersonObjectionsService } from '../consent/person-objections.service';
 import { CreatePersonObjectionDto, PersonObjectionTargetDto } from '../consent/dto/person-objection.dto';
 import { requesterOf } from '../project-activity/messaging-activity';
+import { IdentityVerificationService } from './identity-verification.service';
 
 function assertProjectScope(req: Request, dtoProjectId: string): void {
   const apiKeyProjectId = (req as Request & { projectId?: string }).projectId;
@@ -42,20 +43,25 @@ export class IdentityController {
   constructor(
     private readonly identityService: IdentityService,
     private readonly personObjections: PersonObjectionsService,
+    private readonly verification: IdentityVerificationService,
   ) {}
 
   @Post('identify')
   @UseGuards(ApiKeyGuard)
   async identify(@Body() dto: IdentifyDto, @Req() req: Request) {
     assertProjectScope(req, dto.projectId);
-    return this.identityService.identify(dto, getClientIp(req));
+    if (dto.externalUserId) await this.verification.assertVerified(dto.projectId, dto.externalUserId, dto.userHash);
+    const { userHash: _proof, ...identify } = dto;
+    return this.identityService.identify(identify as IdentifyDto, getClientIp(req));
   }
 
   @Post('link-device')
   @UseGuards(ApiKeyGuard)
   async linkDevice(@Body() body: LinkDeviceDto, @Req() req: Request) {
     assertProjectScope(req, body.projectId);
-    return this.identityService.linkDevice(body, getClientIp(req));
+    await this.verification.assertVerified(body.projectId, body.externalUserId, body.userHash);
+    const { userHash: _proof, ...link } = body;
+    return this.identityService.linkDevice(link, getClientIp(req));
   }
 
   @Post('merge')

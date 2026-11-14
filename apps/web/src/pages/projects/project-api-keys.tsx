@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { useApiKeys, useCreateApiKey, useRevokeApiKey } from '@/hooks/use-api-keys';
+import { useApiKeys, useCreateApiKey, useRevokeApiKey, useIdentitySecret, useRotateIdentitySecret } from '@/hooks/use-api-keys';
 import { toast } from '@/components/ui/use-toast';
 import { useCurrentProject } from '@/contexts/project-context';
 import { can } from '@/lib/project-role';
@@ -188,6 +188,76 @@ export default function ProjectApiKeysPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      <IdentitySecretCard />
     </div>
+  );
+}
+
+/**
+ * The identity secret. Every identify (and link-device) that names an external user id
+ * needs a userHash, HMAC-SHA256 of that id under this secret, made on the app's own
+ * server: the SDK key ships in every app, so without it anyone could claim to be any
+ * user. Like an API key, it belongs on a server and never in an app.
+ */
+function IdentitySecretCard() {
+  const { projectId } = useParams<{ projectId: string }>();
+  const { project } = useCurrentProject();
+  const allowed = can(project, 'keys.manage');
+  const { data } = useIdentitySecret(projectId, allowed);
+  const rotate = useRotateIdentitySecret(projectId);
+  const [shown, setShown] = useState(false);
+  if (!allowed) return null;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <ShieldAlert className="h-4 w-4" /> Identity verification
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        <p className="text-muted-foreground">
+          When your app identifies a signed-in user, pass a <code>userHash</code> with their external user id: an
+          HMAC-SHA256 of the id, as hex, made with this secret on your server. Calls with an external id and no valid
+          hash are refused. Keep this secret on your server, never in your app.
+        </p>
+        <div className="flex items-center gap-2">
+          <Input readOnly value={shown && data ? data.secret : '•'.repeat(32)} className="font-mono" />
+          <Button type="button" variant="outline" size="sm" onClick={() => setShown(!shown)}>
+            {shown ? 'Hide' : 'Show'}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={!data}
+            onClick={() => {
+              if (data) void navigator.clipboard.writeText(data.secret);
+              toast({ title: 'Copied' });
+            }}
+          >
+            <Copy className="h-4 w-4" />
+          </Button>
+        </div>
+        <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs">{`// Node, on your server
+const userHash = crypto.createHmac('sha256', IDENTITY_SECRET).update(userId).digest('hex');`}</pre>
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          disabled={rotate.isPending}
+          onClick={() => {
+            if (!window.confirm('Rotate the secret? Every userHash made with the current one stops working at once.')) return;
+            rotate.mutate(undefined, {
+              onSuccess: () => toast({ title: 'Identity secret rotated' }),
+              onError: () => toast({ title: 'Could not rotate the secret', variant: 'destructive' }),
+            });
+          }}
+        >
+          Rotate secret
+        </Button>
+      </CardContent>
+    </Card>
   );
 }

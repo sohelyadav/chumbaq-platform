@@ -36,6 +36,13 @@ export class ProjectEntity {
   @Column({ type: 'varchar', length: 64, nullable: true, name: 'domain_verification_token' })
   domainVerificationToken: string | null;
 
+  /**
+   * The version of the project's identity secret (`IdentityVerificationService`): the
+   * secret is derived from the server key, the project and this, so rotating it is a bump.
+   */
+  @Column({ type: 'int', default: 1, name: 'identity_key_version' })
+  identityKeyVersion: number;
+
   @Column({ type: 'varchar', length: 255, nullable: true, name: 'ios_bundle_id' })
   iosBundleId: string;
 

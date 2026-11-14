@@ -28,6 +28,8 @@ export const ACTIVITY_DETAIL_KEYS: Readonly<Record<ProjectActivityAction, readon
   // API keys: never the key or more of its prefix than the keys page shows.
   'api_key.created': ['name', 'permissions'],
   'api_key.revoked': [],
+  // The secret itself is never stored or logged; only that it changed.
+  'identity.secret_rotated': [],
   // Channels: changed field names only. Webhook URLs are never stored, not even the host.
   'channel.settings_changed': ['channel', 'fields'],
   'channel.provider_changed': ['channel', 'fields'],

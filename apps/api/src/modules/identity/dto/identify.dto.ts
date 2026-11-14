@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsObject, IsUUID, IsNumber, IsBoolean, MaxLength} from 'class-validator';
+import { IsString, IsOptional, IsObject, IsUUID, IsNumber, IsBoolean, MaxLength } from 'class-validator';
 
 /**
  * Deliberately no `ipAddress`. It was stored on the identity and fed to
@@ -33,6 +33,16 @@ export class IdentifyDto {
   @IsOptional()
   @MaxLength(255)
   externalUserId?: string;
+
+  /**
+   * HMAC-SHA256 of the external user id under the project's identity secret, as hex,
+   * made by the app's own server: required whenever an external id is given
+   * (IdentityVerificationService).
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  userHash?: string;
 
   @IsObject()
   @IsOptional()

@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsUUID, IsIn, IsNotEmpty, MaxLength} from 'class-validator';
+import { IsString, IsOptional, IsUUID, IsIn, IsNotEmpty, MaxLength } from 'class-validator';
 
 /**
  * Body of `POST /api/identity/link-device`.
@@ -54,6 +54,16 @@ export class LinkDeviceDto {
   @IsNotEmpty()
   @MaxLength(255)
   externalUserId: string;
+
+  /**
+   * HMAC-SHA256 of the external user id under the project's identity secret, as hex,
+   * made by the app's own server: required whenever an external id is given
+   * (IdentityVerificationService).
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  userHash?: string;
 
   @IsOptional()
   @IsString()

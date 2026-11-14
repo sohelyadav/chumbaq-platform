@@ -18,7 +18,7 @@ describe('IdentityController person objections', () => {
     object: jest.fn(async () => ({ objecting: true })),
     lift: jest.fn(async () => ({ objecting: false })),
   };
-  const controller = new IdentityController({} as never, personObjections as never);
+  const controller = new IdentityController({} as never, personObjections as never, {} as never);
   const owner = { userId: 'u1', email: 'o@x', isSuperAdmin: false, sessionVersion: 0 } as never;
   const viewAs = { userId: 'u1', email: 'o@x', isSuperAdmin: false, sessionVersion: 0, impersonatedBy: 'staff' } as never;
 
@@ -57,7 +57,7 @@ describe('IdentityController dashboard lookups', () => {
     getDevicesByUser: jest.fn(),
     findByFingerprintAndProject: jest.fn(),
   };
-  const controller = new IdentityController(identityService as never, {} as never);
+  const controller = new IdentityController(identityService as never, {} as never, {} as never);
 
   beforeEach(() => jest.clearAllMocks());
 

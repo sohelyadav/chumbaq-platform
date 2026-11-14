@@ -48,3 +48,20 @@ export function useRevokeApiKey(projectId: string) {
     },
   });
 }
+
+/** The project's identity secret, for the server that makes each identify's userHash. */
+export function useIdentitySecret(projectId: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: ['identity-secret', projectId],
+    queryFn: () => apiGet<{ secret: string; version: number }>(`/api/projects/${projectId}/identity-secret`),
+    enabled: !!projectId && enabled,
+  });
+}
+
+export function useRotateIdentitySecret(projectId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiPost<{ secret: string; version: number }>(`/api/projects/${projectId}/identity-secret/rotate`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['identity-secret', projectId] }),
+  });
+}

@@ -176,6 +176,8 @@ function predicate(e: ProjectActivityEntry): string | null {
       return label ? `created the API key ${quoted(label)}` : 'created an API key';
     case 'api_key.revoked':
       return label ? `revoked the API key ${quoted(label)}` : 'revoked an API key';
+    case 'identity.secret_rotated':
+      return 'rotated the identity verification secret';
     // Channels
     case 'channel.settings_changed': {
       const channel = channelName(d);

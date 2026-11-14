@@ -1154,6 +1154,7 @@ export type ProjectActivityAction =
   // API keys
   | 'api_key.created'
   | 'api_key.revoked'
+  | 'identity.secret_rotated'
   // Channels
   | 'channel.settings_changed'
   | 'channel.provider_changed'
@@ -1223,6 +1224,7 @@ export const ACTIVITY_ACTION_GROUP: Record<ProjectActivityAction, ProjectActivit
   'project.deleted': 'project',
   'api_key.created': 'api_keys',
   'api_key.revoked': 'api_keys',
+  'identity.secret_rotated': 'api_keys',
   'channel.settings_changed': 'channels',
   'channel.provider_changed': 'channels',
   'channel.credentials_uploaded': 'channels',
