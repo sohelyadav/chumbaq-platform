@@ -10,6 +10,7 @@ export const TENANT_CSV_HEADER = [
   'email',
   'name',
   'status',
+  'plan',
   'super_admin',
   'signed_up_at',
   'projects',
@@ -27,6 +28,8 @@ export interface TenantCsvRow {
   email: string;
   name: string;
   status: AdminTenantStatus;
+  /** The effective plan's code. */
+  plan: string;
   isSuperAdmin: boolean;
   createdAt: string;
   projectCount: number;
@@ -50,6 +53,7 @@ export function toTenantsCsv(rows: TenantCsvRow[], countedThrough: string | null
           row.email,
           row.name,
           row.status,
+          row.plan,
           String(row.isSuperAdmin),
           row.createdAt,
           String(row.projectCount),

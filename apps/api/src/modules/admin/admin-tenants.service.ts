@@ -19,6 +19,8 @@ import {
 import { SecurityNoticesService } from '../platform-email/security-notices.service';
 import { SeatsService } from '../project-access/seats.service';
 import { AccountLimitsService } from '../billing/account-limits.service';
+import { FREE_PLAN } from '../billing/effective-plan';
+import { BILLING_STATE_JOINS, effectivePlanCodeSql } from '../billing/effective-plan-sql';
 import { UserEntity } from '../users/entities/user.entity';
 import { AdminAuditService } from './admin-audit.service';
 import { toAuditLog } from './admin-audit-logs.service';
@@ -66,6 +68,7 @@ interface TenantRow {
 
 /** A list row: the tenant, its usage (null when it has none) and the filtered total. */
 interface TenantListRow extends TenantRow {
+  plan: string;
   mau: string | null;
   messages: string | null;
   lastUsageDay: string | null;
@@ -98,9 +101,16 @@ const SORT_COLUMNS: Record<AdminTenantSort, string> = {
 export function filteredTenantsSql(
   filters: AdminTenantsFilterDto,
   through: string | null,
+  billingEnabled = false,
 ): { sql: string; params: unknown[] } {
   const params: unknown[] = [through];
   const where: string[] = [];
+  // With billing off every account is on the free plan, whatever billing rows say.
+  const planSql = billingEnabled ? effectivePlanCodeSql('now()') : `'${FREE_PLAN}'::varchar`;
+  if (filters.plan !== undefined) {
+    params.push(filters.plan);
+    where.push(`${planSql} = $${params.length}`);
+  }
   if (filters.search) {
     params.push(`%${escapeLikePattern(filters.search)}%`);
     const n = params.length;
@@ -125,9 +135,11 @@ export function filteredTenantsSql(
            usage.mau_this_month::text AS mau,
            usage.messages_sent_30d::text AS messages,
            to_char(usage.last_usage_day, 'YYYY-MM-DD') AS "lastUsageDay",
+           ${planSql} AS plan,
            count(*) OVER ()::text AS total
       FROM users u
       LEFT JOIN usage ON usage.owner_id = u.id
+      ${billingEnabled ? BILLING_STATE_JOINS : ''}
      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
      ORDER BY ${SORT_COLUMNS[filters.sort] ?? SORT_COLUMNS.created_at} ${direction} NULLS LAST,
               u.created_at DESC, u.id DESC`;
@@ -148,6 +160,7 @@ function appliedTenantFilters(filters: AdminTenantsFilterDto): Record<string, un
   if (filters.search !== undefined) applied.search = filters.search;
   if (filters.status !== undefined) applied.status = filters.status;
   if (filters.activity !== undefined) applied.activity = filters.activity;
+  if (filters.plan !== undefined) applied.plan = filters.plan;
   return applied;
 }
 
@@ -191,7 +204,7 @@ export class AdminTenantsService {
     const manager = this.userRepository.manager;
     const coverage = await readUsageCoverage(manager);
     const countedThrough = coverage?.countedThrough ?? null;
-    const { sql, params } = filteredTenantsSql(query, countedThrough);
+    const { sql, params } = filteredTenantsSql(query, countedThrough, this.limits.billingEnabled);
     const rows: TenantListRow[] = await manager.query(
       `${sql} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, query.limit, query.skip],
@@ -204,7 +217,11 @@ export class AdminTenantsService {
     }
 
     return {
-      data: await this.summarise(rows, new Map(rows.map((row) => [row.id, usageOfRow(row)]))),
+      data: await this.summarise(
+        rows,
+        new Map(rows.map((row) => [row.id, usageOfRow(row)])),
+        new Map(rows.map((row) => [row.id, row.plan])),
+      ),
       meta: {
         total,
         page: query.page,
@@ -230,7 +247,7 @@ export class AdminTenantsService {
     const manager = this.userRepository.manager;
     const coverage = await readUsageCoverage(manager);
     const countedThrough = coverage?.countedThrough ?? null;
-    const { sql, params } = filteredTenantsSql(filters, countedThrough);
+    const { sql, params } = filteredTenantsSql(filters, countedThrough, this.limits.billingEnabled);
     // One past the cap, to know whether the cap cut anything off.
     const rows: TenantListRow[] = await manager.query(`${sql} LIMIT $${params.length + 1}`, [...params, cap + 1]);
     const truncated = rows.length > cap;
@@ -257,6 +274,7 @@ export class AdminTenantsService {
         email: row.email,
         name: row.name,
         status: row.suspendedAt ? 'suspended' : 'active',
+        plan: row.plan,
         isSuperAdmin: row.isSuperAdmin,
         createdAt: new Date(row.createdAt).toISOString(),
         projectCount: projects.get(row.id) ?? 0,
@@ -567,6 +585,7 @@ export class AdminTenantsService {
   private async summarise(
     users: TenantRow[],
     usage: Map<string, TenantUsageAggregate> = new Map(),
+    plans: Map<string, string> = new Map(),
   ): Promise<AdminTenantSummary[]> {
     if (users.length === 0) return [];
 
@@ -596,6 +615,7 @@ export class AdminTenantsService {
       mauThisMonth: usage.get(user.id)?.mauThisMonth ?? 0,
       messagesSent30d: usage.get(user.id)?.messagesSent30d ?? 0,
       lastUsageDay: usage.get(user.id)?.lastUsageDay ?? null,
+      plan: plans.get(user.id) ?? FREE_PLAN,
     }));
   }
 

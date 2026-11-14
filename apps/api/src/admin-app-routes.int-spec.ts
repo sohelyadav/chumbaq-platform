@@ -69,6 +69,12 @@ const ADMIN_ROUTES = [
   'PATCH /api/admin/plans/:code',
   'POST /api/admin/plans/:code/prices',
   'POST /api/admin/plans/:code/prices/:id/retire',
+  'GET /api/admin/billing/summary',
+  'GET /api/admin/tenants/:id/billing',
+  'POST /api/admin/tenants/:id/billing/comp',
+  'POST /api/admin/tenants/:id/billing/comp/end',
+  'POST /api/admin/tenants/:id/billing/cancel',
+  'POST /api/admin/tenants/:id/billing/invoices/:invoiceId/resend',
 ].sort();
 
 /** All an enrolment-only session may reach: say who it is, enrol a factor, sign out. */

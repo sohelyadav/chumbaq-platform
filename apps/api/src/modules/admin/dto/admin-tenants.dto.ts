@@ -78,6 +78,12 @@ function withTenantFilters<TBase extends Constructor>(Base: TBase) {
     @IsIn(ADMIN_TENANT_ACTIVITIES)
     activity?: AdminTenantActivity;
 
+    /** The effective plan's code; `free` is every account while billing is off. */
+    @IsOptional()
+    @IsString()
+    @Matches(/^[a-z][a-z0-9_]{1,31}$/, { message: 'plan must be a plan code' })
+    plan?: string;
+
     @IsIn(ADMIN_TENANT_SORTS)
     sort: AdminTenantSort = 'created_at';
 

@@ -171,7 +171,7 @@ function subscriptionView(s: BillingSubscriptionEntity, plans: Map<string, PlanE
   };
 }
 
-function invoiceView(i: BillingInvoiceEntity): BillingInvoiceView {
+export function invoiceView(i: BillingInvoiceEntity): BillingInvoiceView {
   return {
     id: i.id,
     number: i.number,

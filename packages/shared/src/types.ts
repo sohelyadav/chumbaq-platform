@@ -755,6 +755,8 @@ export interface AdminTenantSummary {
   messagesSent30d: number;
   /** The last counted day with any counted usage, or null if none. */
   lastUsageDay: string | null;
+  /** The effective plan's code; `free` for every account while billing is off. */
+  plan: AdminTenantPlan;
 }
 
 export interface AdminTenantProject {
@@ -797,7 +799,6 @@ export interface AdminTenantDetail extends AdminTenantSummary {
   recentAudit: AdminAuditLog[];
   /** The latest successful sign-in still in the sign-in history, or null. */
   lastSignInAt: string | null;
-  plan: AdminTenantPlan;
 }
 
 /**

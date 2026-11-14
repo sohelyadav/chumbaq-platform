@@ -19,6 +19,9 @@ import { AdminAuditLogsService } from './admin-audit-logs.service';
 import { AdminTenantsController } from './admin-tenants.controller';
 import { AdminPlansController } from './admin-plans.controller';
 import { AdminPlansService } from './admin-plans.service';
+import { AdminBillingController } from './admin-billing.controller';
+import { AdminBillingService } from './admin-billing.service';
+import { BillingOverviewService } from '../billing/billing-overview.service';
 import { AdminUsageController } from './admin-usage.controller';
 import { AdminUsageService } from './admin-usage.service';
 import { AdminTenantsService } from './admin-tenants.service';
@@ -70,6 +73,8 @@ import { IncidentsController } from '../incidents/incidents.controller';
     // First: its `tenants/export` must be matched before `tenants/:id`, which would
     // otherwise take it and refuse "export" as a uuid.
     AdminUsageController,
+    // Before the tenants controller, beside the other `tenants/:id/...` routes.
+    AdminBillingController,
     AdminTenantsController,
     AdminImpersonationController,
     AdminInsightsController,
@@ -88,6 +93,8 @@ import { IncidentsController } from '../incidents/incidents.controller';
     AdminAuditLogsService,
     AdminUsageService,
     AdminPlansService,
+    AdminBillingService,
+    BillingOverviewService,
   ],
 })
 export class AdminModule {}
