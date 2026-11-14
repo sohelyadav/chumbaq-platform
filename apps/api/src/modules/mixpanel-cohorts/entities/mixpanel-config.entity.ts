@@ -1,4 +1,5 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index, ManyToOne, JoinColumn } from 'typeorm';
+import { ProjectEntity } from '../../projects/entities/project.entity';
 
 @Entity('mixpanel_configs')
 export class MixpanelConfigEntity {
@@ -8,6 +9,11 @@ export class MixpanelConfigEntity {
   @Index({ unique: true })
   @Column({ type: 'uuid' })
   projectId: string;
+
+  /** Deleting the project deletes this with it: credentials and end users' profiles must not outlive it. */
+  @ManyToOne(() => ProjectEntity, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'projectId' })
+  project?: ProjectEntity;
 
   @Column({ type: 'varchar', length: 255 })
   serviceAccountUsername: string;

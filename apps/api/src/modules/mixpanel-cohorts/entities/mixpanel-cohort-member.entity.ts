@@ -1,4 +1,5 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index, ManyToOne, JoinColumn } from 'typeorm';
+import { ProjectEntity } from '../../projects/entities/project.entity';
 import { MixpanelCohortEntity } from './mixpanel-cohort.entity';
 
 export type ResolvedBy = 'external_user_id' | 'distinct_id' | 'email' | null;
@@ -21,6 +22,11 @@ export class MixpanelCohortMemberEntity {
   @Index()
   @Column({ type: 'uuid' })
   projectId: string;
+
+  /** Deleting the project deletes this with it: credentials and end users' profiles must not outlive it. */
+  @ManyToOne(() => ProjectEntity, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'projectId' })
+  project?: ProjectEntity;
 
   @Column({ type: 'varchar', length: 512 })
   mixpanelDistinctId: string;
