@@ -203,7 +203,8 @@ describe('billing webhook (integration)', () => {
         'unknown subscription',
       ],
       ['a payment that matches no account', () => razorpayBody('payment.failed', { 'payload.payment.entity.id': `pay_${hex(7)}` }), 'not ours'],
-      ['an event type billing does not use', () => razorpayBody('payment.downtime.started'), 'unhandled type'],
+      // Bodies differ per run: a body stored by an earlier run is a replay (the int database is kept).
+      ['an event type billing does not use', () => razorpayBody('payment.downtime.started', { created_at: unix(new Date()) - Number.parseInt(hex(3), 16) }), 'unhandled type'],
     ])('stores %s as ignored and answers 200', async (_name, build, detail) => {
       const sent = await post(JSON.stringify(build()));
       expect(sent.status).toBe(200);
@@ -218,7 +219,7 @@ describe('billing webhook (integration)', () => {
     });
 
     it('stores a signed body it cannot read as ignored, so the provider stops retrying it', async () => {
-      const shapeless = await post(JSON.stringify({ event: 'subscription.charged' }));
+      const shapeless = await post(JSON.stringify({ event: 'subscription.charged', account_id: `acc_${hex(7)}` }));
       expect(shapeless.status).toBe(200);
       expect(shapeless.body.data).toEqual({ received: true });
       expect(await eventRow(shapeless.eventId)).toMatchObject({
