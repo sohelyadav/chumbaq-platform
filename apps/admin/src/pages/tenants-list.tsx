@@ -1,8 +1,18 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { format, formatDistanceToNow } from 'date-fns';
-import { Building2, ChevronLeft, ChevronRight, Search, ShieldCheck } from 'lucide-react';
-import type { AdminTenantStatus } from '@chumbaq/shared';
+import { format } from 'date-fns';
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  Building2,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Search,
+  ShieldCheck,
+} from 'lucide-react';
+import type { AdminTenantActivity, AdminTenantSort, AdminTenantStatus } from '@chumbaq/shared';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -15,13 +25,70 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { adminErrorMessage, httpStatus, useAdminTenants } from '@/hooks/use-admin-tenants';
+import { toast } from '@/components/ui/use-toast';
+import {
+  adminErrorMessage,
+  httpStatus,
+  useAdminTenants,
+  useExportAdminTenants,
+} from '@/hooks/use-admin-tenants';
+import { cn } from '@/lib/utils';
+import {
+  formatCount,
+  formatDay,
+  nextSort,
+  readTenantListParams,
+  writeTenantListParams,
+  type TenantListParams,
+} from '@/lib/usage-format';
 
 const PAGE_SIZE = 25;
 const SEARCH_DEBOUNCE_MS = 300;
 
 function parseStatus(value: string | null): AdminTenantStatus | undefined {
   return value === 'active' || value === 'suspended' ? value : undefined;
+}
+
+const ACTIVITY_CHIPS: { value: AdminTenantActivity | null; label: string }[] = [
+  { value: null, label: 'All' },
+  { value: 'new', label: 'New' },
+  { value: 'quiet', label: 'Quiet' },
+  { value: 'never_used', label: 'Never used' },
+];
+
+function SortableHead({
+  column,
+  label,
+  list,
+  onSort,
+  className,
+}: {
+  column: AdminTenantSort;
+  label: string;
+  list: TenantListParams;
+  onSort: (column: AdminTenantSort) => void;
+  className?: string;
+}) {
+  const active = list.sort === column;
+  const Icon = !active ? ArrowUpDown : list.order === 'asc' ? ArrowUp : ArrowDown;
+  return (
+    <TableHead
+      className={className}
+      aria-sort={active ? (list.order === 'asc' ? 'ascending' : 'descending') : 'none'}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(column)}
+        className={cn(
+          'inline-flex items-center gap-1 rounded-sm hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+          active && 'text-foreground',
+        )}
+      >
+        {label}
+        <Icon className={cn('h-3.5 w-3.5', !active && 'opacity-40')} aria-hidden="true" />
+      </button>
+    </TableHead>
+  );
 }
 
 function parsePage(value: string | null): number {
@@ -34,7 +101,14 @@ export default function TenantsListPage() {
   const search = searchParams.get('search') ?? '';
   const status = parseStatus(searchParams.get('status'));
   const page = parsePage(searchParams.get('page'));
+  const list = readTenantListParams(searchParams);
   const [searchInput, setSearchInput] = useState(search);
+  const exportTenants = useExportAdminTenants();
+
+  /** Sort and activity changes, through the same URL. */
+  function updateList(change: Parameters<typeof writeTenantListParams>[1]) {
+    setSearchParams((previous) => writeTenantListParams(previous, change));
+  }
 
   /** Writes to the URL, which is the page's only state. Changing a filter resets the page. */
   function updateParams(changes: { search?: string; status?: string; page?: number }, replace = false) {
@@ -77,16 +151,55 @@ export default function TenantsListPage() {
     limit: PAGE_SIZE,
     search: search || undefined,
     status,
+    ...list,
   });
   const tenants = response?.data;
   const meta = response?.meta;
-  const filtered = !!search || !!status;
+  const filtered = !!search || !!status || !!list.activity;
+  // Before the roll-up has closed a day, a tenant's 0 means "not counted", not "none".
+  const counted = !!meta?.countedThrough;
+
+  const onSort = (column: AdminTenantSort) => updateList(nextSort(list, column));
+
+  const onExport = () => {
+    exportTenants.mutate(
+      { search: search || undefined, status, ...list },
+      {
+        onSuccess: (result) => {
+          const count = result.rowCount.toLocaleString('en-US');
+          toast({
+            title: result.truncated
+              ? `Exported the first ${count} of more tenants; narrow the filters`
+              : `Exported ${count} ${result.rowCount === 1 ? 'tenant' : 'tenants'}`,
+          });
+        },
+        onError: (exportError) => {
+          toast({
+            title: 'Could not export the tenants list',
+            description: adminErrorMessage(exportError, 'Try again in a moment.'),
+            variant: 'destructive',
+          });
+        },
+      },
+    );
+  };
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold">Tenants</h1>
-        <p className="text-muted-foreground mt-1">Every account on the platform and what it owns.</p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold">Tenants</h1>
+          <p className="text-muted-foreground mt-1">Every account on the platform and what it owns.</p>
+        </div>
+        <div className="flex flex-col items-end gap-1">
+          <Button variant="outline" onClick={onExport} disabled={exportTenants.isPending}>
+            <Download className="mr-2 h-4 w-4" />
+            {exportTenants.isPending ? 'Exporting...' : 'Export CSV'}
+          </Button>
+          <p className="text-xs text-muted-foreground">
+            This search, filter and sort, every page. Each export is recorded in the audit log.
+          </p>
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -113,7 +226,32 @@ export default function TenantsListPage() {
             <SelectItem value="suspended">Suspended</SelectItem>
           </SelectContent>
         </Select>
+        <div role="group" aria-label="Filter by activity" className="flex flex-wrap gap-1.5">
+          {ACTIVITY_CHIPS.map((chip) => {
+            const selected = (list.activity ?? null) === chip.value;
+            return (
+              <Button
+                key={chip.label}
+                type="button"
+                size="sm"
+                variant={selected ? 'secondary' : 'ghost'}
+                aria-pressed={selected}
+                className={cn('rounded-full', selected && 'ring-1 ring-border')}
+                onClick={() => updateList({ activity: chip.value })}
+              >
+                {chip.label}
+              </Button>
+            );
+          })}
+        </div>
       </div>
+      {meta && (
+        <p className="-mt-3 text-xs text-muted-foreground">
+          {meta.countedThrough
+            ? `Usage counted through ${formatDay(meta.countedThrough)} (UTC days). Quiet means no usage in the last 14 counted days.`
+            : 'Usage not counted yet.'}
+        </p>
+      )}
 
       <Card>
         <CardContent className="p-0">
@@ -143,11 +281,22 @@ export default function TenantsListPage() {
                   <TableHead>Tenant</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Projects</TableHead>
-                  <TableHead className="text-right">Links</TableHead>
-                  <TableHead className="text-right">Identities</TableHead>
-                  <TableHead className="text-right">Clicks (30d)</TableHead>
-                  <TableHead>Last activity</TableHead>
-                  <TableHead>Joined</TableHead>
+                  <SortableHead
+                    column="mau_this_month"
+                    label="Monthly active devices"
+                    list={list}
+                    onSort={onSort}
+                    className="text-right"
+                  />
+                  <SortableHead
+                    column="messages_sent_30d"
+                    label="Messages (30d)"
+                    list={list}
+                    onSort={onSort}
+                    className="text-right"
+                  />
+                  <SortableHead column="last_usage_day" label="Last usage" list={list} onSort={onSort} />
+                  <SortableHead column="created_at" label="Joined" list={list} onSort={onSort} />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -180,14 +329,17 @@ export default function TenantsListPage() {
                         )}
                       </div>
                     </TableCell>
-                    <TableCell className="text-right text-sm">{tenant.projectCount.toLocaleString()}</TableCell>
-                    <TableCell className="text-right text-sm">{tenant.linkCount.toLocaleString()}</TableCell>
-                    <TableCell className="text-right text-sm">{tenant.identityCount.toLocaleString()}</TableCell>
-                    <TableCell className="text-right text-sm">{tenant.clicksLast30d.toLocaleString()}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {tenant.lastActivityAt
-                        ? formatDistanceToNow(new Date(tenant.lastActivityAt), { addSuffix: true })
-                        : 'None'}
+                    <TableCell className="text-right text-sm tabular-nums">
+                      {tenant.projectCount.toLocaleString('en-US')}
+                    </TableCell>
+                    <TableCell className="text-right text-sm tabular-nums">
+                      {formatCount(counted ? tenant.mauThisMonth : null)}
+                    </TableCell>
+                    <TableCell className="text-right text-sm tabular-nums">
+                      {formatCount(counted ? tenant.messagesSent30d : null)}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
+                      {!counted ? '—' : tenant.lastUsageDay ? formatDay(tenant.lastUsageDay) : 'None'}
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {format(new Date(tenant.createdAt), 'MMM d, yyyy')}

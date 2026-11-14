@@ -1,24 +1,48 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   AdminFactorResetState,
+  AdminSortOrder,
+  AdminTenantActivity,
   AdminTenantDetail,
+  AdminTenantSort,
   AdminTenantStatus,
   AdminTenantSummary,
   FactorResetVerificationMethod,
   ImpersonationHandoff,
 } from '@chumbaq/shared';
 import { apiDelete, apiGet, apiPatch, apiPost } from '@/lib/api';
+import { downloadExport, type ExportResult } from '@/lib/download-export';
 
-export interface AdminTenantsParams {
-  page: number;
-  limit: number;
+/** What the list and the export share. The export takes no page or limit: the API refuses them. */
+export interface AdminTenantsFilters {
   search?: string;
   status?: AdminTenantStatus;
+  activity?: AdminTenantActivity;
+  /** The API's defaults (newest first) when left out. */
+  sort?: AdminTenantSort;
+  order?: AdminSortOrder;
+}
+
+export interface AdminTenantsParams extends AdminTenantsFilters {
+  page: number;
+  limit: number;
 }
 
 export interface AdminTenantsResponse {
   data: AdminTenantSummary[];
-  meta: { page: number; limit: number; total: number; totalPages: number };
+  /** `countedThrough`: the last day usage is counted through, null before the first. */
+  meta: { page: number; limit: number; total: number; totalPages: number; countedThrough: string | null };
+}
+
+/** Only the filters that are set, so axios sends no empty or `undefined` keys. */
+function tenantFilterParams(filters: AdminTenantsFilters): Record<string, string> {
+  const params: Record<string, string> = {};
+  if (filters.sort) params.sort = filters.sort;
+  if (filters.order) params.order = filters.order;
+  if (filters.search) params.search = filters.search;
+  if (filters.status) params.status = filters.status;
+  if (filters.activity) params.activity = filters.activity;
+  return params;
 }
 
 export function httpStatus(error: unknown): number | undefined {
@@ -36,8 +60,23 @@ export function adminErrorMessage(error: unknown, fallback: string): string {
 export function useAdminTenants(params: AdminTenantsParams) {
   return useQuery<AdminTenantsResponse>({
     queryKey: ['admin-tenants', params],
-    queryFn: () => apiGet<AdminTenantsResponse>('/api/admin/tenants', { ...params }),
+    queryFn: () =>
+      apiGet<AdminTenantsResponse>('/api/admin/tenants', {
+        page: params.page,
+        limit: params.limit,
+        ...tenantFilterParams(params),
+      }),
     placeholderData: keepPreviousData,
+  });
+}
+
+export function useExportAdminTenants() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (filters: AdminTenantsFilters): Promise<ExportResult> =>
+      downloadExport('/api/admin/tenants/export', tenantFilterParams(filters), 'chumbaq-tenants.csv'),
+    // The export is itself an entry in the audit log.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['admin', 'audit-logs'] }),
   });
 }
 

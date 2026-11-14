@@ -2,7 +2,8 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import axios from 'axios';
 import type { AdminAuditLog, AdminHealth, AdminOverview } from '@chumbaq/shared';
 import type { AuditApiFilters } from '@/lib/admin-audit-filters';
-import api, { apiGet, apiPost } from '@/lib/api';
+import { apiGet, apiPost } from '@/lib/api';
+import { downloadExport, type ExportResult } from '@/lib/download-export';
 import { PASSKEY_REQUIRED_MESSAGE } from '@/lib/messages';
 
 export interface AdminAuditLogsResponse {
@@ -89,36 +90,13 @@ export function useAdminAuditLogs(params: AdminAuditLogFilters & { page: number;
   });
 }
 
-export interface AdminAuditExportResult {
-  rowCount: number;
-  rowCap: number;
-  truncated: boolean;
-}
+export type AdminAuditExportResult = ExportResult;
 
-/** Downloads through the signed-in client, since a plain link would carry no token. */
 export function useExportAdminAuditLogs() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (filters: AdminAuditLogFilters): Promise<AdminAuditExportResult> => {
-      const response = await api.get<Blob>('/api/admin/audit-logs/export', {
-        params: filterParams(filters),
-        responseType: 'blob',
-      });
-      const disposition = String(response.headers['content-disposition'] ?? '');
-      const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? 'chumbaq-audit-log.csv';
-      const url = URL.createObjectURL(response.data);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = filename;
-      anchor.click();
-      // Once the click has started the download, which holds its own reference.
-      setTimeout(() => URL.revokeObjectURL(url), 0);
-      return {
-        rowCount: Number(response.headers['x-export-row-count'] ?? 0),
-        rowCap: Number(response.headers['x-export-row-cap'] ?? 0),
-        truncated: response.headers['x-export-truncated'] === 'true',
-      };
-    },
+    mutationFn: (filters: AdminAuditLogFilters): Promise<AdminAuditExportResult> =>
+      downloadExport('/api/admin/audit-logs/export', filterParams(filters), 'chumbaq-audit-log.csv'),
     // The export is itself an entry in the log.
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['admin', 'audit-logs'] }),
   });
