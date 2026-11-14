@@ -7,7 +7,7 @@ import { ConsentEventsService } from '../consent/consent-events.service';
 import { ConsentEventEntity } from '../consent/entities/consent-event.entity';
 import { DeviceIdentityEntity } from '../identity/entities/device-identity.entity';
 import { EmailAudienceService } from './email-audience.service';
-import { EmailConfirmationsService } from './email-confirmations.service';
+import { EmailConfirmationsService, mailboxOf } from './email-confirmations.service';
 
 /**
  * Double opt-in, against Postgres: who is mailed a confirmation, once, and what a
@@ -167,5 +167,18 @@ describe('Email double opt-in (integration)', () => {
     const e = Buffer.from('someone-else@example.com').toString('base64url');
     expect(service.verify(link.searchParams.get('p'), e, link.searchParams.get('s'))).toBeNull();
     expect(service.verify('11111111-1111-4111-8111-111111111112', link.searchParams.get('e'), link.searchParams.get('s'))).toBeNull();
+  });
+
+  // Following review: every spelling of one inbox shares its limit.
+  it('counts plus-tags and Gmail dots as the same inbox', async () => {
+    expect(mailboxOf('Victim+promo@Example.com')).toBe('victim@example.com');
+    expect(mailboxOf('v.i.c.t.i.m+1@googlemail.com')).toBe('victim@gmail.com');
+    await person(A, 'victim@gmail.com', true);
+    await person(B, 'v.ictim+2@gmail.com', true);
+    expect(await service.sendPending()).toBe(1);
+    // The refused spelling leaves the due set, so it does not block other work.
+    const [row] = await ds.query(`SELECT email_confirm_sent_at FROM device_identities WHERE id = $1`, [B]);
+    expect(row.email_confirm_sent_at).not.toBeNull();
+    expect(await service.sendPending()).toBe(0);
   });
 });

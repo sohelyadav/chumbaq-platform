@@ -30,6 +30,23 @@ const SENDS_KEY_PURPOSE = 'chumbaq/email-confirm-sends/v1';
  * holding the address in the project, so the holder's own word outweighs any earlier
  * refusal reported for it.
  */
+/**
+ * The inbox an address reaches, for the send limit: `+tags` lead to the same inbox,
+ * and Gmail ignores dots and treats googlemail.com as gmail.com, so each spelling of one
+ * inbox must count as one.
+ */
+export function mailboxOf(address: string): string {
+  const at = address.lastIndexOf('@');
+  if (at < 1) return address.toLowerCase();
+  let local = address.slice(0, at).toLowerCase();
+  let domain = address.slice(at + 1).toLowerCase();
+  const plus = local.indexOf('+');
+  if (plus > 0) local = local.slice(0, plus);
+  if (domain === 'googlemail.com') domain = 'gmail.com';
+  if (domain === 'gmail.com') local = local.replace(/\./g, '');
+  return `${local}@${domain}`;
+}
+
 @Injectable()
 export class EmailConfirmationsService {
   private readonly logger = new Logger(EmailConfirmationsService.name);
@@ -122,11 +139,15 @@ export class EmailConfirmationsService {
             AND NOT EXISTS (
               SELECT 1 FROM channel_suppressions x
                WHERE x.project_id = d.project_id AND x.channel = 'email' AND x.address = d.email)
+            -- A project at its daily cap waits for tomorrow and takes no one's turn.
+            AND (SELECT count(*) FROM email_confirmation_sends c
+                  WHERE c.project_id = d.project_id AND c.last_sent_at > now() - interval '1 day') < $3
           GROUP BY d.project_id, d.email
        ) pending
        WHERE n <= $1
+       ORDER BY n, project_id
        LIMIT $2`,
-      [CONFIRMATIONS_PER_PROJECT_PER_TICK, CONFIRMATIONS_PER_TICK],
+      [CONFIRMATIONS_PER_PROJECT_PER_TICK, CONFIRMATIONS_PER_TICK, CONFIRMATIONS_PER_PROJECT_PER_DAY],
     );
 
     let sent = 0;
@@ -150,7 +171,7 @@ export class EmailConfirmationsService {
         [projectId],
       );
       if (today >= CONFIRMATIONS_PER_PROJECT_PER_DAY) return null;
-      const hash = createHmac('sha256', this.sendsKey).update(`${projectId}\n${address}`).digest('hex');
+      const hash = createHmac('sha256', this.sendsKey).update(`${projectId}\n${mailboxOf(address)}`).digest('hex');
       const claimed: Array<{ last_sent_at: Date }> = await manager.query(
         `INSERT INTO email_confirmation_sends (project_id, address_hash, last_sent_at)
          VALUES ($1, $2, date_trunc('milliseconds', now()))
@@ -159,7 +180,18 @@ export class EmailConfirmationsService {
          RETURNING last_sent_at`,
         [projectId, hash],
       );
-      if (claimed.length === 0) return null;
+      if (claimed.length === 0) {
+        // Mailed recently (this spelling or another of the same inbox): take these rows
+        // out of the due set until then, so they do not fill every tick's batch.
+        await manager.query(
+          `UPDATE device_identities d SET email_confirm_sent_at = c.last_sent_at
+             FROM email_confirmation_sends c
+            WHERE c.project_id = $1 AND c.address_hash = $3
+              AND d.project_id = $1 AND d.email = $2 AND d.email_confirmed_at IS NULL`,
+          [projectId, address, hash],
+        );
+        return null;
+      }
       const sentAt = new Date(claimed[0].last_sent_at);
       await manager.query(
         `UPDATE device_identities SET email_confirm_sent_at = $3
