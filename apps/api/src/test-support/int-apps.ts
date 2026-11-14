@@ -20,10 +20,15 @@ export interface BootedApp {
  * applied the migrations and loaded the .env.
  *
  * The throttle is off unless asked for: these specs make many requests from one address.
+ * `providers` replaces providers by token, as `BILLING_PROVIDER` with a
+ * `FakeBillingProvider`, so no spec reaches a real provider.
  */
 export async function bootIntApp(
   which: 'customer' | 'admin',
-  { throttle = false }: { throttle?: boolean } = {},
+  {
+    throttle = false,
+    providers = [],
+  }: { throttle?: boolean; providers?: Array<{ token: unknown; useValue: unknown }> } = {},
 ): Promise<BootedApp> {
   // Off `synchronize` (dev/test only), which would reshape the schema other suites share.
   process.env.DATABASE_NAME = INT_DB_NAME;
@@ -37,6 +42,9 @@ export async function bootIntApp(
     builder = builder
       .overrideProvider(ThrottlerStorage)
       .useValue({ increment: async () => ({ totalHits: 1, timeToExpire: 60, isBlocked: false, timeToBlockExpire: 0 }) });
+  }
+  for (const { token, useValue } of providers) {
+    builder = builder.overrideProvider(token as never).useValue(useValue);
   }
   const moduleRef = await builder.compile();
   const app = moduleRef.createNestApplication(which === 'customer' ? { rawBody: true } : {});
