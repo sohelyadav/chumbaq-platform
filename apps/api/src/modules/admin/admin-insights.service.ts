@@ -11,8 +11,13 @@ import {
   QUEUE_SEGMENT_MATERIALIZE,
 } from '../../queue/queue.constants';
 import { PlatformEmailService } from '../platform-email/platform-email.service';
+import { addDays } from '../usage/usage-days';
+import { AdminUsageService, USAGE_WINDOW_DAYS } from './admin-usage.service';
 
 export const HEALTH_CHECK_TIMEOUT_MS = 2000;
+
+/** Counted days in the overview's usage chart. */
+export const USAGE_TREND_DAYS = 90;
 
 /**
  * First instant of the 30-day window, as a plain `timestamp` in the session's zone.
@@ -77,6 +82,7 @@ export class AdminInsightsService {
     @InjectQueue(QUEUE_COHORT_SYNC) cohortQueue: Queue,
     @InjectQueue(QUEUE_SEGMENT_MATERIALIZE) segmentQueue: Queue,
     private readonly platformEmail: PlatformEmailService,
+    private readonly usage: AdminUsageService,
   ) {
     this.queues = [pushQueue, cohortQueue, segmentQueue];
   }
@@ -89,6 +95,7 @@ export class AdminInsightsService {
   async overview(): Promise<AdminOverview> {
     const [totals] = await this.manager.query(TOTALS_SQL);
     const signups = await this.manager.query(SIGNUPS_SQL);
+    const usage = await this.usageOverview();
 
     // count() is a bigint, which the driver returns as a string.
     const signupsByDay = (signups as { date: string; count: string }[]).map((row) => ({
@@ -110,12 +117,35 @@ export class AdminInsightsService {
       identities: Number(totals.identities),
       clicksLast30d: Number(totals.clicks),
       signupsByDay,
-      usageCoverage: null,
-      usage30d: null,
-      usageTrend: [],
-      topTenants: [],
-      quietTenants: { count: 0, tenants: [] },
+      ...usage,
     };
+  }
+
+  /**
+   * Usage across every tenant, from the roll-up's closed days only: unlike the
+   * figures above, its 30 days end on the last counted day, not today.
+   */
+  private async usageOverview(): Promise<
+    Pick<AdminOverview, 'usageCoverage' | 'usage30d' | 'usageTrend' | 'topTenants' | 'quietTenants'>
+  > {
+    const coverage = await this.usage.coverage();
+    const through = coverage?.countedThrough;
+    if (!coverage || !through) {
+      return {
+        usageCoverage: coverage,
+        usage30d: null,
+        usageTrend: [],
+        topTenants: [],
+        quietTenants: { count: 0, tenants: [] },
+      };
+    }
+    const [totals, usageTrend, topTenants, quietTenants] = await Promise.all([
+      this.usage.totals(coverage, null, addDays(through, -(USAGE_WINDOW_DAYS - 1)), through),
+      this.usage.series(coverage, null, USAGE_TREND_DAYS),
+      this.usage.topTenants(coverage),
+      this.usage.quietTenants(coverage),
+    ]);
+    return { usageCoverage: coverage, usage30d: totals?.values ?? null, usageTrend, topTenants, quietTenants };
   }
 
   /**

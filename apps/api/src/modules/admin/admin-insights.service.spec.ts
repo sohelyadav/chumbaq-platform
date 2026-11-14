@@ -22,6 +22,7 @@ function build(query: () => Promise<unknown>, queues: Queue[]) {
     queues[1],
     queues[2],
     { isConfigured: false, sender: null } as never,
+    {} as never,
   );
 }
 

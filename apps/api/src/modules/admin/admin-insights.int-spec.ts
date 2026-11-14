@@ -3,6 +3,9 @@ import { Queue } from 'bullmq';
 import { DataSource, QueryRunner } from 'typeorm';
 import { closeIntDb, openIntDb } from '../../test-support/int-db';
 import { AdminInsightsService } from './admin-insights.service';
+import { AdminAuditService } from './admin-audit.service';
+import { AdminUsageService } from './admin-usage.service';
+import { AdminAuditLogEntity } from './entities/admin-audit-log.entity';
 
 const DAY_MS = 86_400_000;
 
@@ -38,6 +41,7 @@ describe('AdminInsightsService against Postgres', () => {
       {} as Queue,
       {} as Queue,
       { isConfigured: false, sender: null } as never,
+      new AdminUsageService(qr.manager, new AdminAuditService(qr.manager.getRepository(AdminAuditLogEntity))),
     );
     // now() is fixed for the transaction, so this cannot straddle midnight.
     const [{ now }] = await qr.query(`SELECT now() AS now`);
@@ -232,6 +236,106 @@ describe('AdminInsightsService against Postgres', () => {
       expect(text).toMatch(/Index Cond: \(\(link_id = l\.id\) AND \(clicked_at >=/);
     });
   });
+
+  describe('usage on the overview', () => {
+    // Counted through the 13th: the 30-day window is 15 Oct to 13 Nov.
+    const state = () =>
+      qr.query(
+        `INSERT INTO usage_rollup_state (id, started_on, first_day, last_closed_day)
+         VALUES (1, '2026-11-14', '2026-08-16', '2026-11-13')
+         ON CONFLICT (id) DO UPDATE SET started_on = '2026-11-14', first_day = '2026-08-16',
+                                         last_closed_day = '2026-11-13'`,
+      );
+
+    async function tenantWithProject(): Promise<{ owner: string; project: string }> {
+      const owner = await seedUser(todayMs - 90 * DAY_MS);
+      const project = randomUUID();
+      await qr.query(`INSERT INTO projects (id, name, owner_id) VALUES ($1, 'p', $2)`, [project, owner]);
+      return { owner, project };
+    }
+
+    const usage = (t: { owner: string; project: string }, day: string, metric: string, value: number) =>
+      qr.query(
+        `INSERT INTO usage_daily (project_id, owner_id, day, metric, value) VALUES ($1, $2, $3, $4, $5)`,
+        [t.project, t.owner, day, metric, value],
+      );
+
+    it('is empty, not zero, before the roll-up has run', async () => {
+      await qr.query(`DELETE FROM usage_rollup_state`);
+
+      const overview = await service.overview();
+
+      expect(overview.usageCoverage).toBeNull();
+      expect(overview.usage30d).toBeNull();
+      expect(overview.usageTrend).toEqual([]);
+      expect(overview.topTenants).toEqual([]);
+      expect(overview.quietTenants).toEqual({ count: 0, tenants: [] });
+    });
+
+    it('totals the 30 counted days and charts the last 90', async () => {
+      await state();
+      const t = await tenantWithProject();
+      const before = await service.overview();
+
+      await usage(t, '2026-11-13', 'push_sent', 5);
+      await usage(t, '2026-10-15', 'push_sent', 7);
+      // 30 days before the last counted day: outside the window.
+      await usage(t, '2026-10-14', 'push_sent', 1000);
+      await usage(t, '2026-11-13', 'mau_month_to_date', 4);
+      const after = await service.overview();
+
+      expect(after.usageCoverage).toEqual({
+        startedOn: '2026-11-14',
+        countedFrom: '2026-08-16',
+        countedThrough: '2026-11-13',
+        mauFrom: '2026-11-01',
+      });
+      expect(after.usage30d!.push_sent! - before.usage30d!.push_sent!).toBe(12);
+      expect(after.usage30d!.mau_month_to_date! - before.usage30d!.mau_month_to_date!).toBe(4);
+      expect(after.usageTrend).toHaveLength(90);
+      expect(after.usageTrend[89].date).toBe('2026-11-13');
+      const day = (o: typeof after, date: string) => o.usageTrend.find((d) => d.date === date)!.values.push_sent!;
+      expect(day(after, '2026-10-14') - day(before, '2026-10-14')).toBe(1000);
+    });
+
+    it('ranks busy tenants and lists the ones going quiet', async () => {
+      await state();
+      const heavy = await tenantWithProject();
+      const light = await tenantWithProject();
+      const quiet = await tenantWithProject();
+      const boundary = await tenantWithProject();
+      const recent = await tenantWithProject();
+      const before = await service.overview();
+
+      await usage(heavy, '2026-11-13', 'push_sent', 2_000_000_000);
+      await usage(heavy, '2026-11-13', 'mau_month_to_date', 1_000_000_000);
+      await usage(light, '2026-11-12', 'email_sent', 1_500_000_000);
+      // Last usage 20, 14 and 13 days before the last counted day.
+      await usage(quiet, '2026-10-24', 'events', 3);
+      await usage(boundary, '2026-10-30', 'events', 3);
+      await usage(recent, '2026-10-31', 'events', 3);
+      const after = await service.overview();
+
+      const top = after.topTenants.map((t) => t.id);
+      expect(top.indexOf(heavy.owner)).toBeGreaterThanOrEqual(0);
+      expect(top.indexOf(heavy.owner)).toBeLessThan(top.indexOf(light.owner));
+      expect(top).not.toContain(quiet.owner);
+      expect(after.topTenants.find((t) => t.id === heavy.owner)).toMatchObject({
+        mauThisMonth: 1_000_000_000,
+        messagesSent30d: 2_000_000_000,
+        lastUsageDay: '2026-11-13',
+      });
+
+      const quietIds = after.quietTenants.tenants.map((t) => t.id);
+      expect(quietIds).toEqual(expect.arrayContaining([quiet.owner, boundary.owner]));
+      expect(quietIds).not.toContain(recent.owner);
+      expect(after.quietTenants.count - before.quietTenants.count).toBe(2);
+      expect(after.quietTenants.tenants.find((t) => t.id === quiet.owner)).toMatchObject({
+        lastUsageDay: '2026-10-24',
+        messagesSent30d: 0,
+      });
+    });
+  });
 });
 
 /** getJobCounts maps `waiting` to BullMQ's `wait` list internally; pin it against Redis. */
@@ -255,6 +359,7 @@ describe('AdminInsightsService.health against Redis', () => {
         queues[1],
         queues[2],
         { isConfigured: false, sender: null } as never,
+        {} as never,
       );
       const health = await service.health();
 
