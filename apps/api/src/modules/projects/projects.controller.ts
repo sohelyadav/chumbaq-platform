@@ -1,4 +1,5 @@
 import {
+  HttpCode,
   Controller,
   Get,
   Post,
@@ -11,6 +12,7 @@ import {
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { ProjectsService, withCallerAccess } from './projects.service';
+import { ProjectDomainsService } from './project-domains.service';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
@@ -26,7 +28,10 @@ import { activityContext } from '../project-activity/activity-context';
 @Controller('projects')
 @UseGuards(JwtAuthGuard)
 export class ProjectsController {
-  constructor(private readonly projectsService: ProjectsService) {}
+  constructor(
+    private readonly projectsService: ProjectsService,
+    private readonly domains: ProjectDomainsService,
+  ) {}
 
   @Post()
   async create(
@@ -59,6 +64,18 @@ export class ProjectsController {
     @Req() req: Request,
   ) {
     return this.projectsService.update(userId, access.project, dto, activityContext(req));
+  }
+
+  /** Checks the project's DNS proof of its domain; see ProjectDomainsService. */
+  @RequireProjectPermission('project.admin', { param: 'id' })
+  @Post(':id/domain/verify')
+  @HttpCode(200)
+  async verifyDomain(
+    @ProjectAccessContext() access: ProjectAccess,
+    @CurrentUser('userId') userId: string,
+    @Req() req: Request,
+  ) {
+    return this.domains.verify(userId, access.project.id, activityContext(req));
   }
 
   /** Irreversible, so it also needs a sign-in within 15 minutes. */

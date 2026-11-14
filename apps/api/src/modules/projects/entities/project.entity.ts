@@ -1,4 +1,5 @@
 import {
+  Index,
   Entity,
   PrimaryGeneratedColumn,
   Column,
@@ -10,6 +11,8 @@ import {
 } from 'typeorm';
 import { UserEntity } from '../../users/entities/user.entity';
 
+// One verified project per domain (see domainVerifiedAt).
+@Index('UQ_projects_verified_domain', ['domain'], { unique: true, where: '"domain_verified_at" IS NOT NULL' })
 @Entity('projects')
 export class ProjectEntity {
   @PrimaryGeneratedColumn('uuid')
@@ -20,6 +23,18 @@ export class ProjectEntity {
 
   @Column({ type: 'varchar', length: 255, nullable: true })
   domain: string;
+
+  /**
+   * When the project proved it controls `domain` (a DNS TXT record, `ProjectDomainsService`).
+   * Only a verified domain gets the app-association files, and only one project may hold
+   * a verification for a domain. Cleared whenever the domain changes.
+   */
+  @Column({ type: 'timestamptz', nullable: true, name: 'domain_verified_at' })
+  domainVerifiedAt: Date | null;
+
+  /** The value the TXT record must carry: `chumbaq-verify=<this>`. Replaced when the domain changes. */
+  @Column({ type: 'varchar', length: 64, nullable: true, name: 'domain_verification_token' })
+  domainVerificationToken: string | null;
 
   @Column({ type: 'varchar', length: 255, nullable: true, name: 'ios_bundle_id' })
   iosBundleId: string;

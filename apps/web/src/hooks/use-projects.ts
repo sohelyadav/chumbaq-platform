@@ -14,6 +14,10 @@ export interface Project {
   androidPlayStoreUrl: string | null;
   androidSha256Fingerprints: string | null;
   webFallbackUrl: string | null;
+  /** When the project proved it controls `domain` (DNS TXT); null until then. */
+  domainVerifiedAt: string | null;
+  /** The TXT value to publish: `chumbaq-verify=<this>` at `_chumbaq-verify.<domain>`. */
+  domainVerificationToken: string | null;
   ownerId: string;
   /** The caller's role in this project. */
   role: ProjectRole;
@@ -78,6 +82,18 @@ export function useUpdateProject(id: string) {
   return useMutation({
     mutationFn: (data: Partial<CreateProjectDto>) =>
       apiPatch<Project>(`/api/projects/${id}`, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      queryClient.invalidateQueries({ queryKey: ['project', id] });
+    },
+  });
+}
+
+/** Checks the project's DNS proof of its domain. */
+export function useVerifyDomain(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiPost<Project>(`/api/projects/${id}/domain/verify`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       queryClient.invalidateQueries({ queryKey: ['project', id] });

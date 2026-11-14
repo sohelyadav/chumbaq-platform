@@ -10,6 +10,7 @@ const TABLE: Array<[keyof ProjectsController, string, unknown]> = [
   ['findOne', 'project.read', ID],
   ['update', 'project.admin', ID],
   ['remove', 'project.admin', ID],
+  ['verifyDomain', 'project.admin', ID],
 ];
 
 describe('ProjectsController route permissions', () => {
@@ -31,7 +32,7 @@ describe('ProjectsController route permissions', () => {
   });
 
   it('GET :id gives the project with the caller\'s role, billing and permissions', async () => {
-    const controller = new ProjectsController({} as never);
+    const controller = new ProjectsController({} as never, {} as never);
     const project = { id: 'p-1', ownerId: 'someone-else' };
     const result = await controller.findOne({ project, role: 'admin', isBillingOwner: false } as never);
     expect(result).toMatchObject({

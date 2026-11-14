@@ -1,7 +1,7 @@
 import { randomBytes } from 'crypto';
 import { Injectable, NotFoundException, Inject, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { IsNull, Not, Repository } from 'typeorm';
 import { LinkEntity } from '../links/entities/link.entity';
 import { ProjectEntity } from '../projects/entities/project.entity';
 import { PlatformDetectorService, DeviceInfo } from './platform-detector.service';
@@ -260,15 +260,15 @@ a:hover { text-decoration: underline; }
   }
 
   /**
-   * The one project whose app the association files may name for this host, or null.
+   * The one project whose app the association files may name for this host, or null:
+   * the project that proved it controls the host (a unique index allows only one).
    * Never for a host the platform serves itself (every tenant's links and the account
-   * links live there), never when more than one project claims the host (the domain is
-   * typed in by owners and not proven, so a second claim must not decide whose app it
-   * is), and never for a suspended tenant.
+   * links live there), never for an unproved claim, and never for a suspended tenant.
    */
   private async associatedProject(host: string): Promise<ProjectEntity | null> {
     if (!host || isPlatformHost(host)) return null;
-    const claims = await this.projectRepository.find({ where: { domain: host }, take: 2 });
+    // Only a domain the project proved it controls (ProjectDomainsService).
+    const claims = await this.projectRepository.find({ where: { domain: host, domainVerifiedAt: Not(IsNull()) }, take: 2 });
     if (claims.length !== 1) return null;
     const [project] = claims;
     if (await this.suspension.isSuspended(project.id)) return null;

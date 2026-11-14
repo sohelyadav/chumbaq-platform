@@ -12,7 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Separator } from '@/components/ui/separator';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { SelectContent, SelectItem, SelectRoot as Select, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { useProject, useUpdateProject, useDeleteProject } from '@/hooks/use-projects';
+import { useProject, useUpdateProject, useDeleteProject, useVerifyDomain } from '@/hooks/use-projects';
 import {
   reauthCancelled,
   serverMessage,
@@ -238,6 +238,7 @@ export default function ProjectSettingsPage() {
                 {errors.domain && <p className="text-sm text-destructive">{errors.domain.message}</p>}
               </div>
             </div>
+            <DomainProof projectId={projectId as string} />
             <div className="space-y-2">
               <Label>Web Fallback URL</Label>
               <Input placeholder="https://example.com" {...register('webFallbackUrl')} />
@@ -470,6 +471,56 @@ export default function ProjectSettingsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+/**
+ * The DNS proof that the project controls its domain. Until it is in place, the domain's
+ * app-association files name no app, so universal links and app links do not open it.
+ */
+function DomainProof({ projectId }: { projectId: string }) {
+  const { data: project } = useProject(projectId);
+  const verify = useVerifyDomain(projectId);
+  if (!project?.domain) return null;
+  if (project.domainVerifiedAt) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        {project.domain} is verified for app links.
+      </p>
+    );
+  }
+  const canVerify = can(project, 'project.admin');
+  return (
+    <div className="space-y-2 rounded-md border border-border/60 p-3 text-sm">
+      <p>
+        To open app links on <span className="font-medium">{project.domain}</span>, prove you control it: add a TXT
+        record named <code className="break-all">_chumbaq-verify.{project.domain}</code> with the value{' '}
+        <code className="break-all">chumbaq-verify={project.domainVerificationToken}</code>, then verify.
+      </p>
+      {canVerify && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={verify.isPending}
+          onClick={() =>
+            verify.mutate(undefined, {
+              onSuccess: () => toast({ title: 'Domain verified' }),
+              onError: (err) =>
+                toast({
+                  title: 'Not verified yet',
+                  description:
+                    (err as { response?: { data?: { message?: string } } }).response?.data?.message ??
+                    'Try again in a few minutes.',
+                  variant: 'destructive',
+                }),
+            })
+          }
+        >
+          {verify.isPending ? 'Checking...' : 'Verify domain'}
+        </Button>
+      )}
     </div>
   );
 }

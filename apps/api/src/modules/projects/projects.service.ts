@@ -19,6 +19,7 @@ import { permissionsOf, type ProjectPermission, type ProjectRole } from '../proj
 import { AccountLimitsService, projectLimitMessage } from '../billing/account-limits.service';
 import type { ActivityContext } from '../project-activity/activity-context';
 import { ProjectActivityService } from '../project-activity/project-activity.service';
+import { newDomainToken } from './project-domains.service';
 
 /**
  * The columns `PATCH /projects/:id` may write. Typed against the DTO so a new field
@@ -115,7 +116,9 @@ export class ProjectsService {
       const owned = await manager.count(ProjectEntity, { where: { ownerId: userId } });
       if (owned >= projectLimit) throw new ForbiddenException(projectLimitMessage(projectLimit, billingEnabled));
 
-      const project = await manager.save(manager.create(ProjectEntity, { ...dto, ownerId: userId }));
+      const project = await manager.save(
+        manager.create(ProjectEntity, { ...dto, ownerId: userId, domainVerificationToken: newDomainToken() }),
+      );
       await manager.insert(ProjectMemberEntity, {
         projectId: project.id,
         userId,
@@ -209,7 +212,11 @@ export class ProjectsService {
         const changed = changedProjectSettings(before, dto);
         if (changed.length === 0) return;
         const write = Object.fromEntries(changed.map((key) => [key, requested[key]])) as Partial<ProjectEntity>;
-        await manager.update(ProjectEntity, { id: project.id }, write);
+        // A new domain must be proved afresh, with a new token: see ProjectDomainsService.
+        const domainReset = changed.includes('domain')
+          ? { domainVerifiedAt: null, domainVerificationToken: newDomainToken() }
+          : {};
+        await manager.update(ProjectEntity, { id: project.id }, { ...write, ...domainReset });
 
         const name = (write.name ?? before.name) as string;
         const target = { type: 'project', id: project.id, label: name };
