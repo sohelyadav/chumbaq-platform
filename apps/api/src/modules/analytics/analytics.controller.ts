@@ -13,6 +13,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AnalyticsService } from './analytics.service';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { RequireProjectPermission } from '../project-access/require-project-permission.decorator';
+import { refuseViewAs } from '../project-access/view-as';
 
 @Controller()
 @UseGuards(JwtAuthGuard)
@@ -79,6 +80,8 @@ export class AnalyticsController {
     @Query('start') start?: string,
     @Query('end') end?: string,
   ) {
+    // Like every other export: staff viewing as the tenant may look, not take a copy.
+    refuseViewAs(user);
     const startDate = start ? new Date(start) : undefined;
     const endDate = end ? new Date(end) : undefined;
     const csv = await this.analyticsService.exportClicksAsCsv(id, startDate, endDate);
