@@ -1,5 +1,13 @@
 import { EntityManager } from 'typeorm';
-import { COUNTED_METRICS, COUNTED_METRIC_SQL, SnapshotMetric, UsageMetricName } from './usage-metrics';
+import { monthStart } from './usage-days';
+import {
+  COUNTED_METRICS,
+  COUNTED_METRIC_SQL,
+  REACHED_EVENT_TYPES,
+  SnapshotMetric,
+  UsageMetricName,
+  inWindow,
+} from './usage-metrics';
 
 /** A project and its billing owner as the roll-up writes them. */
 export interface ProjectOwner {
@@ -86,6 +94,99 @@ export async function writeApiKeySnapshot(
   now: Date,
 ): Promise<void> {
   await writeSnapshot(manager, projects, day, 'api_keys_active', ACTIVE_KEYS_SQL, [now]);
+}
+
+/** A plain `timestamp` column's UTC day (the column holds session wall clock). */
+const utcDate = (column: string) => `(${column}::timestamptz AT TIME ZONE 'UTC')::date`;
+
+/**
+ * Every record that makes a device active, with when it was written (the
+ * rules are in `usage-metrics.ts`). `$1` project ids, `$2`/`$3` the window.
+ */
+const ACTIVITY_SQL = `
+  SELECT project_id, device_identity_id AS device, created_at AS at
+    FROM user_events
+   WHERE project_id = ANY($1::uuid[]) AND device_identity_id IS NOT NULL AND ${inWindow('created_at')}
+  UNION ALL
+  SELECT project_id, device_identity_id, created_at
+    FROM push_notification_events
+   WHERE project_id = ANY($1::uuid[])
+     AND type IN (${REACHED_EVENT_TYPES.map((t) => `'${t}'`).join(', ')})
+     AND ${inWindow('created_at')}
+  UNION ALL
+  SELECT i.project_id, COALESCE(i.device_identity_id, d.id), i.created_at
+    FROM in_app_message_impressions i
+    LEFT JOIN device_identities d
+      ON i.device_identity_id IS NULL AND d.project_id = i.project_id AND d.device_fingerprint = i.device_fingerprint
+   WHERE i.project_id = ANY($1::uuid[]) AND ${inWindow('i.created_at')}
+  UNION ALL
+  SELECT project_id, id, first_seen_at
+    FROM device_identities
+   WHERE project_id = ANY($1::uuid[]) AND ${inWindow('first_seen_at')}`;
+
+/**
+ * Adds the devices active in `[from, to)` to `monthly_active_devices`, one row
+ * per device per UTC month, keeping the earliest day seen. Safe to repeat and
+ * to run windows in any order. Returns the rows added or moved earlier.
+ */
+export async function recordActiveDevices(
+  manager: EntityManager,
+  projectIds: string[],
+  from: Date,
+  to: Date,
+): Promise<number> {
+  if (projectIds.length === 0) return 0;
+  const [row] = await manager.query(
+    `WITH activity AS (${ACTIVITY_SQL}),
+          days AS (
+            SELECT project_id, device, ${utcDate('at')} AS day FROM activity WHERE device IS NOT NULL
+          ),
+          written AS (
+            INSERT INTO monthly_active_devices (project_id, month, device_identity_id, first_day)
+            SELECT project_id, date_trunc('month', day)::date, device, min(day)
+              FROM days
+             GROUP BY project_id, date_trunc('month', day)::date, device
+            ON CONFLICT (project_id, month, device_identity_id) DO UPDATE SET first_day = EXCLUDED.first_day
+              WHERE EXCLUDED.first_day < monthly_active_devices.first_day
+            RETURNING 1
+          )
+     SELECT count(*)::int AS n FROM written`,
+    [projectIds, from, to],
+  );
+  return row.n;
+}
+
+/** Devices active in `day`'s month up to and including `day` (`$2` the month, `$3` the day). */
+const MONTH_TO_DATE_SQL = `
+  SELECT project_id, count(*)::bigint AS value
+    FROM monthly_active_devices
+   WHERE project_id = ANY($1::uuid[]) AND month = $2::date AND first_day <= $3::date
+   GROUP BY project_id`;
+
+/** `mau_month_to_date` for `day`, from the devices recorded so far. */
+export async function writeMauSnapshot(
+  manager: EntityManager,
+  projects: ProjectOwner[],
+  day: string,
+): Promise<void> {
+  await writeSnapshot(manager, projects, day, 'mau_month_to_date', MONTH_TO_DATE_SQL, [monthStart(day), day]);
+}
+
+/** Months kept in `monthly_active_devices`; older months live on as `usage_daily` counts. */
+export const ACTIVE_DEVICE_MONTHS_KEPT = 13;
+
+/** Deletes active-device months more than thirteen before `today`'s month. Returns rows deleted. */
+export async function pruneActiveDevices(manager: EntityManager, today: string): Promise<number> {
+  const [row] = await manager.query(
+    `WITH gone AS (
+       DELETE FROM monthly_active_devices
+        WHERE month < $1::date - make_interval(months => $2)
+       RETURNING 1
+     )
+     SELECT count(*)::int AS n FROM gone`,
+    [monthStart(today), ACTIVE_DEVICE_MONTHS_KEPT],
+  );
+  return row.n;
 }
 
 /** The stored values of `day` per project; a project with none is absent. */

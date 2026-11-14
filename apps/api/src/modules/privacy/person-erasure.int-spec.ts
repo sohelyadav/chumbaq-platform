@@ -233,6 +233,11 @@ describe('PersonErasureService and PersonExportService (integration)', () => {
         p.externalUserId && p.distinctId === p.externalUserId ? 'external_user_id' : 'distinct_id',
       ],
     );
+    // A month the device was active, as the usage roll-up records it.
+    await q(
+      `INSERT INTO monthly_active_devices (project_id, month, device_identity_id, first_day) VALUES ($1, '2026-11-01', $2, '2026-11-05')`,
+      [project, p.id],
+    );
     // Consent history, as identify and the dashboard write it, and a
     // whole-person do-not-track a team member made for their external id.
     await q(
@@ -276,6 +281,7 @@ describe('PersonErasureService and PersonExportService (integration)', () => {
     journey_runs: await count('journey_runs WHERE project_id = $1 AND person_key = $2', [project, p.personKey]),
     segment_members: await count('segment_members WHERE project_id = $1 AND person_key = $2', [project, p.personKey]),
     mixpanel_cohort_members: await count('mixpanel_cohort_members WHERE "projectId" = $1 AND "deviceIdentityId" = $2', [project, p.id]),
+    monthly_active_devices: await count('monthly_active_devices WHERE project_id = $1 AND device_identity_id = $2', [project, p.id]),
   });
 
   const alice1 = { id: ALICE_1, distinctId: 'user-42', fingerprint: 'fp-alice-1', personKey: 'user-42', externalUserId: 'user-42', tag: 'a1' };
@@ -288,7 +294,7 @@ describe('PersonErasureService and PersonExportService (integration)', () => {
     await q(
       `TRUNCATE links, touchpoints, push_notification_logs, in_app_messages, journeys, mixpanel_cohorts,
                 identity_aliases, channel_suppressions, erased_suppressions, privacy_request_logs,
-                tracking_objections RESTART IDENTITY CASCADE`,
+                tracking_objections, monthly_active_devices RESTART IDENTITY CASCADE`,
     );
     await q(`INSERT INTO projects (id, name, owner_id) VALUES ($1, 'other', $2) ON CONFLICT (id) DO NOTHING`, [B, OWNER]);
 
@@ -357,6 +363,8 @@ describe('PersonErasureService and PersonExportService (integration)', () => {
     // do-not-track objection goes too, Bob's and project B's stay.
     expect(result.counts.consent_events).toBe(4);
     expect(result.counts.tracking_objections).toBe(1);
+    // The months the devices were active go; usage counts never named them.
+    expect(result.counts.monthly_active_devices).toBe(2);
   });
 
   it('takes the person out of campaign target and control lists, keeping the campaign and others', async () => {
@@ -1160,6 +1168,7 @@ describe('PersonErasureService and PersonExportService (integration)', () => {
         'attribution_results', 'conversion_events', 'click_events', 'touchpoints', 'push_notification_events',
         'in_app_message_impressions', 'pending_in_app_messages', 'journey_runs', 'segment_members',
         'mixpanel_cohort_members', 'identity_aliases', 'push_tokens', 'consent_events', 'tracking_objections',
+        'monthly_active_devices',
       ]) {
         expect([name, doc.sections[name].total > 0]).toEqual([name, true]);
       }
@@ -1187,6 +1196,10 @@ describe('PersonErasureService and PersonExportService (integration)', () => {
       expect(doc.sections.tracking_objections.rows).toEqual([
         { externalUserId: 'user-42', createdAt: expect.any(Date) },
       ]);
+      // Months as text, so no time zone can move them.
+      expect(doc.sections.monthly_active_devices.rows.map((r) => [r.deviceIdentityId, r.month, r.firstDay]).sort()).toEqual(
+        [[ALICE_1, '2026-11', '2026-11-05'], [ALICE_2, '2026-11', '2026-11-05']].sort(),
+      );
       // Counts every split, including withheld ones.
       for (const result of doc.sections.attribution_results.rows) expect(result).not.toHaveProperty('touchpointCount');
       // Internal diagnostics are not exported.

@@ -414,6 +414,24 @@ export const PERSON_INVENTORY: InventoryEntry[] = [
     },
   },
   {
+    // The months a device was active, kept for usage counts. No foreign key
+    // to the device, so it is deleted here. Daily counts already taken from
+    // it hold no id and stay. Dates as text, so no zone can move them.
+    name: 'monthly_active_devices',
+    project: PROJECT,
+    match: 'device_identity_id = ANY($ids)',
+    erase: 'delete',
+    export: {
+      columns: cols([
+        'device_identity_id',
+        "to_char(month, 'YYYY-MM') AS month",
+        "to_char(first_day, 'YYYY-MM-DD') AS firstDay",
+      ]),
+      orderBy: 'month',
+      tieBreak: 'first_day',
+    },
+  },
+  {
     // Profile, device, geo, attribution, engagement, traits and consent.
     name: 'device_identities',
     project: PROJECT,
