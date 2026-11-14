@@ -16,6 +16,7 @@ import { AuthEventsService } from '../auth-events/auth-events.service';
 import { SecurityNoticesService } from '../platform-email/security-notices.service';
 import { getClientIp } from '../../common/client-ip';
 import { FactorResetsService } from '../factor-resets/factor-resets.service';
+import { AuthService } from '../auth/auth.service';
 
 @Controller('users')
 @UseGuards(JwtAuthGuard)
@@ -25,6 +26,7 @@ export class UsersController {
     private readonly events: AuthEventsService,
     private readonly notices: SecurityNoticesService,
     private readonly factorResets: FactorResetsService,
+    private readonly auth: AuthService,
   ) {}
 
   @Patch('me/password')
@@ -38,17 +40,28 @@ export class UsersController {
       throw new UnauthorizedException('User not found');
     }
 
+    const context = { ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] };
+    // The current password is a guess like any other: it counts against, and is held
+    // to, the same sign-in failure limit, so a stolen session cannot be used to try
+    // passwords free of it.
+    await this.auth.assertUnderLoginLimit(user.email, context);
     const isPasswordValid = await bcrypt.compare(
       dto.currentPassword,
       user.passwordHash,
     );
     if (!isPasswordValid) {
+      await this.events.record({
+        type: 'login.failed',
+        userId,
+        email: user.email,
+        reason: 'wrong_password',
+        ...context,
+      });
       throw new UnauthorizedException('Invalid current password');
     }
 
     const newPasswordHash = await bcrypt.hash(dto.newPassword, 12);
     await this.usersService.changeOwnPassword(userId, newPasswordHash);
-    const context = { ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] };
     await this.events.record({
       type: 'password.changed',
       userId,

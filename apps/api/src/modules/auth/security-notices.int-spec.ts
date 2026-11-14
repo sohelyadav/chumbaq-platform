@@ -202,7 +202,7 @@ describe('Security notices (integration)', () => {
 
     it('changed by its owner is told about', async () => {
       const user = (await users.findByEmail(EMAIL)) as UserEntity;
-      await new UsersController(users, events, notices, { voidStaffLinksOnSignIn: async () => false } as never).changePassword(
+      await new UsersController(users, events, notices, { voidStaffLinksOnSignIn: async () => false } as never, { assertUnderLoginLimit: async () => undefined } as never).changePassword(
         user.id,
         { currentPassword: PASSWORD, newPassword: 'another-password' } as never,
         req,
@@ -214,7 +214,7 @@ describe('Security notices (integration)', () => {
     it('is not told about when the current password was wrong', async () => {
       const user = (await users.findByEmail(EMAIL)) as UserEntity;
       await expect(
-        new UsersController(users, events, notices, { voidStaffLinksOnSignIn: async () => false } as never).changePassword(
+        new UsersController(users, events, notices, { voidStaffLinksOnSignIn: async () => false } as never, { assertUnderLoginLimit: async () => undefined } as never).changePassword(
           user.id,
           { currentPassword: 'wrong', newPassword: 'another-password' } as never,
           req,

@@ -1209,6 +1209,7 @@ describe('FactorResetsService (integration)', () => {
           { record: async () => undefined } as never,
           { passwordChangedByOwner: () => undefined } as never,
           resets,
+          { assertUnderLoginLimit: async () => undefined } as never,
         ).changePassword(admin.id, { currentPassword: PASSWORD, newPassword: 'owner-new-password' } as never, {
           headers: {},
           socket: {},
