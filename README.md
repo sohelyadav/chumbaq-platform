@@ -69,6 +69,21 @@ with no limits of its own, so free accounts keep `MAX_PROJECTS_PER_ACCOUNT` and
 `MAX_SEATS_PER_ACCOUNT` until you give the free plan its own; on any other plan an empty seat
 or MAU limit means unlimited.
 
+Plans live in the database, not in the code: staff create them and set their limits on the
+admin app's Plans page, which works with billing off too, so limits can be ready before billing
+is switched on. Prices are entered excluding GST. For each price, first create a Razorpay plan
+that charges the amount the Add price dialog shows (the price with 18% GST, in INR, every 1
+month or 1 year), then paste its `plan_…` id: the admin API fetches the plan from Razorpay and
+refuses it unless the amount, currency and period match. A new price replaces the current one
+for new subscriptions; existing subscribers keep theirs.
+
+Point a Razorpay webhook at `https://<your API host>/api/billing/webhooks/razorpay` with the
+secret in `RAZORPAY_WEBHOOK_SECRET`, subscribed to `subscription.authenticated`, `.activated`,
+`.charged`, `.pending`, `.halted`, `.cancelled`, `.completed` and `.updated`, `payment.failed`,
+`invoice.paid`, `invoice.expired` and `refund.processed`. Subscription state changes only from
+those verified webhooks and the server's own calls to Razorpay, so run the worker too: it sends
+cancellations and catches up on missed events. Test with `rzp_test_` keys first.
+
 ## Security
 
 Please report vulnerabilities privately to security@chumbaq.com rather than in a public issue.
