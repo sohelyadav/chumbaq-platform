@@ -28,8 +28,8 @@
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "seed": "npm run seed --workspace=apps/api",
-    "test:e2e": "npm run test --workspace=e2e",
-    "test:e2e:ui": "npm run test:ui --workspace=e2e"
+    "test:e2e": "npm run e2e --workspace=e2e",
+    "test:e2e:ui": "npm run e2e:ui --workspace=e2e"
   },
   "engines": {
     "node": ">=22.0.0"
