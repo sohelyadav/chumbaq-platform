@@ -66,17 +66,23 @@ export class UsersService {
   }
 
   /**
-   * A reset through the account's mailbox. Proves control of the address, so it also
-   * verifies it, and takes the account back from any team. `suspended_at` is left
-   * alone: a reset never reactivates an account. `password_reset_at`: see
-   * `resetPasswordByTeam`.
+   * A reset by link. One sent to the account's mailbox proves control of the address,
+   * so it also verifies it; a link staff issued (`admin:password-reset-link`, handed
+   * over by another channel) proves nothing about the mailbox and leaves it as it was.
+   * Either takes the account back from any team. `suspended_at` is left alone: a reset
+   * never reactivates an account. `password_reset_at`: see `resetPasswordByTeam`.
    */
-  async resetPassword(id: string, passwordHash: string, manager: EntityManager): Promise<void> {
+  async resetPassword(
+    id: string,
+    passwordHash: string,
+    manager: EntityManager,
+    { viaMailbox }: { viaMailbox: boolean },
+  ): Promise<void> {
     await manager.getRepository(UserEntity).update(id, {
       passwordHash,
       managedByTeamId: null,
       sessionVersion: NEXT_SESSION_VERSION,
-      emailVerifiedAt: VERIFIED_NOW,
+      ...(viaMailbox ? { emailVerifiedAt: VERIFIED_NOW } : {}),
       passwordResetAt: NOW,
     });
   }

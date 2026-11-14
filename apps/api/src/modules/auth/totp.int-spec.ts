@@ -473,7 +473,7 @@ describe('TOTP and recovery codes (integration)', () => {
       const user = await makeUser('person');
       await enrol(user);
       await ds.transaction(async (manager) =>
-        users.resetPassword(user.id, await bcrypt.hash('another-long-password', 4), manager),
+        users.resetPassword(user.id, await bcrypt.hash('another-long-password', 4), manager, { viaMailbox: true }),
       );
 
       const step = await auth.login({ email: user.email, password: 'another-long-password' });

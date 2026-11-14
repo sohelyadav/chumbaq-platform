@@ -1196,6 +1196,21 @@ describe('FactorResetsService (integration)', () => {
 
       // A super admin who lost their keys and their password: passkeys-reset arms the
       // block, so only a link staff issue after checking who is asking gets them back in.
+      // The link went to whoever staff spoke to, never through the mailbox.
+      it('does not mark the address verified when the reset used a link staff issued', async () => {
+        const admin = await makeStaff('unverified-mailbox');
+        await resetSuperAdminPasskeys(ds, admin.email, null, () => undefined);
+        await ds.query(`UPDATE users SET email_verified_at = NULL WHERE id = $1`, [admin.id]);
+
+        const token = await staffLink(admin);
+        await expect(recovery.resetPassword(token, 'a-brand-new-password')).resolves.toBeUndefined();
+
+        const [{ email_verified_at }] = await ds.query(`SELECT email_verified_at FROM users WHERE id = $1`, [admin.id]);
+        expect(email_verified_at).toBeNull();
+        const verified = await ds.query(`SELECT 1 FROM auth_events WHERE user_id = $1 AND type = 'email.verified'`, [admin.id]);
+        expect(verified).toEqual([]);
+      });
+
       it('lets a link staff issued through the CLI reset the password despite the block, and audits it', async () => {
         const admin = await makeStaff('lost-everything');
         await resetSuperAdminPasskeys(ds, admin.email, null, () => undefined);

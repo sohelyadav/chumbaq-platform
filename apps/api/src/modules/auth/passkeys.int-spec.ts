@@ -1031,7 +1031,7 @@ describe('Passkeys (integration)', () => {
     it('never removes a key: the next sign-in still asks for it', async () => {
       const user = await makeUser('person');
       await enrol(user, key());
-      await users.resetPassword(user.id, await bcrypt.hash('another-password', 4), ds.manager);
+      await users.resetPassword(user.id, await bcrypt.hash('another-password', 4), ds.manager, { viaMailbox: true });
 
       const result = await auth.login({ email: user.email, password: 'another-password' });
 

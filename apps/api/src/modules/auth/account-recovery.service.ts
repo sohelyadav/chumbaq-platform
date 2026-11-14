@@ -247,7 +247,7 @@ export class AccountRecoveryService {
         return { refused: true as const, user };
       }
 
-      await this.users.resetPassword(user.id, passwordHash, manager);
+      await this.users.resetPassword(user.id, passwordHash, manager, { viaMailbox: !staffIssued });
       await this.sessions.revokeAll(user.id, manager);
       // Staff too, for super admins (a no-op for anyone else). The version bump already
       // stops their staff sessions, but whoever reset this may hold only the mailbox, so
@@ -285,7 +285,7 @@ export class AccountRecoveryService {
       ...context,
     });
     if (done.cancelledReset) await this.factorResets.announceCancelled(done.cancelledReset, context);
-    if (!reset.emailVerifiedAt) {
+    if (!reset.emailVerifiedAt && !done.staffIssued) {
       await this.events.record({
         type: 'email.verified',
         userId: reset.id,
