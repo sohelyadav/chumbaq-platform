@@ -1,8 +1,7 @@
 import { MigrationInterface, QueryRunner } from "typeorm";
 
 /**
- * Person erasure and export (DPDP). Design:
- * docs/superpowers/specs/2026-11-07-person-erasure-export.md.
+ * Person erasure and export (DPDP).
  *
  * - `privacy_request_logs`: the fiduciary's record of each erasure and export,
  *   with keyed hashes of identifiers, never the identifiers.

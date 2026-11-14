@@ -1054,7 +1054,6 @@ export interface AccountActivityResponse {
 }
 
 // ─── Privacy: person erasure and export (DPDP) ───
-// Design: docs/superpowers/specs/2026-11-07-person-erasure-export.md
 
 /**
  * What an API key may do. `privacy` is server-only: a key holding it carries

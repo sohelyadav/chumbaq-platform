@@ -12,8 +12,7 @@ import { PrivacyApiController } from './privacy-api.controller';
 import { PrivacyRequestsService } from './privacy-requests.service';
 
 /**
- * Person erasure and export (DPDP). Design:
- * docs/superpowers/specs/2026-11-07-person-erasure-export.md.
+ * Person erasure and export (DPDP).
  */
 @Module({
   imports: [
