@@ -9,6 +9,7 @@ import type {
   FactorResetVerificationMethod,
   ImpersonationHandoff,
 } from '@chumbaq/shared';
+import { TenantBillingCard } from '@/components/tenant-billing-card';
 import { TenantUsageCard } from '@/components/tenant-usage-card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -42,6 +43,8 @@ import {
   useSuspendTenant,
 } from '@/hooks/use-admin-tenants';
 import { parseProjectLimitInput, projectCountLabel, seatCountLabel } from '@/lib/project-limit';
+import { useAdminPlans } from '@/hooks/use-admin-billing';
+import { useStaffAuth } from '@/hooks/use-staff-auth';
 
 const REASON_MIN = 10;
 const REASON_MAX = 500;
@@ -107,11 +110,17 @@ function formatDateTime(value: string): string {
   return format(new Date(value), 'MMM d, yyyy HH:mm');
 }
 
-const PLAN_LABELS: Record<AdminTenantPlan, string> = { free: 'Free' };
+/** The plan's name from the plans list; its code until that loads, or for a plan since removed. */
+function usePlanName(code: AdminTenantPlan): string {
+  const { data: plans } = useAdminPlans();
+  return plans?.find((plan) => plan.code === code)?.name ?? code;
+}
 
-function AccountCard({ tenant }: { tenant: AdminTenantDetail }) {
+function AccountCard({ tenant, showPlan }: { tenant: AdminTenantDetail; showPlan: boolean }) {
+  const planName = usePlanName(tenant.plan);
   const facts: { label: string; value: ReactNode }[] = [
-    { label: 'Plan', value: PLAN_LABELS[tenant.plan] ?? tenant.plan },
+    // With billing on, the Billing card shows the plan with everything about it.
+    ...(showPlan ? [{ label: 'Plan', value: planName }] : []),
     { label: 'Signed up', value: formatDateTime(tenant.createdAt) },
     {
       label: 'Last sign-in',
@@ -927,6 +936,7 @@ function SecondFactorResetCard({ tenant }: { tenant: AdminTenantDetail }) {
 
 export default function TenantDetailPage() {
   const { tenantId } = useParams<{ tenantId: string }>();
+  const billingEnabled = useStaffAuth().profile?.billingEnabled === true;
   const { data: tenant, isLoading, isError, error } = useAdminTenant(tenantId);
   const { state } = useLocation();
   const tenantsSearch = (state as { tenantsSearch?: string } | null)?.tenantsSearch;
@@ -1006,7 +1016,9 @@ export default function TenantDetailPage() {
 
       <SecondFactorResetCard tenant={tenant} />
 
-      <AccountCard tenant={tenant} />
+      <AccountCard tenant={tenant} showPlan={!billingEnabled} />
+
+      {billingEnabled && <TenantBillingCard tenantId={tenant.id} />}
 
       <TenantUsageCard tenantId={tenant.id} />
 

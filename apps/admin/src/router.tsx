@@ -12,6 +12,8 @@ import AuditLogPage from '@/pages/audit-log';
 import HealthPage from '@/pages/health';
 import IncidentsListPage from '@/pages/incidents-list';
 import IncidentDetailPage from '@/pages/incident-detail';
+import BillingPage from '@/pages/billing';
+import PlansPage from '@/pages/plans';
 
 function Waiting() {
   return (
@@ -64,6 +66,8 @@ export const router = createBrowserRouter([
           { index: true, element: <OverviewPage /> },
           { path: 'tenants', element: <TenantsListPage /> },
           { path: 'tenants/:tenantId', element: <TenantDetailPage /> },
+          { path: 'billing', element: <BillingPage /> },
+          { path: 'plans', element: <PlansPage /> },
           { path: 'audit-log', element: <AuditLogPage /> },
           { path: 'health', element: <HealthPage /> },
           { path: 'incidents', element: <IncidentsListPage /> },

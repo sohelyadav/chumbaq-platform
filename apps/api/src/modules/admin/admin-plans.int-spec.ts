@@ -8,6 +8,7 @@ import { closeIntDb, openIntDb } from '../../test-support/int-db';
 import { FakeBillingProvider } from '../../test-support/fake-billing-provider';
 import { issueStaffSessionForTest } from '../../test-support/staff-session';
 import { REAUTH_REQUIRED_MESSAGE } from '../auth/guards/recent-auth.guard';
+import { AccountLimitsService } from '../billing/account-limits.service';
 import { BILLING_PROVIDER } from '../billing/providers/billing-provider';
 
 const KEY_ID = 'rzp_test_PlansAdmin01';
@@ -134,7 +135,9 @@ describe('admin plans API (integration)', () => {
       isActive: true,
       prices: [],
       billingEnabled: true,
+      defaults: on.app.get(AccountLimitsService).envLimits(),
     });
+    expect(typeof (res.data as AdminPlan).defaults.projectLimit).toBe('number');
     expect(await auditOf('billing.plan_created', code)).toEqual([
       {
         target_type: 'plan',

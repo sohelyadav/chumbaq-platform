@@ -19,6 +19,8 @@ export interface AdminTenantsFilters {
   search?: string;
   status?: AdminTenantStatus;
   activity?: AdminTenantActivity;
+  /** An effective plan's code. */
+  plan?: string;
   /** The API's defaults (newest first) when left out. */
   sort?: AdminTenantSort;
   order?: AdminSortOrder;
@@ -53,6 +55,7 @@ function tenantFilterParams(filters: AdminTenantsFilters): Record<string, string
   if (filters.search) params.search = filters.search;
   if (filters.status) params.status = filters.status;
   if (filters.activity) params.activity = filters.activity;
+  if (filters.plan) params.plan = filters.plan;
   return params;
 }
 

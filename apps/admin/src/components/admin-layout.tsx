@@ -4,6 +4,8 @@ import {
   LogOut,
   UserCog,
   Building2,
+  CreditCard,
+  Layers,
   LayoutDashboard,
   ScrollText,
   ShieldCheck,
@@ -39,6 +41,8 @@ import { useStaffAuth } from '@/hooks/use-staff-auth';
 const navItems = [
   { title: 'Overview', url: '/', icon: LayoutDashboard, exact: true },
   { title: 'Tenants', url: '/tenants', icon: Building2 },
+  { title: 'Billing', url: '/billing', icon: CreditCard, billingOnly: true },
+  { title: 'Plans', url: '/plans', icon: Layers },
   { title: 'Audit log', url: '/audit-log', icon: ScrollText },
   { title: 'Incidents', url: '/incidents', icon: ShieldAlert },
   { title: 'Platform health', url: '/health', icon: Activity },
@@ -73,6 +77,9 @@ function StaffFooter() {
 }
 
 function AdminSidebar() {
+  // Billing only where this server takes payments; plans can be prepared either way.
+  const billingEnabled = useStaffAuth().profile?.billingEnabled === true;
+  const items = navItems.filter((item) => !item.billingOnly || billingEnabled);
   return (
     <Sidebar collapsible="icon" variant="inset">
       <SidebarHeader>
@@ -95,7 +102,7 @@ function AdminSidebar() {
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        <NavMain label="Platform" items={navItems} />
+        <NavMain label="Platform" items={items} />
       </SidebarContent>
       <SidebarFooter>
         <StaffFooter />

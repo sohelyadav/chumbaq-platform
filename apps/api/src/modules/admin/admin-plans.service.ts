@@ -330,6 +330,7 @@ export class AdminPlansService {
       isActive: plan.isActive,
       prices,
       billingEnabled: this.limits.billingEnabled,
+      defaults: this.limits.envLimits(),
     };
   }
 

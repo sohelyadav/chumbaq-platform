@@ -32,6 +32,8 @@ import {
   useAdminTenants,
   useExportAdminTenants,
 } from '@/hooks/use-admin-tenants';
+import { useAdminPlans } from '@/hooks/use-admin-billing';
+import { PLAN_CODE_PATTERN } from '@/lib/billing-view';
 import { cn } from '@/lib/utils';
 import {
   formatCount,
@@ -104,6 +106,11 @@ export default function TenantsListPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const search = searchParams.get('search') ?? '';
   const status = parseStatus(searchParams.get('status'));
+  // Only a well-formed code goes to the API; anything else in a pasted URL is no filter.
+  const planParam = searchParams.get('plan') ?? '';
+  const plan = PLAN_CODE_PATTERN.test(planParam) ? planParam : undefined;
+  const { data: plans } = useAdminPlans();
+  const planName = (code: string) => plans?.find((p) => p.code === code)?.name ?? code;
   const page = parsePage(searchParams.get('page'));
   const list = readTenantListParams(searchParams);
   const [searchInput, setSearchInput] = useState(search);
@@ -115,7 +122,7 @@ export default function TenantsListPage() {
   }
 
   /** Writes to the URL, which is the page's only state. Changing a filter resets the page. */
-  function updateParams(changes: { search?: string; status?: string; page?: number }, replace = false) {
+  function updateParams(changes: { search?: string; status?: string; plan?: string; page?: number }, replace = false) {
     setSearchParams(
       (previous) => {
         const next = new URLSearchParams(previous);
@@ -127,6 +134,10 @@ export default function TenantsListPage() {
         if (changes.status !== undefined) {
           if (changes.status) next.set('status', changes.status);
           else next.delete('status');
+        }
+        if (changes.plan !== undefined) {
+          if (changes.plan) next.set('plan', changes.plan);
+          else next.delete('plan');
         }
         if (changes.page && changes.page > 1) next.set('page', String(changes.page));
         return next;
@@ -155,11 +166,12 @@ export default function TenantsListPage() {
     limit: PAGE_SIZE,
     search: search || undefined,
     status,
+    plan,
     ...list,
   });
   const tenants = response?.data;
   const meta = response?.meta;
-  const filtered = !!search || !!status || !!list.activity;
+  const filtered = !!search || !!status || !!plan || !!list.activity;
   // Before the roll-up has closed a day, a tenant's 0 means "not counted", not "none".
   const counted = !!meta?.countedThrough;
   // This month is the first active devices are counted in, so the column may be low.
@@ -169,7 +181,7 @@ export default function TenantsListPage() {
 
   const onExport = () => {
     exportTenants.mutate(
-      { search: search || undefined, status, ...list },
+      { search: search || undefined, status, plan, ...list },
       {
         onSuccess: (result) => {
           const count = result.rowCount.toLocaleString('en-US');
@@ -232,6 +244,20 @@ export default function TenantsListPage() {
             <SelectItem value="suspended">Suspended</SelectItem>
           </SelectContent>
         </Select>
+        <Select value={plan ?? 'all'} onValueChange={(value) => updateParams({ plan: value === 'all' ? '' : value })}>
+          <SelectTrigger className="w-[160px]" aria-label="Filter by plan">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All plans</SelectItem>
+            {plans?.map((p) => (
+              <SelectItem key={p.code} value={p.code}>
+                {p.name}
+              </SelectItem>
+            ))}
+            {plan && !plans?.some((p) => p.code === plan) && <SelectItem value={plan}>{plan}</SelectItem>}
+          </SelectContent>
+        </Select>
         <div role="group" aria-label="Filter by activity" className="flex flex-wrap gap-1.5">
           {ACTIVITY_CHIPS.map((chip) => {
             const selected = (list.activity ?? null) === chip.value;
@@ -288,6 +314,7 @@ export default function TenantsListPage() {
                 <TableRow>
                   <TableHead>Tenant</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Plan</TableHead>
                   <TableHead className="text-right">Projects</TableHead>
                   <SortableHead
                     column="mau_this_month"
@@ -338,6 +365,7 @@ export default function TenantsListPage() {
                         )}
                       </div>
                     </TableCell>
+                    <TableCell className="whitespace-nowrap text-sm">{planName(tenant.plan)}</TableCell>
                     <TableCell className="text-right text-sm tabular-nums">
                       {tenant.projectCount.toLocaleString('en-US')}
                     </TableCell>

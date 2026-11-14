@@ -1586,6 +1586,11 @@ export interface AdminPlan extends PlanLimits {
   prices: AdminPlanPrice[];
   /** Whether this server takes payments; prices can be added only when it does. */
   billingEnabled: boolean;
+  /**
+   * The install's defaults, which a null limit stands for: the project limit on every
+   * plan, the seat limit on the free plan (null is no seat limit).
+   */
+  defaults: { projectLimit: number; seatLimit: number | null };
 }
 
 /** Money split by GST, all integer paise: `grossPaise = netPaise + taxPaise`. */
