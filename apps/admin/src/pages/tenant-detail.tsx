@@ -5,9 +5,11 @@ import { ArrowLeft, Eye, FolderKanban, KeyRound, ShieldCheck, ShieldOff, RotateC
 import type {
   AdminAuditAction,
   AdminTenantDetail,
+  AdminTenantPlan,
   FactorResetVerificationMethod,
   ImpersonationHandoff,
 } from '@chumbaq/shared';
+import { TenantUsageCard } from '@/components/tenant-usage-card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -95,6 +97,40 @@ const VERIFICATION_NOTES_MAX = 1000;
 
 function formatDateTime(value: string): string {
   return format(new Date(value), 'MMM d, yyyy HH:mm');
+}
+
+const PLAN_LABELS: Record<AdminTenantPlan, string> = { free: 'Free' };
+
+function AccountCard({ tenant }: { tenant: AdminTenantDetail }) {
+  const facts: { label: string; value: ReactNode }[] = [
+    { label: 'Plan', value: PLAN_LABELS[tenant.plan] ?? tenant.plan },
+    { label: 'Signed up', value: formatDateTime(tenant.createdAt) },
+    {
+      label: 'Last sign-in',
+      // Sign-in history is kept for a year, so an older one is not known.
+      value: tenant.lastSignInAt ? formatDateTime(tenant.lastSignInAt) : 'No sign-in recorded in the last year',
+    },
+    { label: 'Owner email', value: <span className="break-all">{tenant.email}</span> },
+    { label: 'People on the account', value: tenant.seatsUsed.toLocaleString('en-US') },
+    { label: 'Projects', value: tenant.projects.length.toLocaleString('en-US') },
+  ];
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Account</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-3">
+          {facts.map((fact) => (
+            <div key={fact.label} className="min-w-0">
+              <dt className="text-xs text-muted-foreground">{fact.label}</dt>
+              <dd className="mt-0.5 text-sm font-medium">{fact.value}</dd>
+            </div>
+          ))}
+        </dl>
+      </CardContent>
+    </Card>
+  );
 }
 
 interface ReasonDialogProps {
@@ -961,6 +997,10 @@ export default function TenantDetailPage() {
       )}
 
       <SecondFactorResetCard tenant={tenant} />
+
+      <AccountCard tenant={tenant} />
+
+      <TenantUsageCard tenantId={tenant.id} />
 
       <Card>
         <ProjectsCardHeader tenant={tenant} />

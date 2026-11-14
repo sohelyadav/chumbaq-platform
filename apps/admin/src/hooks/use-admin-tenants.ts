@@ -7,6 +7,7 @@ import type {
   AdminTenantSort,
   AdminTenantStatus,
   AdminTenantSummary,
+  AdminTenantUsage,
   FactorResetVerificationMethod,
   ImpersonationHandoff,
 } from '@chumbaq/shared';
@@ -84,6 +85,15 @@ export function useAdminTenant(tenantId: string | undefined) {
   return useQuery<AdminTenantDetail>({
     queryKey: ['admin-tenant', tenantId],
     queryFn: () => apiGet<AdminTenantDetail>(`/api/admin/tenants/${tenantId}`),
+    enabled: !!tenantId,
+  });
+}
+
+/** Recorded as a staff read too, deduplicated with the tenant page's own. */
+export function useAdminTenantUsage(tenantId: string | undefined, days = 90) {
+  return useQuery<AdminTenantUsage>({
+    queryKey: ['admin-tenant-usage', tenantId, days],
+    queryFn: () => apiGet<AdminTenantUsage>(`/api/admin/tenants/${tenantId}/usage`, { days }),
     enabled: !!tenantId,
   });
 }
