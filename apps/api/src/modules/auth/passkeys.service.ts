@@ -434,7 +434,7 @@ export class PasskeysService {
     const state = await this.preAuth.peekFor(handle, 'customer');
     if (!state) throw new UnauthorizedException(FLOW_EXPIRED);
     const user = await this.requireUser(state.userId);
-    await this.auth.assertUnderLoginLimit(user.email, context);
+    await this.auth.assertUnderLoginLimit(user.email, context, { count: false });
 
     const rows = await this.credentials.find({ where: { userId: user.id, scope: 'customer' } });
     const options = await generateAuthenticationOptions({

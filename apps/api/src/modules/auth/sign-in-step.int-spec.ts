@@ -200,7 +200,8 @@ describe('Sign-in step and re-authentication (integration)', () => {
       await expect(auth.login({ email: EMAIL, password: 'wrong-password' })).rejects.toThrow(
         UnauthorizedException,
       );
-      expect(await redis.dbsize()).toBe(0);
+      // No handle (the sign-in attempt counter is the only key, and holds no secret).
+      expect(await redis.keys('chumbaq:preauth:*')).toEqual([]);
     });
 
     it('issues something that is not a JWT, so no JWT check can accept it', async () => {

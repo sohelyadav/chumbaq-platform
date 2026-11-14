@@ -226,6 +226,8 @@ export class StaffAuthService {
         amr: ['pwd'],
         audience: 'staff',
       });
+      // The right password is no wrong guess: give its attempt back.
+      await this.auth.releaseLoginAttempt(email, context);
       return { step: 'second_factor', handle, methods };
     }
 
@@ -236,7 +238,10 @@ export class StaffAuthService {
     // over out of band: a password can be reset by whoever holds the mailbox, so a
     // password alone, even within an operator's allowance, must not plant a staff factor.
     const needsCode = this.passkeyRequired || (await this.secondFactors.hasAnyPasskey(user.id));
-    if (!needsCode) return this.startEnrolment(user, context, null);
+    if (!needsCode) {
+      await this.auth.releaseLoginAttempt(email, context);
+      return this.startEnrolment(user, context, null);
+    }
 
     // Only reached with the right password, so the code is never tested for anyone who
     // lacks it, and every refusal below is the one answer whatever was wrong.
@@ -266,6 +271,7 @@ export class StaffAuthService {
       }
       throw new ForbiddenException(STAFF_ENROLMENT_BLOCKED_MESSAGE);
     }
+    await this.auth.releaseLoginAttempt(email, context);
     return this.startEnrolment(user, context, allowanceId);
   }
 
@@ -362,6 +368,7 @@ export class StaffAuthService {
       false,
     );
     // Lifts the shared failure limit, as a customer sign-in does.
+    await this.auth.clearLoginLimit(user.email);
     await this.events.record({ type: 'login.succeeded', userId: user.id, email: user.email, sessionId, ...context });
     // A factor was used, so the account was never locked out: as `AuthService.finishSignIn`.
     await this.factorResets.cancelOnFactorUse(user, context);

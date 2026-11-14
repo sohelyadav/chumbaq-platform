@@ -94,7 +94,7 @@ describe('StaffAuthService while passkeys are required', () => {
     };
     const deps = {
       users: { findByEmail: jest.fn().mockResolvedValue(user), findById: jest.fn().mockResolvedValue(user) },
-      auth: { assertUnderLoginLimit: jest.fn().mockResolvedValue(undefined) },
+      auth: { assertUnderLoginLimit: jest.fn().mockResolvedValue(undefined), releaseLoginAttempt: jest.fn() },
       events: { record: jest.fn().mockResolvedValue(undefined) },
       preAuth: {
         create: jest.fn().mockResolvedValue('handle-1'),

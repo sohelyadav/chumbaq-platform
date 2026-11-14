@@ -7,6 +7,7 @@ import {
   ForbiddenException,
   HttpException,
   HttpStatus,
+  Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -26,6 +27,8 @@ import { FactorResetsService } from '../factor-resets/factor-resets.service';
 import type { ProfileBilling, ProfileStaffLink } from '@chumbaq/shared';
 import type { BillingConfig } from '../../config/billing.config';
 import { STAFF_KEYS_ONLY_MESSAGE } from '../staff-auth/staff-messages';
+import { rateLimitKey } from '../../common/throttle-tracker';
+import { logValue } from '../../common/log-value';
 
 export interface AuthTokens {
   accessToken: string;
@@ -83,6 +86,8 @@ export const INVALID_HANDLE_MESSAGE = 'Your sign-in has expired. Please start ag
 
 const LOGIN_FAILURE_LIMIT = 10;
 const LOGIN_FAILURE_WINDOW_MINUTES = 15;
+/** Attempts on one address from any number of networks in the window. */
+const LOGIN_ATTEMPT_CEILING = 100;
 
 /** Compared against for an unknown address, so timing does not reveal which exist. */
 let dummyHash: Promise<string> | undefined;
@@ -102,6 +107,8 @@ const usesSecondFactor = (method: string) => SECOND_FACTOR_AMR.has(method);
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
@@ -152,15 +159,66 @@ export class AuthService {
     };
   }
 
-  /** Every factor counts against this, so no route can be used to guess free of it. */
-  async assertUnderLoginLimit(email: string, context: RequestContext = {}): Promise<void> {
-    const failures = await this.events.recentLoginFailures(email, LOGIN_FAILURE_WINDOW_MINUTES);
-    if (failures >= LOGIN_FAILURE_LIMIT) {
+  /**
+   * Every factor counts against this, so no route can be used to guess free of it.
+   *
+   * Counts the attempt before the guess is checked (atomically, in Redis), so attempts
+   * sent together cannot all slip under the limit. Two limits: `LOGIN_FAILURE_LIMIT`
+   * attempts per address from one network (an IPv6 /64 counts as one), so a stranger
+   * who knows an address cannot lock its owner out from elsewhere; and
+   * `LOGIN_ATTEMPT_CEILING` per address from anywhere, which bounds guessing spread
+   * over many networks. A complete sign-in or a password reset clears both. Fails open
+   * to the old count of recorded failures if Redis is away.
+   */
+  async assertUnderLoginLimit(
+    email: string,
+    context: RequestContext = {},
+    { count = true }: { count?: boolean } = {},
+  ): Promise<void> {
+    const address = email.trim().toLowerCase();
+    const network = rateLimitKey(context.ipAddress ?? '');
+    let limited: boolean;
+    try {
+      // A step that is not a guess (asking for passkey options) is checked, not counted.
+      const counts = count
+        ? await this.preAuth.countSignInAttempt(address, network, LOGIN_FAILURE_WINDOW_MINUTES * 60)
+        : await this.preAuth.signInAttempts(address, network);
+      // Counted: this attempt is included, so the one past the limit is refused. Only
+      // checked: refused once the limit has been reached.
+      const over = (n: number, limit: number) => (count ? n > limit : n >= limit);
+      limited = over(counts.fromNetwork, LOGIN_FAILURE_LIMIT) || over(counts.total, LOGIN_ATTEMPT_CEILING);
+    } catch (error) {
+      this.logger.error(`Sign-in attempts not counted: ${logValue((error as Error).message)}`);
+      limited = (await this.events.recentLoginFailures(email, LOGIN_FAILURE_WINDOW_MINUTES)) >= LOGIN_FAILURE_LIMIT;
+    }
+    if (limited) {
       await this.events.record({ type: 'login.limited', email, ...context });
       throw new HttpException(
         'Too many failed attempts. Try again in a few minutes.',
         HttpStatus.TOO_MANY_REQUESTS,
       );
+    }
+  }
+
+  /**
+   * Gives back the attempt `assertUnderLoginLimit` counted, when the guess was right but
+   * sign-in is not complete yet (a password before its second factor), so only wrong
+   * guesses use up the allowance. Never throws.
+   */
+  async releaseLoginAttempt(email: string, context: RequestContext = {}): Promise<void> {
+    try {
+      await this.preAuth.releaseSignInAttempt(email.trim().toLowerCase(), rateLimitKey(context.ipAddress ?? ''));
+    } catch (error) {
+      this.logger.error(`Sign-in attempt not released: ${logValue((error as Error).message)}`);
+    }
+  }
+
+  /** Ends the address's sign-in window: see `assertUnderLoginLimit`. Never throws. */
+  async clearLoginLimit(email: string): Promise<void> {
+    try {
+      await this.preAuth.clearSignInAttempts(email.trim().toLowerCase());
+    } catch (error) {
+      this.logger.error(`Sign-in attempts not cleared: ${logValue((error as Error).message)}`);
     }
   }
 
@@ -193,6 +251,8 @@ export class AuthService {
       });
       throw new UnauthorizedException('Invalid email or password');
     }
+    // The right password is no wrong guess, whatever comes next.
+    await this.releaseLoginAttempt(dto.email, context);
 
     // After the password check, so only the holder of the password learns this
     // account exists and is suspended.
@@ -271,6 +331,7 @@ export class AuthService {
     context: RequestContext,
   ): Promise<SignedIn> {
     const { tokens, sessionId } = await this.startSession(user, context, freshAuth(amr));
+    await this.clearLoginLimit(user.email);
     await this.events.record({
       type: 'login.succeeded',
       userId: user.id,

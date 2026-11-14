@@ -226,7 +226,11 @@ describe('Staff sign-in (integration)', () => {
       }
       expect(replies[0].body.message).toBe('Invalid email or password');
 
-      // A known staff member's failure is in the staff log; anyone else's is not.
+      // A known staff member's failure is in the staff log; anyone else's is not. Written
+      // after the answer (so a staff address is refused no slower), so wait for it.
+      for (let i = 0; i < 50 && (await auditActions(staff.id)).length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
       expect((await auditActions(staff.id)).map((row) => row.action)).toEqual(['staff.sign_in_failed']);
       expect(await auditActions(tenant.id)).toEqual([]);
       const [reasons] = await ds.query(

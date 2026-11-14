@@ -16,5 +16,6 @@ module.exports = {
   // truncation in one file delete another file's fixtures mid-assertion.
   maxWorkers: 1,
   setupFiles: ['<rootDir>/test-support/int-env.ts'],
+  setupFilesAfterEnv: ['<rootDir>/test-support/int-signin-attempts.ts'],
   testTimeout: 30000,
 };
