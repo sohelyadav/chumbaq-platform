@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { createHmac } from 'crypto';
+import { domainToASCII } from 'url';
 import { CredentialsCryptoService } from '../../common/credentials-crypto.service';
 import { logValue } from '../../common/log-value';
 import { ConsentEventsService } from '../consent/consent-events.service';
@@ -39,7 +40,8 @@ export function mailboxOf(address: string): string {
   const at = address.lastIndexOf('@');
   if (at < 1) return address.toLowerCase();
   let local = address.slice(0, at).toLowerCase();
-  let domain = address.slice(at + 1).toLowerCase();
+  // One spelling of the domain: no trailing dots, internationalised names as punycode.
+  let domain = domainToASCII(address.slice(at + 1).toLowerCase().replace(/\.+$/, '')) || address.slice(at + 1).toLowerCase();
   const plus = local.indexOf('+');
   if (plus > 0) local = local.slice(0, plus);
   if (domain === 'googlemail.com') domain = 'gmail.com';

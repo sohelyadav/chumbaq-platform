@@ -40,6 +40,8 @@ import { IncidentsModule } from '../../modules/incidents/incidents.module';
 import { UsageModule } from '../../modules/usage/usage.module';
 import { BillingCoreModule } from '../../modules/billing/billing-core.module';
 import { EmailConfirmationScheduler } from '../scheduler/email-confirmation.scheduler';
+import { DomainRecheckScheduler } from '../scheduler/domain-recheck.scheduler';
+import { ProjectsModule } from '../../modules/projects/projects.module';
 
 /**
  * Worker-only module. Importing this registers BullMQ consumers, so it must be
@@ -79,6 +81,7 @@ import { EmailConfirmationScheduler } from '../scheduler/email-confirmation.sche
     SmsModule,
     WhatsAppModule,
     ProjectSuspensionModule,
+    ProjectsModule,
     FactorResetsModule,
     // The hourly usage roll-up (UsageRollupScheduler).
     UsageModule,
@@ -100,6 +103,7 @@ import { EmailConfirmationScheduler } from '../scheduler/email-confirmation.sche
     UsageRollupScheduler,
     BillingScheduler,
     EmailConfirmationScheduler,
+    DomainRecheckScheduler,
   ],
 })
 export class ProcessorsModule {}

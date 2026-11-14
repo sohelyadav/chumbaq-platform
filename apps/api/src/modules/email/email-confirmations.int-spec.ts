@@ -173,6 +173,8 @@ describe('Email double opt-in (integration)', () => {
   it('counts plus-tags and Gmail dots as the same inbox', async () => {
     expect(mailboxOf('Victim+promo@Example.com')).toBe('victim@example.com');
     expect(mailboxOf('v.i.c.t.i.m+1@googlemail.com')).toBe('victim@gmail.com');
+    expect(mailboxOf('victim@Gmail.com.')).toBe('victim@gmail.com');
+    expect(mailboxOf('who@bücher.example')).toBe('who@xn--bcher-kva.example');
     await person(A, 'victim@gmail.com', true);
     await person(B, 'v.ictim+2@gmail.com', true);
     expect(await service.sendPending()).toBe(1);

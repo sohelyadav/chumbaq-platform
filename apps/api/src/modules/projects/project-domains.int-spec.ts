@@ -22,6 +22,7 @@ import { SeatsService } from '../project-access/seats.service';
 describe('Project domain proof (integration)', () => {
   let ds: DataSource;
   let txt: Record<string, string[][]>;
+  let dnsDown = false;
   let domains: ProjectDomainsService;
   let redirect: RedirectService;
   const owner = randomUUID();
@@ -37,7 +38,11 @@ describe('Project domain proof (integration)', () => {
     domains = new ProjectDomainsService(
       ds.getRepository(ProjectEntity),
       new ProjectActivityService(ds.getRepository(ProjectActivityEntity), new ConfigService({})),
-      async (name: string) => txt[name] ?? [],
+      async (name: string) => {
+        if (dnsDown) throw Object.assign(new Error('timeout'), { code: 'ETIMEOUT' });
+        if (!txt[name]) throw Object.assign(new Error('none'), { code: 'ENOTFOUND' });
+        return txt[name];
+      },
     );
     redirect = new RedirectService(
       ds.getRepository(LinkEntity),
@@ -67,7 +72,10 @@ describe('Project domain proof (integration)', () => {
 
   beforeEach(() => {
     txt = {};
+    dnsDown = false;
   });
+  const verifiedAt = async (id: string) =>
+    (await ds.query(`SELECT domain_verified_at AS v FROM projects WHERE id = $1`, [id]))[0].v;
 
   it('names no app for a domain until its proof is in DNS, then the prover\'s', async () => {
     const domain = `links-${randomUUID().slice(0, 8)}.acme.test`;
@@ -116,5 +124,36 @@ describe('Project domain proof (integration)', () => {
     const after = await ds.getRepository(ProjectEntity).findOneByOrFail({ id });
     expect(after.domainVerifiedAt).toBeNull();
     expect(after.domainVerificationToken).not.toBe(token);
+  });
+
+  // Following review: a domain changes hands, so a proof must not outlive its record.
+  it('moves the proof to a new prover once the holder\'s record is gone', async () => {
+    const domain = `sold-${randomUUID().slice(0, 8)}.acme.test`;
+    const seller = await project(domain);
+    txt[`_chumbaq-verify.${domain}`] = [[`chumbaq-verify=${await tokenOf(seller)}`]];
+    await domains.verify(owner, seller, ctx);
+
+    const buyer = await project(domain);
+    txt[`_chumbaq-verify.${domain}`] = [[`chumbaq-verify=${await tokenOf(buyer)}`]];
+    await domains.verify(owner, buyer, ctx);
+
+    expect(await verifiedAt(seller)).toBeNull();
+    expect(await verifiedAt(buyer)).not.toBeNull();
+  });
+
+  it('drops a proof whose record is gone on the daily re-check, but not when DNS fails', async () => {
+    const domain = `lapsed-${randomUUID().slice(0, 8)}.acme.test`;
+    const id = await project(domain);
+    txt[`_chumbaq-verify.${domain}`] = [[`chumbaq-verify=${await tokenOf(id)}`]];
+    await domains.verify(owner, id, ctx);
+
+    delete txt[`_chumbaq-verify.${domain}`];
+    dnsDown = true;
+    await domains.recheckAll();
+    expect(await verifiedAt(id)).not.toBeNull();
+
+    dnsDown = false;
+    await domains.recheckAll();
+    expect(await verifiedAt(id)).toBeNull();
   });
 });

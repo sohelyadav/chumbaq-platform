@@ -11,6 +11,6 @@ import { ProjectDomainsService } from './project-domains.service';
   imports: [TypeOrmModule.forFeature([ProjectEntity]), ProjectActivityModule, BillingCoreModule],
   controllers: [ProjectsController],
   providers: [ProjectsService, ProjectDomainsService],
-  exports: [ProjectsService],
+  exports: [ProjectsService, ProjectDomainsService],
 })
 export class ProjectsModule {}

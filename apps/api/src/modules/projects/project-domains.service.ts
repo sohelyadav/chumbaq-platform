@@ -9,7 +9,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'crypto';
 import { promises as dns } from 'dns';
-import { QueryFailedError, Repository } from 'typeorm';
+import { IsNull, Not, QueryFailedError, Repository } from 'typeorm';
 import { hostOf, isPlatformHost } from '../../common/platform-hosts';
 import type { ActivityContext } from '../project-activity/activity-context';
 import { ProjectActivityService } from '../project-activity/project-activity.service';
@@ -67,13 +67,8 @@ export class ProjectDomainsService {
     if (project.domainVerifiedAt) return project;
     const token = project.domainVerificationToken ?? '';
 
-    let records: string[][] = [];
-    try {
-      records = await this.lookup(`${DOMAIN_TXT_PREFIX}.${domain}`);
-    } catch {
-      records = [];
-    }
-    const proved = token !== '' && records.some((parts) => parts.join('') === `${DOMAIN_TXT_VALUE_PREFIX}${token}`);
+    const records = (await this.recordsFor(domain)) ?? [];
+    const proved = hasProof(records, token);
     if (!proved) {
       throw new BadRequestException(
         `No TXT record at ${DOMAIN_TXT_PREFIX}.${domain} with the value ${DOMAIN_TXT_VALUE_PREFIX}${token}. DNS changes can take a while to appear.`,
@@ -104,10 +99,97 @@ export class ProjectDomainsService {
       });
     } catch (error) {
       if (error instanceof QueryFailedError && (error as { code?: string }).code === '23505') {
+        // Another project holds the proof. A domain changes hands: if the holder's own
+        // record is gone, its proof is stale, so it moves to the project proving it now.
+        if (await this.takeOver(actorId, projectId, project.name, domain, token, records, ctx)) {
+          return (await this.projects.findOne({ where: { id: projectId } })) as ProjectEntity;
+        }
         throw new ConflictException('Another project has already verified this domain.');
       }
       throw error;
     }
     return (await this.projects.findOne({ where: { id: projectId } })) as ProjectEntity;
   }
+
+  /**
+   * Re-checks every proved domain and drops a proof whose record is gone (the domain
+   * moved on, or the tenant removed it), so a proof does not outlive its evidence. A
+   * lookup that fails for any reason but "no such record" changes nothing. Returns how
+   * many proofs were dropped. Run daily by the worker.
+   */
+  async recheckAll(): Promise<number> {
+    const verified = await this.projects.find({
+      where: { domainVerifiedAt: Not(IsNull()) },
+      select: ['id', 'name', 'domain', 'domainVerificationToken'],
+    });
+    let dropped = 0;
+    for (const project of verified) {
+      const records = await this.recordsFor(project.domain);
+      if (records === null || hasProof(records, project.domainVerificationToken ?? '')) continue;
+      const result = await this.projects.update(
+        { id: project.id, domain: project.domain, domainVerifiedAt: Not(IsNull()) },
+        { domainVerifiedAt: null },
+      );
+      if (result.affected) dropped++;
+    }
+    return dropped;
+  }
+
+  private async takeOver(
+    actorId: string,
+    projectId: string,
+    projectName: string,
+    domain: string,
+    token: string,
+    records: string[][],
+    ctx: ActivityContext,
+  ): Promise<boolean> {
+    const holder = await this.projects.findOne({ where: { domain, domainVerifiedAt: Not(IsNull()) } });
+    if (!holder || hasProof(records, holder.domainVerificationToken ?? '')) return false;
+    try {
+      await this.projects.manager.transaction(async (manager) => {
+        const cleared = await manager.update(
+          ProjectEntity,
+          { id: holder.id, domain, domainVerificationToken: holder.domainVerificationToken ?? '' },
+          { domainVerifiedAt: null },
+        );
+        if (!cleared.affected) throw new ConflictException('Another project has already verified this domain.');
+        const result = await manager.update(
+          ProjectEntity,
+          { id: projectId, domain, domainVerificationToken: token },
+          { domainVerifiedAt: new Date() },
+        );
+        if (!result.affected) throw new ConflictException('The project domain changed. Verify it again.');
+        await this.activity.record(
+          {
+            projectId,
+            actor: { kind: 'user', userId: actorId },
+            action: 'project.app_links_changed',
+            target: { type: 'project', id: projectId, label: projectName },
+            details: { fields: ['domainVerified'] },
+          },
+          ctx,
+          manager,
+        );
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof ConflictException) return false;
+      throw error;
+    }
+  }
+
+  /** The TXT records at the proof name; [] when there are none, null when DNS did not answer. */
+  private async recordsFor(domain: string): Promise<string[][] | null> {
+    try {
+      return await this.lookup(`${DOMAIN_TXT_PREFIX}.${domain}`);
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      return code === 'ENOTFOUND' || code === 'ENODATA' ? [] : null;
+    }
+  }
+}
+
+function hasProof(records: string[][], token: string): boolean {
+  return token !== '' && records.some((parts) => parts.join('') === `${DOMAIN_TXT_VALUE_PREFIX}${token}`);
 }
