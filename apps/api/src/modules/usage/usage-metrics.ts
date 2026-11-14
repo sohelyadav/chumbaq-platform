@@ -44,8 +44,15 @@
  * month it sent an SDK event (`user_events` naming it), was reached by a
  * message (`push_notification_events` of a reached type, below), had an
  * in-app message event (by its id, or by its fingerprint when the row names
- * none), or was first seen (its first identify). Each by the time the row was
- * written. Two accepted gaps, both under-counting and never over-counting:
+ * none and the device may be tracked), or was first seen (its first
+ * identify). Each by the time the row was written. The in-app ingest stores a
+ * do-not-track person's showings without their device (and without the
+ * client's address) on purpose, so a row with no address is never matched by
+ * fingerprint, even after the device lifts its flag, and the fingerprint is
+ * matched only to a device whose own `do_not_track` is off and whose external
+ * id no objection covers when the day is counted. Accepted gaps, all
+ * under-counting and never over-counting: a device that opts out later loses
+ * its fingerprint-matched in-app events;
  * push reach is recorded per device only when the project has a frequency cap
  * (that is when `sent` events are written) or when the SDK reports
  * `delivered`, `impression`, `click` or `dismissed`; and an identify on an

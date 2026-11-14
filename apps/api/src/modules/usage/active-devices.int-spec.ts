@@ -126,15 +126,18 @@ describe('monthly active devices (integration)', () => {
         `UPDATE device_identities SET traits = '{"plan":"pro"}', last_seen_at = '2026-11-10T10:00:00Z'::timestamptz::timestamp WHERE id = $1`,
         [d4.id],
       );
-      // An in-app event naming no device row, only its fingerprint.
+      // An in-app event naming no device row, only its fingerprint (sent
+      // before the device's identify), as the ingest stores a tracked one:
+      // with the client's address and browser.
       const d5 = await device(P, '2026-10-01T10:00:00Z');
       const [message] = await m.query(
         `INSERT INTO in_app_messages (project_id, name, title, message_type) VALUES ($1, 'm', 't', 'modal') RETURNING id`,
         [P],
       );
       await m.query(
-        `INSERT INTO in_app_message_impressions (message_id, project_id, device_identity_id, device_fingerprint, event_type, created_at)
-         VALUES ($1, $2, NULL, $3, 'impression', '2026-11-12T10:00:00Z'::timestamptz::timestamp)`,
+        `INSERT INTO in_app_message_impressions
+           (message_id, project_id, device_identity_id, device_fingerprint, event_type, ip_address, user_agent, created_at)
+         VALUES ($1, $2, NULL, $3, 'impression', '203.0.113.7', 'Mozilla/5.0', '2026-11-12T10:00:00Z'::timestamptz::timestamp)`,
         [message.id, P, d5.fingerprint],
       );
       return { d1, d2, d3, d4, d5 };
@@ -154,6 +157,76 @@ describe('monthly active devices (integration)', () => {
       expect(await mau(P, '2026-11-02')).toBeUndefined();
       expect(await mau(P, '2026-11-04')).toBe(1);
       expect(await mau(P, '2026-11-30')).toBe(3);
+    });
+
+    /**
+     * An in-app event naming no device row, only its fingerprint, as
+     * `MessageDeliveryService.recordEvent` stores it. Tracked (`stripped`
+     * false): sent before the device's identify, with the client's address and
+     * browser. Do-not-track (`stripped`): only the cap-relevant showing, with
+     * the device id, distinct id, button, address and browser left out, so only
+     * the fingerprint the cap reads remains.
+     */
+    const fingerprintImpression = async (project: string, fingerprint: string, at: string, stripped: boolean) => {
+      const [message] = await m.query(
+        `INSERT INTO in_app_messages (project_id, name, title, message_type) VALUES ($1, 'm', 't', 'modal') RETURNING id`,
+        [project],
+      );
+      await m.query(
+        `INSERT INTO in_app_message_impressions
+           (message_id, project_id, device_identity_id, distinct_id, device_fingerprint, event_type, button_id,
+            ip_address, user_agent, created_at)
+         VALUES ($1, $2, NULL, NULL, $3, 'impression', NULL, $4, $5, $6::timestamptz::timestamp)`,
+        [message.id, project, fingerprint, stripped ? null : '203.0.113.7', stripped ? null : 'Mozilla/5.0', at],
+      );
+    };
+
+    const optOut = (deviceId: string) =>
+      m.query(`UPDATE device_identities SET do_not_track = true, do_not_track_source = 'sdk' WHERE id = $1`, [deviceId]);
+
+    it('does not tie a do-not-track device back to an in-app event stored without it', async () => {
+      // Seen before November, so only the stripped showing could make it active.
+      const dnt = await device(P, '2026-10-01T10:00:00Z');
+      await optOut(dnt.id);
+      await fingerprintImpression(P, dnt.fingerprint, '2026-11-12T10:00:00Z', true);
+
+      expect(await recordActiveDevices(m, [P], ...range('2026-11-01', '2026-12-01'))).toBe(0);
+      expect(await madRows(P)).toEqual([]);
+    });
+
+    it('does not tie a stripped in-app event to its device after the device lifts do-not-track', async () => {
+      // Opted out when the showing was stored, opted back in before the day was counted.
+      const lifted = await device(P, '2026-10-01T10:00:00Z');
+      await fingerprintImpression(P, lifted.fingerprint, '2026-11-12T10:00:00Z', true);
+
+      expect(await recordActiveDevices(m, [P], ...range('2026-11-01', '2026-12-01'))).toBe(0);
+      expect(await madRows(P)).toEqual([]);
+    });
+
+    it('does not tie a tracked in-app event by fingerprint to a device that opted out since', async () => {
+      const later = await device(P, '2026-10-01T10:00:00Z');
+      await fingerprintImpression(P, later.fingerprint, '2026-11-12T10:00:00Z', false);
+      await optOut(later.id);
+
+      expect(await recordActiveDevices(m, [P], ...range('2026-11-01', '2026-12-01'))).toBe(0);
+      expect(await madRows(P)).toEqual([]);
+    });
+
+    it('does not tie an in-app event by fingerprint to a device covered by an objection', async () => {
+      // The row's own flag is off: the whole-person objection on its external id covers it.
+      const objected = await device(P, '2026-10-01T10:00:00Z');
+      const externalId = `ext-${randomUUID()}`;
+      await m.query(`UPDATE device_identities SET external_user_id = $2 WHERE id = $1`, [objected.id, externalId]);
+      await m.query(`INSERT INTO tracking_objections (project_id, external_user_id) VALUES ($1, $2)`, [P, externalId]);
+      await fingerprintImpression(P, objected.fingerprint, '2026-11-12T10:00:00Z', false);
+      // The same external id in another project is not covered by this project's objection.
+      const elsewhere = await device(Q, '2026-10-01T10:00:00Z');
+      await m.query(`UPDATE device_identities SET external_user_id = $2 WHERE id = $1`, [elsewhere.id, externalId]);
+      await fingerprintImpression(Q, elsewhere.fingerprint, '2026-11-12T10:00:00Z', false);
+
+      await recordActiveDevices(m, [P, Q], ...range('2026-11-01', '2026-12-01'));
+      expect(await madRows(P)).toEqual([]);
+      expect(await madRows(Q)).toEqual([{ device: elsewhere.id, month: '2026-11-01', firstDay: '2026-11-12' }]);
     });
 
     it('counts a new device in the month it was first seen', async () => {

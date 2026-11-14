@@ -211,6 +211,9 @@ export class MessageDeliveryService {
     // the showing itself, keyed by the device the cap reads, without the
     // person, address or browser. The message's aggregate counters below are
     // still updated, since they say how a message did, not who did what.
+    // The usage roll-up reads a row with no client address as one stored this
+    // way and never ties it back to a device by fingerprint (`ACTIVITY_SQL`
+    // in usage-counting.ts), so keep the address out of such rows.
     const storeRow = !doNotTrack || CAPPING_EVENT_TYPES.includes(dto.eventType);
     // Counted only when nothing is stored; a stripped impression is kept.
     if (!storeRow) this.trackingConsent.recordDrop('in_app_event');

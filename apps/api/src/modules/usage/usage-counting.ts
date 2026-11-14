@@ -115,6 +115,15 @@ const utcDate = (column: string) => `(${column}::timestamptz AT TIME ZONE 'UTC')
 /**
  * Every record that makes a device active, with when it was written (the
  * rules are in `usage-metrics.ts`). `$1` project ids, `$2`/`$3` the window.
+ *
+ * An in-app row naming no device is tied to one by fingerprint only when it
+ * was stored as a tracked row and that device may still be tracked. The in-app
+ * ingest leaves the device out of a do-not-track person's rows on purpose, and
+ * the roll-up must not put it back. Such a row is told apart by its missing
+ * client address (`ip_address`), which the ingest drops only then, so a device
+ * that lifts its flag later is still not tied to what it did while opted out;
+ * and the device must not be do-not-track now, by its own flag or by an
+ * objection on its external id (the semantics of `WITHOUT_DO_NOT_TRACK_SQL`).
  */
 const ACTIVITY_SQL = `
   SELECT project_id, device_identity_id AS device, created_at AS at
@@ -130,7 +139,13 @@ const ACTIVITY_SQL = `
   SELECT i.project_id, COALESCE(i.device_identity_id, d.id), i.created_at
     FROM in_app_message_impressions i
     LEFT JOIN device_identities d
-      ON i.device_identity_id IS NULL AND d.project_id = i.project_id AND d.device_fingerprint = i.device_fingerprint
+      ON i.device_identity_id IS NULL AND i.ip_address IS NOT NULL
+     AND d.project_id = i.project_id AND d.device_fingerprint = i.device_fingerprint
+     AND NOT d.do_not_track
+     AND NOT EXISTS (
+       SELECT 1 FROM tracking_objections o
+        WHERE o.project_id = d.project_id AND o.external_user_id = d.external_user_id
+     )
    WHERE i.project_id = ANY($1::uuid[]) AND ${inWindow('i.created_at')}
   UNION ALL
   SELECT project_id, id, first_seen_at
