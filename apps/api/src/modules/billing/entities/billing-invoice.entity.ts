@@ -13,7 +13,7 @@ import { BillingSubscriptionEntity } from './billing-subscription.entity';
 
 /**
  * An invoice the billing provider issued to an account, mirrored. Money is integer
- * paise: `amount_paise` is what the customer pays, `tax_paise` our GST share of it
+ * paise: `amount_paise` is what the customer pays, `tax_paise` the tax share of it
  * (from the price row's tax rate), and `provider_tax_paise` whatever tax the provider
  * itself put on the invoice, kept for reference only.
  *

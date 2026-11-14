@@ -19,12 +19,14 @@ const REASON = 'set up for the launch';
  * The staff plan routes on the booted admin API: real staff sessions, guards and
  * validation, Postgres, and the in-memory provider standing in for Razorpay's plans.
  * A second admin API booted without keys is a self-hosted install: plans still
- * edit, prices do not exist.
+ * edit, prices do not exist. `on` charges tax (`BILLING_TAX_RATE_BPS=1800`, so the
+ * amounts are a taxed install's); `untaxed` leaves the rate unset, the default 0.
  */
 describe('admin plans API (integration)', () => {
   let ds: DataSource;
   let on: BootedApp;
   let off: BootedApp;
+  let untaxed: BootedApp;
   let fake: FakeBillingProvider;
   let staff: { id: string; email: string; sessionVersion: number };
   let token: string;
@@ -39,8 +41,12 @@ describe('admin plans API (integration)', () => {
     process.env.RAZORPAY_WEBHOOK_SECRET = 'test_webhook_secret';
     ds = await openIntDb();
     fake = new FakeBillingProvider({ keyId: KEY_ID });
+    process.env.BILLING_TAX_RATE_BPS = '1800';
     on = await bootIntApp('admin', { providers: [{ token: BILLING_PROVIDER, useValue: fake }] });
-    expect(on.app.get(ConfigService).get<BillingConfig>('billing')?.enabled).toBe(true);
+    expect(on.app.get(ConfigService).get<BillingConfig>('billing')).toMatchObject({ enabled: true, taxRateBps: 1800 });
+    delete process.env.BILLING_TAX_RATE_BPS;
+    untaxed = await bootIntApp('admin', { providers: [{ token: BILLING_PROVIDER, useValue: fake }] });
+    expect(untaxed.app.get(ConfigService).get<BillingConfig>('billing')).toMatchObject({ enabled: true, taxRateBps: 0 });
     process.env.RAZORPAY_KEY_ID = '';
     process.env.RAZORPAY_KEY_SECRET = '';
     process.env.RAZORPAY_WEBHOOK_SECRET = '';
@@ -61,6 +67,7 @@ describe('admin plans API (integration)', () => {
   afterAll(async () => {
     await on?.app.close();
     await off?.app.close();
+    await untaxed?.app.close();
     if (created.length) {
       await ds.query(`DELETE FROM plan_prices WHERE plan_code = ANY($1)`, [created]);
       await ds.query(`DELETE FROM plans WHERE code = ANY($1)`, [created]);
@@ -135,6 +142,7 @@ describe('admin plans API (integration)', () => {
       isActive: true,
       prices: [],
       billingEnabled: true,
+      newPriceTaxRateBps: 1800,
       defaults: on.app.get(AccountLimitsService).envLimits(),
     });
     expect(typeof (res.data as AdminPlan).defaults.projectLimit).toBe('number');
@@ -185,7 +193,7 @@ describe('admin plans API (integration)', () => {
     expect((await call(on, 'PATCH', `/plans/plan_scratch_missing${hex(2)}`, { mauLimit: 10, reason: REASON })).status).toBe(404);
   });
 
-  it('adds a price only when the Razorpay plan charges exactly the price with GST', async () => {
+  it('adds a price only when the Razorpay plan charges exactly the price with its tax', async () => {
     const code = await newPlan();
     const offByOne = rzpPlanId();
     fake.seedPlan({ id: offByOne, period: 'monthly', interval: 1, amountPaise: 117881, currency: 'INR' });
@@ -270,6 +278,50 @@ describe('admin plans API (integration)', () => {
       reason: REASON,
     });
     expect([reused.status, reused.message]).toEqual([409, JSON.stringify('That Razorpay plan already backs a price.')]);
+  });
+
+  it('with no tax configured, the Razorpay plan must charge exactly the price, and earlier prices keep their rate', async () => {
+    const code = await newPlan();
+    // An earlier price added while the install charged tax.
+    const taxedId = rzpPlanId();
+    fake.seedPlan({ id: taxedId, period: 'monthly', interval: 1, amountPaise: 117882, currency: 'INR' });
+    expect((await call(on, 'POST', `/plans/${code}/prices`, { interval: 'monthly', pricePaise: 99900, razorpayPlanId: taxedId, reason: REASON })).status).toBe(201);
+
+    // The price with tax added is no longer what a new price must charge.
+    const withTax = rzpPlanId();
+    fake.seedPlan({ id: withTax, period: 'monthly', interval: 1, amountPaise: 117882, currency: 'INR' });
+    const refused = await call(untaxed, 'POST', `/plans/${code}/prices`, {
+      interval: 'monthly',
+      pricePaise: 99900,
+      razorpayPlanId: withTax,
+      reason: REASON,
+    });
+    expect([refused.status, refused.message]).toEqual([
+      400,
+      JSON.stringify('That Razorpay plan charges ₹1,178.82 every 1 month, not ₹999.00 a month.'),
+    ]);
+
+    const exact = rzpPlanId();
+    fake.seedPlan({ id: exact, period: 'monthly', interval: 1, amountPaise: 99900, currency: 'INR' });
+    const ok = await call(untaxed, 'POST', `/plans/${code}/prices`, {
+      interval: 'monthly',
+      pricePaise: 99900,
+      razorpayPlanId: exact,
+      reason: REASON,
+    });
+    expect(ok.status).toBe(201);
+    const plan = ok.data as AdminPlan;
+    expect(plan.newPriceTaxRateBps).toBe(0);
+    expect(plan.prices.map((p) => [p.razorpayPlanId, p.isCurrent, p.pricePaise, p.taxPaise, p.amountPaise, p.taxRateBps])).toEqual([
+      [exact, true, 99900, 0, 99900, 0],
+      [taxedId, false, 99900, 17982, 117882, 1800],
+    ]);
+    expect(await priceRows(code)).toEqual([
+      { interval: 'monthly', price_paise: 99900, amount_paise: 117882, tax_rate_bps: 1800, razorpay_plan_id: taxedId, is_current: false, created_by: staff.id },
+      { interval: 'monthly', price_paise: 99900, amount_paise: 99900, tax_rate_bps: 0, razorpay_plan_id: exact, is_current: true, created_by: staff.id },
+    ]);
+    const audits = (await auditOf('billing.price_added', code)).map((r: { metadata: any }) => r.metadata);
+    expect(audits[1]).toMatchObject({ pricePaise: 99900, amountPaise: 99900, taxRateBps: 0, razorpayPlanId: exact });
   });
 
   it('refuses a Razorpay plan of the wrong period, currency or interval count, or one it does not have', async () => {

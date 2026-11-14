@@ -1,14 +1,14 @@
 import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EntityManager } from 'typeorm';
-import { type BillingConfig, DEFAULT_BILLING_GRACE_DAYS } from '../../config/billing.config';
+import { type BillingConfig, DEFAULT_BILLING_GRACE_DAYS, DEFAULT_BILLING_TAX_RATE_BPS } from '../../config/billing.config';
 import { isLive } from './effective-plan';
 import { toSubscriptionState } from './effective-plan-sql';
 import { BillingAccountEntity } from './entities/billing-account.entity';
 import { BillingSubscriptionEntity } from './entities/billing-subscription.entity';
 import { PlanPriceEntity } from './entities/plan-price.entity';
 import { EVENT_RANK, isTerminalStatus, shouldApplyStatus } from './event-order';
-import { GST_RATE_BPS, netOfTax } from './money';
+import { netOfTax } from './money';
 import type {
   BillingEvent,
   ProviderInvoice,
@@ -60,6 +60,11 @@ export class BillingStateService {
 
   private get graceDays(): number {
     return this.config?.get<BillingConfig>('billing')?.graceDays ?? DEFAULT_BILLING_GRACE_DAYS;
+  }
+
+  /** For a payment or invoice with no price to take a rate from: the install's current rate. */
+  private get taxRateBps(): number {
+    return this.config?.get<BillingConfig>('billing')?.taxRateBps ?? DEFAULT_BILLING_TAX_RATE_BPS;
   }
 
   async apply(manager: EntityManager, event: BillingEvent, now: Date): Promise<ApplyResult> {
@@ -292,13 +297,13 @@ export class BillingStateService {
           WHERE i.provider_invoice_id = $1`,
         [payment.invoiceId],
       );
-      if (row) owner = { userId: row.user_id, subscriptionId: row.subscription_id, taxRateBps: row.tax_rate_bps ?? GST_RATE_BPS };
+      if (row) owner = { userId: row.user_id, subscriptionId: row.subscription_id, taxRateBps: row.tax_rate_bps ?? this.taxRateBps };
     }
     if (!owner && payment.customerId) {
       const [row] = await manager.query(`SELECT user_id FROM billing_accounts WHERE provider_customer_id = $1`, [
         payment.customerId,
       ]);
-      if (row) owner = { userId: row.user_id, subscriptionId: null, taxRateBps: GST_RATE_BPS };
+      if (row) owner = { userId: row.user_id, subscriptionId: null, taxRateBps: this.taxRateBps };
     }
     if (!owner) return ignored('not ours');
     await this.lockAccount(manager, owner.userId);
@@ -382,7 +387,7 @@ export class BillingStateService {
       const [row] = await manager.query(`SELECT user_id FROM billing_accounts WHERE provider_customer_id = $1`, [
         invoice.customerId,
       ]);
-      if (row) owner = { userId: row.user_id, subscriptionId: null, taxRateBps: GST_RATE_BPS };
+      if (row) owner = { userId: row.user_id, subscriptionId: null, taxRateBps: this.taxRateBps };
     }
     if (!owner) return ignored('not ours');
     await this.lockAccount(manager, owner.userId);

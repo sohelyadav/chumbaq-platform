@@ -109,7 +109,7 @@ export class AdminUpdatePlanDto extends AdminPlanReasonDto {
 }
 
 /**
- * A new price, excluding GST. The charged amount is never sent: the server works it
+ * A new price, excluding tax. The charged amount is never sent: the server works it
  * out and checks it against the provider's plan.
  */
 export class AdminAddPriceDto extends AdminPlanReasonDto {

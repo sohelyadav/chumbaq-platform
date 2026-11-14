@@ -1,11 +1,8 @@
 /**
  * Money in the admin app: integer paise, never a float. Prices are typed by staff in
- * rupees, excluding GST, and read here on the string itself, so "1499.505" is refused
+ * rupees, excluding any tax, and read here on the string itself, so "1499.505" is refused
  * rather than rounded and "0.1" is exactly 10 paise.
  */
-
-/** India's GST rate on these services, in basis points: the API's `GST_RATE_BPS`. */
-export const GST_RATE_BPS = 1800;
 
 /** The most a price may be: the API's `PRICE_PAISE_MAX`. */
 export const MAX_PRICE_PAISE = 100_000_000;
@@ -69,18 +66,31 @@ function groupIndian(rupees: string): string {
 }
 
 /**
- * The GST on a price and what is charged: `price + roundHalfUp(price * bps / 10000)`,
- * the API's `gstInclusive`. Integer arithmetic stays exact for every price up to
+ * The tax on a price and what is charged: `price + roundHalfUp(price * bps / 10000)`,
+ * the API's `taxInclusive`. The rate is always the server's (`newPriceTaxRateBps` on a
+ * plan), never a default here. Integer arithmetic stays exact for every price up to
  * `MAX_PRICE_PAISE` (price times bps is far below 2^53).
  */
-export function priceWithGst(
-  pricePaise: number,
-  taxRateBps: number = GST_RATE_BPS,
-): { taxPaise: number; amountPaise: number } {
+export function priceWithTax(pricePaise: number, taxRateBps: number): { taxPaise: number; amountPaise: number } {
   if (!Number.isSafeInteger(pricePaise) || pricePaise < 0) throw new Error(`Not a price in paise: ${pricePaise}`);
   if (!Number.isSafeInteger(taxRateBps) || taxRateBps < 0 || taxRateBps > 10_000) {
     throw new Error(`Not a tax rate in basis points: ${taxRateBps}`);
   }
   const taxPaise = Math.floor((pricePaise * taxRateBps + 5000) / 10000);
   return { taxPaise, amountPaise: pricePaise + taxPaise };
+}
+
+/** A rate in basis points as a percentage: 1800 → "18%", 1850 → "18.5%", 5 → "0.05%". */
+export function formatRate(taxRateBps: number): string {
+  if (!Number.isSafeInteger(taxRateBps) || taxRateBps < 0 || taxRateBps > 10_000) {
+    throw new Error(`Not a tax rate in basis points: ${taxRateBps}`);
+  }
+  const whole = Math.floor(taxRateBps / 100);
+  const fraction = String(taxRateBps % 100).padStart(2, '0').replace(/0+$/, '');
+  return fraction ? `${whole}.${fraction}%` : `${whole}%`;
+}
+
+/** Whether any of these amounts carries tax; with none, the pages leave tax out of their copy. */
+export function anyTax(amounts: ReadonlyArray<{ taxPaise: number }>): boolean {
+  return amounts.some((amount) => amount.taxPaise !== 0);
 }

@@ -60,6 +60,7 @@ no billing routes, and the project and seat limits are `MAX_PROJECTS_PER_ACCOUNT
 | `RAZORPAY_KEY_SECRET` | |
 | `RAZORPAY_WEBHOOK_SECRET` | the secret of the Razorpay webhook pointed at the API |
 | `BILLING_GRACE_DAYS` | days a halted subscription keeps its plan, 1 to 60, default 14 |
+| `BILLING_TAX_RATE_BPS` | tax added to new prices, in basis points, 0 to 10000, default 0 (no tax); `1800` is 18% |
 | `BILLING_ENABLED` | optional; `false` keeps billing off even with keys set |
 
 Some of the three keys without the others stop the app at start-up, unless `BILLING_ENABLED=false`.
@@ -71,11 +72,14 @@ or MAU limit means unlimited.
 
 Plans live in the database, not in the code: staff create them and set their limits on the
 admin app's Plans page, which works with billing off too, so limits can be ready before billing
-is switched on. Prices are entered excluding GST. For each price, first create a Razorpay plan
-that charges the amount the Add price dialog shows (the price with 18% GST, in INR, every 1
+is switched on. Prices are entered excluding tax, and a new price is stored with the rate
+`BILLING_TAX_RATE_BPS` names when it is added (with the default 0, no tax: the price is what is
+charged, and the dashboard shows no tax). For each price, first create a Razorpay plan that
+charges exactly the amount the Add price dialog shows (the price plus that tax, in INR, every 1
 month or 1 year), then paste its `plan_…` id: the admin API fetches the plan from Razorpay and
 refuses it unless the amount, currency and period match. A new price replaces the current one
-for new subscriptions; existing subscribers keep theirs.
+for new subscriptions; existing subscribers keep theirs, at the rate it was added with, so
+changing `BILLING_TAX_RATE_BPS` affects only prices added afterwards.
 
 Point a Razorpay webhook at `https://<your API host>/api/billing/webhooks/razorpay` with the
 secret in `RAZORPAY_WEBHOOK_SECRET`, subscribed to `subscription.authenticated`, `.activated`,

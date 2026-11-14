@@ -1447,7 +1447,7 @@ export const CERT_IN_ANNEXURE_I: readonly { id: CertInIncidentType; label: strin
 ];
 
 // ---------------------------------------------------------------------------
-// Plans and billing. Money is integer paise everywhere; prices exclude GST and
+// Plans and billing. Money is integer paise everywhere; prices exclude tax and
 // `amountPaise` is what is charged.
 // ---------------------------------------------------------------------------
 
@@ -1489,10 +1489,10 @@ export interface PlanLimits {
 export interface BillingPrice {
   id: string;
   interval: BillingInterval;
-  /** Excluding GST. */
+  /** Excluding tax. */
   pricePaise: number;
   taxPaise: number;
-  /** Including GST: what is charged. */
+  /** Including tax: what is charged. */
   amountPaise: number;
   taxRateBps: number;
 }
@@ -1592,13 +1592,19 @@ export interface AdminPlan extends PlanLimits {
   /** Whether this server takes payments; prices can be added only when it does. */
   billingEnabled: boolean;
   /**
+   * The tax rate, in basis points, a price added now is stored with: the install's
+   * setting, never chosen by the client. 0 means no tax is added. Earlier prices keep
+   * their own `taxRateBps`.
+   */
+  newPriceTaxRateBps: number;
+  /**
    * The install's defaults, which a null limit stands for: the project limit on every
    * plan, the seat limit on the free plan (null is no seat limit).
    */
   defaults: { projectLimit: number; seatLimit: number | null };
 }
 
-/** Money split by GST, all integer paise: `grossPaise = netPaise + taxPaise`. */
+/** Money split by tax, all integer paise: `grossPaise = netPaise + taxPaise`. */
 export interface MoneySplit {
   netPaise: number;
   taxPaise: number;
@@ -1611,7 +1617,7 @@ export interface AdminBillingPayment {
   tenantEmail: string;
   amountPaise: number;
   refundedPaise: number;
-  /** What was kept, excluding GST: `amountPaise - refundedPaise` less its GST. */
+  /** What was kept, excluding tax: `amountPaise - refundedPaise` less its tax. */
   netPaise: number;
   status: 'captured' | 'failed' | 'refunded';
   method: string | null;

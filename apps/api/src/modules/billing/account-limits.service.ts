@@ -1,7 +1,7 @@
 import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EntityManager } from 'typeorm';
-import type { BillingConfig } from '../../config/billing.config';
+import { type BillingConfig, DEFAULT_BILLING_TAX_RATE_BPS } from '../../config/billing.config';
 import { DEFAULT_MAX_PROJECTS_PER_ACCOUNT } from '../../config/projects.config';
 import { UserEntity } from '../users/entities/user.entity';
 import { AccountBillingState, effectiveLimits, EffectivePlan, effectivePlan, FREE_PLAN } from './effective-plan';
@@ -45,6 +45,11 @@ export class AccountLimitsService {
 
   get billingEnabled(): boolean {
     return this.config?.get<BillingConfig>('billing')?.enabled === true;
+  }
+
+  /** The tax rate a price added now is stored with (`BILLING_TAX_RATE_BPS`). */
+  get taxRateBps(): number {
+    return this.config?.get<BillingConfig>('billing')?.taxRateBps ?? DEFAULT_BILLING_TAX_RATE_BPS;
   }
 
   /** The install's defaults: `MAX_PROJECTS_PER_ACCOUNT` and `MAX_SEATS_PER_ACCOUNT` (null, no limit). */

@@ -2,7 +2,7 @@ import type { BillingInterval, BillingOverview, BillingPlanOption } from '@chumb
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
-import { formatPaise, priceLine } from '@/lib/billing-format';
+import { formatPaise, hasTax, priceLine } from '@/lib/billing-format';
 import { planAction, type PlanAction } from '@/lib/billing-route';
 
 const BUTTON_LABEL: Partial<Record<PlanAction, string>> = {
@@ -47,7 +47,8 @@ export function IntervalToggle({
 
 /**
  * The plans, for the interval shown. What each card offers comes from `planAction`;
- * the price is the server's, shown excluding GST with the GST beside it.
+ * the price is the server's, shown excluding tax with the tax beside it, or alone
+ * when it carries none.
  */
 export function PlanCards({
   overview,
@@ -79,8 +80,12 @@ export function PlanCards({
                 {price ? (
                   <>
                     <span className="text-base font-semibold text-foreground">{priceLine(price)}</span>
-                    <br />
-                    <span className="text-xs">{formatPaise(price.amountPaise)} charged including GST</span>
+                    {hasTax(price) && (
+                      <>
+                        <br />
+                        <span className="text-xs">{formatPaise(price.amountPaise)} charged including GST</span>
+                      </>
+                    )}
                   </>
                 ) : plan.code === 'free' ? (
                   <span className="text-base font-semibold text-foreground">{formatPaise(0)}</span>

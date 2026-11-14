@@ -178,6 +178,8 @@ API_DOWNLOAD_ALERT_REQUESTS=2000
 # RAZORPAY_KEY_SECRET=
 # RAZORPAY_WEBHOOK_SECRET=
 # BILLING_GRACE_DAYS=14
+# Tax added to new prices, in basis points (1800 is 18%). Default 0: no tax.
+# BILLING_TAX_RATE_BPS=0
 
 # Admin API (staff only), a second process on the same database. nginx serves the admin
 # app on ADMIN_SERVER_NAME and proxies its /api to this port on 127.0.0.1.

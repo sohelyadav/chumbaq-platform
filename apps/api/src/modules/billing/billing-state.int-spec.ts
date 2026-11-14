@@ -449,6 +449,60 @@ describe('BillingStateService (integration)', () => {
     expect(await apply(unknownRefund)).toEqual({ outcome: 'ignored', detail: 'not ours', notices: [] });
   });
 
+  it('an invoice or failed payment with no price to take a rate from uses the install rate, 0 by default', async () => {
+    const { w } = await activeOnA();
+    const taxed = new BillingStateService({
+      get: (key: string) => (key === 'billing' ? { enabled: true, graceDays: 14, taxRateBps: 1800 } : undefined),
+    } as unknown as ConfigService);
+    const byCustomer = (invoiceId: string, paymentId: string) =>
+      razorpayEvent('invoice.paid', {
+        'payload.invoice.entity.id': invoiceId,
+        'payload.invoice.entity.customer_id': w.customerId,
+        'payload.invoice.entity.amount': 117882,
+        'payload.payment.entity.id': paymentId,
+        'payload.payment.entity.invoice_id': invoiceId,
+        'payload.payment.entity.amount': 117882,
+      });
+    const failedByCustomer = (paymentId: string) =>
+      razorpayEvent('payment.failed', {
+        'payload.payment.entity.id': paymentId,
+        'payload.payment.entity.customer_id': w.customerId,
+        'payload.payment.entity.amount': 117882,
+      });
+
+    // Unset: no tax is taken out of anything.
+    const [untaxedInvoice, untaxedPayment] = [`inv_${hex(7)}`, `pay_${hex(7)}`];
+    expect((await apply(byCustomer(untaxedInvoice, untaxedPayment))).outcome).toBe('applied');
+    const failedUntaxed = `pay_${hex(7)}`;
+    expect((await apply(failedByCustomer(failedUntaxed))).outcome).toBe('applied');
+    // Configured: the rate it names.
+    const [taxedInvoice, taxedPayment] = [`inv_${hex(7)}`, `pay_${hex(7)}`];
+    expect((await ds.transaction((m) => taxed.apply(m, byCustomer(taxedInvoice, taxedPayment), NOW))).outcome).toBe('applied');
+    const failedTaxed = `pay_${hex(7)}`;
+    expect((await ds.transaction((m) => taxed.apply(m, failedByCustomer(failedTaxed), NOW))).outcome).toBe('applied');
+
+    const invoices = await ds.query(
+      `SELECT provider_invoice_id, tax_paise FROM billing_invoices WHERE provider_invoice_id = ANY($1) ORDER BY tax_paise`,
+      [[untaxedInvoice, taxedInvoice]],
+    );
+    expect(invoices).toEqual([
+      { provider_invoice_id: untaxedInvoice, tax_paise: 0 },
+      { provider_invoice_id: taxedInvoice, tax_paise: 17982 },
+    ]);
+    const payments = await ds.query(
+      `SELECT provider_payment_id, tax_rate_bps FROM billing_payments WHERE provider_payment_id = ANY($1) ORDER BY tax_rate_bps, provider_payment_id`,
+      [[untaxedPayment, failedUntaxed, taxedPayment, failedTaxed]],
+    );
+    expect(payments.map((p: { provider_payment_id: string; tax_rate_bps: number }) => [p.provider_payment_id, p.tax_rate_bps]).sort()).toEqual(
+      [
+        [untaxedPayment, 0],
+        [failedUntaxed, 0],
+        [taxedPayment, 1800],
+        [failedTaxed, 1800],
+      ].sort(),
+    );
+  });
+
   /**
    * Two copies of one event that both got past the insert while it was still pending
    * (a webhook and its retry, or the webhook and reconciliation) wait on the event

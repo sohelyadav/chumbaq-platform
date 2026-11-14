@@ -27,7 +27,7 @@ import {
   intervalLabel,
   safeProviderUrl,
 } from '@/lib/billing-view';
-import { formatPaise } from '@/lib/money';
+import { anyTax, formatPaise } from '@/lib/money';
 
 const date = (iso: string | null) =>
   iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '-';
@@ -157,6 +157,8 @@ function CancelDialog({
 }
 
 function InvoicesTable({ invoices, onResend }: { invoices: BillingInvoiceView[]; onResend: (invoice: BillingInvoiceView) => void }) {
+  // No tax column when no invoice listed carries any.
+  const taxed = anyTax(invoices);
   return (
     <Table>
       <TableHeader>
@@ -164,7 +166,7 @@ function InvoicesTable({ invoices, onResend }: { invoices: BillingInvoiceView[];
           <TableHead>Invoice</TableHead>
           <TableHead>Status</TableHead>
           <TableHead className="text-right">Amount</TableHead>
-          <TableHead className="text-right">GST</TableHead>
+          {taxed && <TableHead className="text-right">Tax</TableHead>}
           <TableHead>Issued</TableHead>
           <TableHead>Paid</TableHead>
           <TableHead />
@@ -190,7 +192,7 @@ function InvoicesTable({ invoices, onResend }: { invoices: BillingInvoiceView[];
               <TableCell className="text-right tabular-nums">
                 {invoice.currency === 'INR' ? formatPaise(invoice.amountPaise) : `${invoice.currency} ${invoice.amountPaise}`}
               </TableCell>
-              <TableCell className="text-right tabular-nums">{formatPaise(invoice.taxPaise)}</TableCell>
+              {taxed && <TableCell className="text-right tabular-nums">{formatPaise(invoice.taxPaise)}</TableCell>}
               <TableCell className="whitespace-nowrap text-sm">{date(invoice.issuedAt)}</TableCell>
               <TableCell className="whitespace-nowrap text-sm">{date(invoice.paidAt)}</TableCell>
               <TableCell className="text-right">

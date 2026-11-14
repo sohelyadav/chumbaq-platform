@@ -19,7 +19,7 @@ import {
 import { toast } from '@/components/ui/use-toast';
 import { useBilling, useBillingEnabled, useCancelBilling, useChangePlan, useSubscribe } from '@/hooks/use-billing';
 import { getImpersonation } from '@/lib/auth';
-import { BILLING_STATE_LABELS, formatPaise, mauShare } from '@/lib/billing-format';
+import { anyPriceTaxed, BILLING_STATE_LABELS, formatPaise, mauShare } from '@/lib/billing-format';
 import {
   beforeCheckout,
   cancelOffer,
@@ -126,6 +126,7 @@ export default function BillingPage() {
 
   const o = billing.data;
   const shownInterval: BillingInterval = chosenInterval ?? o?.current?.interval ?? 'monthly';
+  const taxed = o ? anyPriceTaxed(o.plans) : false;
 
   // Done once the webhook has landed; "still processing" after the time limit.
   useEffect(() => {
@@ -300,7 +301,7 @@ export default function BillingPage() {
             </div>
             <PlanCards overview={o} interval={shownInterval} busyPlan={busyPlan} onPick={onPick} />
             <p className="text-sm text-muted-foreground">
-              Prices exclude GST, which is added at checkout. Need more than the largest plan? Contact us.
+              {taxed && 'Prices exclude GST, which is added at checkout. '}Need more than the largest plan? Contact us.
             </p>
             {offer !== 'none' && (
               <Button variant="outline" onClick={() => setConfirmCancel(true)}>
@@ -312,12 +313,13 @@ export default function BillingPage() {
           <Card>
             <CardHeader>
               <CardTitle>Billing details</CardTitle>
-              <CardDescription>Printed on your GST invoices.</CardDescription>
+              <CardDescription>{taxed ? 'Printed on your GST invoices.' : 'Shown on your invoices.'}</CardDescription>
             </CardHeader>
             <CardContent>
               {editingDetails || !o.details ? (
                 <BillingDetailsForm
                   initial={o.details}
+                  taxed={taxed}
                   onSaved={onDetailsSaved}
                   onCancel={
                     o.details || waitingPick

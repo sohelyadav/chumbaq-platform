@@ -17,7 +17,7 @@ export type BillingPaymentStatus = 'captured' | 'failed' | 'refunded';
 /**
  * A payment (or failed attempt) on an account, mirrored from the billing provider.
  * Integer paise. `amount_refunded_paise` is cumulative, as the provider reports it,
- * and never above the amount. `tax_rate_bps` is the GST rate of the price the
+ * and never above the amount. `tax_rate_bps` is the tax rate of the price the
  * payment was for, so revenue can be split into net and tax without a float.
  * `method` is the method's name only (card, upi, ...), never a number or handle.
  *

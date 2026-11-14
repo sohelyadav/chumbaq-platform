@@ -22,7 +22,7 @@ import {
   parseLimit,
   projectLimitLabel,
 } from '@/lib/billing-view';
-import { formatPaise, parseRupees, priceWithGst } from '@/lib/money';
+import { formatPaise, formatRate, parseRupees, priceWithTax } from '@/lib/money';
 
 /** The API's ranges. */
 const PROJECT_LIMIT_MAX = 1000;
@@ -206,7 +206,9 @@ function AddPriceDialog({
   }, [open]);
 
   const pricePaise = parseRupees(price);
-  const charged = pricePaise === null ? null : priceWithGst(pricePaise);
+  // The server's rate, which it stores the price with; the client never chooses it.
+  const rate = plan.newPriceTaxRateBps;
+  const charged = pricePaise === null ? null : priceWithTax(pricePaise, rate);
   const idValid = RAZORPAY_PLAN_ID_PATTERN.test(razorpayPlanId.trim());
   const per = interval === 'monthly' ? 'month' : 'year';
 
@@ -230,7 +232,10 @@ function AddPriceDialog({
       }}
     >
       <div className="grid gap-1.5">
-        <Label htmlFor="price-amount">Price a {per}, excluding GST (₹)</Label>
+        <Label htmlFor="price-amount">
+          Price a {per}
+          {rate > 0 ? ', excluding tax' : ''} (₹)
+        </Label>
         <Input id="price-amount" inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="1,499.00" />
         {price.trim() !== '' && pricePaise === null && (
           <p className="text-xs text-destructive">Enter rupees with at most two decimals, for example 1,499.50.</p>
@@ -238,8 +243,10 @@ function AddPriceDialog({
       </div>
       {charged && (
         <div className="rounded-md border bg-muted/40 p-3 text-sm" aria-live="polite">
-          Razorpay plan must charge <span className="font-semibold tabular-nums">{formatPaise(charged.amountPaise)}</span>{' '}
-          every 1 {per} ({formatPaise(charged.taxPaise)} GST), in INR. Create it in Razorpay first, then paste its id.
+          Razorpay plan must charge exactly <span className="font-semibold tabular-nums">{formatPaise(charged.amountPaise)}</span>{' '}
+          every 1 {per}
+          {rate > 0 ? ` (${formatPaise(charged.taxPaise)} tax at ${formatRate(rate)})` : ', the price itself, with no tax added'}, in
+          INR. Create it in Razorpay first, then paste its id.
         </div>
       )}
       <div className="grid gap-1.5">
@@ -263,13 +270,15 @@ function PriceRows({ plan, interval, onRetire }: { plan: AdminPlan; interval: Bi
   if (prices.length === 0) {
     return <p className="text-sm text-muted-foreground">No {interval} price yet.</p>;
   }
+  // Tax and charged columns only when a price here carries tax; otherwise the price is what is charged.
+  const taxed = prices.some((p) => p.taxRateBps > 0);
   return (
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>Price (excl. GST)</TableHead>
-          <TableHead>GST</TableHead>
-          <TableHead>Charged</TableHead>
+          <TableHead>{taxed ? 'Price (excl. tax)' : 'Price'}</TableHead>
+          {taxed && <TableHead>Tax</TableHead>}
+          {taxed && <TableHead>Charged</TableHead>}
           <TableHead>Razorpay plan</TableHead>
           <TableHead className="text-right">Subscribers</TableHead>
           <TableHead>Added</TableHead>
@@ -283,8 +292,13 @@ function PriceRows({ plan, interval, onRetire }: { plan: AdminPlan; interval: Bi
               {formatPaise(p.pricePaise)}{' '}
               {p.isCurrent ? <Badge variant="secondary">Current</Badge> : <Badge variant="outline">Earlier</Badge>}
             </TableCell>
-            <TableCell className="tabular-nums">{formatPaise(p.taxPaise)}</TableCell>
-            <TableCell className="tabular-nums">{formatPaise(p.amountPaise)}</TableCell>
+            {taxed && (
+              <TableCell className="tabular-nums">
+                {formatPaise(p.taxPaise)}
+                {p.taxRateBps > 0 && <span className="ml-1 text-xs text-muted-foreground">{formatRate(p.taxRateBps)}</span>}
+              </TableCell>
+            )}
+            {taxed && <TableCell className="tabular-nums">{formatPaise(p.amountPaise)}</TableCell>}
             <TableCell className="font-mono text-xs">{p.razorpayPlanId}</TableCell>
             <TableCell className="text-right tabular-nums">{p.subscribers.toLocaleString('en-US')}</TableCell>
             <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
@@ -378,13 +392,22 @@ export default function PlansPage() {
   const { data: plans, isLoading, isError, error, refetch } = useAdminPlans();
   const [creating, setCreating] = useState(false);
   const billingEnabled = plans?.find((plan) => plan.code === FREE_PLAN)?.billingEnabled ?? false;
+  const rate = plans?.[0]?.newPriceTaxRateBps;
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold">Plans</h1>
-          <p className="mt-1 text-muted-foreground">Limits and prices. Prices exclude GST; Razorpay charges them with it.</p>
+          <p className="mt-1 text-muted-foreground">Limits and prices.</p>
+          {rate !== undefined && (
+            <p className="mt-1 text-sm text-muted-foreground">
+              {rate === 0
+                ? 'No tax is added to new prices: the Razorpay plan behind a price must charge exactly the price shown.'
+                : `New prices add ${formatRate(rate)} tax: the Razorpay plan behind a price must charge exactly the price with that tax.`}{' '}
+              Earlier prices keep the rate they were added with.
+            </p>
+          )}
         </div>
         <Button onClick={() => setCreating(true)}>
           <Plus className="mr-2 h-4 w-4" />

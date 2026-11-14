@@ -1,13 +1,12 @@
 import type { BillingInterval } from '@chumbaq/shared';
 
 /**
- * Money is integer paise, never a float. Prices are entered excluding GST; what
- * is charged is the price plus its GST rounded half up. Arithmetic is done in
- * BigInt and the result checked, so nothing is ever rounded through a float.
+ * Money is integer paise, never a float. Prices are entered excluding tax; what
+ * is charged is the price plus its tax rounded half up (at a rate of 0, the price
+ * itself). The rate is the install's `BILLING_TAX_RATE_BPS` when a price is added,
+ * and each price keeps its own. Arithmetic is done in BigInt and the result
+ * checked, so nothing is ever rounded through a float.
  */
-
-/** India's GST rate on these services, in basis points. Prices store their own rate. */
-export const GST_RATE_BPS = 1800;
 
 /** Throws unless `n` is a whole, non-negative number of paise within the safe integer range. */
 export function assertPaise(n: number): void {
@@ -28,8 +27,8 @@ function toPaise(value: bigint): number {
   return n;
 }
 
-/** The price with GST added: `price + floor((price * bps + 5000) / 10000)`. */
-export function gstInclusive(pricePaise: number, taxRateBps: number): number {
+/** The price with tax added: `price + floor((price * bps + 5000) / 10000)`. */
+export function taxInclusive(pricePaise: number, taxRateBps: number): number {
   assertPaise(pricePaise);
   assertRate(taxRateBps);
   const price = BigInt(pricePaise);
@@ -37,7 +36,7 @@ export function gstInclusive(pricePaise: number, taxRateBps: number): number {
 }
 
 /**
- * The amount without its GST, rounded half up: the inverse of `gstInclusive` for
+ * The amount without its tax, rounded half up: the inverse of `taxInclusive` for
  * every price, `floor((gross * 20000 + (10000 + bps)) / (2 * (10000 + bps)))`.
  */
 export function netOfTax(grossPaise: number, taxRateBps: number): number {

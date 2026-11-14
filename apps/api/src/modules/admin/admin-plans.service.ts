@@ -16,7 +16,7 @@ import { AccountLimitsService } from '../billing/account-limits.service';
 import { FREE_PLAN } from '../billing/effective-plan';
 import { PlanPriceEntity } from '../billing/entities/plan-price.entity';
 import { PlanEntity } from '../billing/entities/plan.entity';
-import { formatRupees, GST_RATE_BPS, gstInclusive } from '../billing/money';
+import { formatRupees, taxInclusive } from '../billing/money';
 import { BILLING_PROVIDER, BillingProvider, BillingProviderError, ProviderPlan } from '../billing/providers/billing-provider';
 import { AdminAuditService } from './admin-audit.service';
 import type { AdminActor } from './admin-tenants.service';
@@ -73,8 +73,9 @@ const PROVIDER_PERIOD: Record<BillingInterval, string> = { monthly: 'monthly', y
  * limits can be ready before billing is switched on.
  *
  * Prices need billing on, because each is checked against the provider's plan before
- * it is stored: its amount must be the price plus GST, in rupees, charged once every
- * month or year as the interval says. A price is never edited; a new one replaces the
+ * it is stored: its amount must be the price plus tax at the install's rate
+ * (`BILLING_TAX_RATE_BPS`, so with no tax the price itself), in rupees, charged once
+ * every month or year as the interval says. The price keeps that rate. A price is never edited; a new one replaces the
  * current one, and subscriptions on the old one keep it.
  *
  * Every change writes its audit row in its own transaction.
@@ -170,7 +171,9 @@ export class AdminPlansService {
     if (!plan) throw new NotFoundException(ADMIN_PLAN_MESSAGES.notFound);
     await this.assertProviderPlanUnused(this.dataSource.manager, dto.razorpayPlanId);
 
-    const amountPaise = gstInclusive(dto.pricePaise, GST_RATE_BPS);
+    // The install's rate now, read once, so the check and the row cannot disagree.
+    const taxRateBps = this.limits.taxRateBps;
+    const amountPaise = taxInclusive(dto.pricePaise, taxRateBps);
     const providerPlan = await this.fetchProviderPlan(dto.razorpayPlanId);
     const expected = PROVIDER_PERIOD[dto.interval];
     if (
@@ -201,7 +204,7 @@ export class AdminPlansService {
         `INSERT INTO plan_prices
            (plan_code, interval, price_paise, tax_rate_bps, amount_paise, currency, razorpay_plan_id, is_current, created_by)
          VALUES ($1, $2, $3, $4, $5, 'INR', $6, true, $7)`,
-        [code, dto.interval, dto.pricePaise, GST_RATE_BPS, amountPaise, dto.razorpayPlanId, actor.userId],
+        [code, dto.interval, dto.pricePaise, taxRateBps, amountPaise, dto.razorpayPlanId, actor.userId],
       );
       await this.audit.record(
         {
@@ -212,7 +215,7 @@ export class AdminPlansService {
             interval: dto.interval,
             pricePaise: dto.pricePaise,
             amountPaise,
-            taxRateBps: GST_RATE_BPS,
+            taxRateBps,
             razorpayPlanId: dto.razorpayPlanId,
             replacedPriceId: replaced[0]?.id ?? null,
           },
@@ -330,6 +333,7 @@ export class AdminPlansService {
       isActive: plan.isActive,
       prices,
       billingEnabled: this.limits.billingEnabled,
+      newPriceTaxRateBps: this.limits.taxRateBps,
       defaults: this.limits.envLimits(),
     };
   }

@@ -15,6 +15,7 @@ describe('readBillingConfig', () => {
       webhookSecret: null,
       graceDays: 14,
       keyMode: null,
+      taxRateBps: 0,
     });
   });
 
@@ -26,6 +27,7 @@ describe('readBillingConfig', () => {
       webhookSecret: 'w',
       graceDays: 14,
       keyMode: 'test',
+      taxRateBps: 0,
     });
   });
 
@@ -67,6 +69,20 @@ describe('readBillingConfig', () => {
         /RAZORPAY_KEY_ID must look like rzp_test_… or rzp_live_…/,
       );
     }
+  });
+
+  it('reads BILLING_TAX_RATE_BPS as a whole number from 0 to 10000, default 0, billing on or off', () => {
+    for (const raw of ['-1', '10001', '18.5', '18%', 'gst', '1e3', '0x10']) {
+      expect(() => readBillingConfig({ BILLING_TAX_RATE_BPS: raw })).toThrow(
+        /BILLING_TAX_RATE_BPS must be a whole number from 0 to 10000/,
+      );
+      expect(() => readBillingConfig({ ...KEYS, BILLING_TAX_RATE_BPS: raw })).toThrow(/BILLING_TAX_RATE_BPS/);
+    }
+    expect(readBillingConfig({}).taxRateBps).toBe(0);
+    expect(readBillingConfig({ BILLING_TAX_RATE_BPS: ' ' }).taxRateBps).toBe(0);
+    expect(readBillingConfig({ BILLING_TAX_RATE_BPS: '0' }).taxRateBps).toBe(0);
+    expect(readBillingConfig({ ...KEYS, BILLING_TAX_RATE_BPS: '1800' }).taxRateBps).toBe(1800);
+    expect(readBillingConfig({ BILLING_TAX_RATE_BPS: '10000' }).taxRateBps).toBe(10000);
   });
 
   it('reads BILLING_GRACE_DAYS as a whole number from 1 to 60', () => {

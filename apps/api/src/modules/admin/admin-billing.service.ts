@@ -69,16 +69,16 @@ const split = (grossPaise: number, netPaise: number): MoneySplit => ({
 export interface RecurringRow {
   planCode: string;
   interval: BillingInterval;
-  /** Excluding GST. */
+  /** Excluding tax. */
   pricePaise: number;
-  /** Including GST. */
+  /** Including tax. */
   amountPaise: number;
 }
 
 /**
  * Recurring revenue from the paying subscriptions: ARR is the sum of each price as a
  * yearly amount, and MRR that sum over twelve, rounded down once. Dividing each row
- * first would lose up to a paisa a row. Excluding GST, with the GST beside it.
+ * first would lose up to a paisa a row. Excluding tax, with the tax beside it.
  */
 export function summariseMoney(rows: RecurringRow[]): {
   mrr: MoneySplit;
@@ -105,7 +105,7 @@ export function summariseMoney(rows: RecurringRow[]): {
   };
 }
 
-/** What a payment kept: its amount less refunds, and that split by its GST rate. */
+/** What a payment kept: its amount less refunds, and that split by its tax rate. */
 export function keptMoney(payment: { amountPaise: number; refundedPaise: number; taxRateBps: number }): MoneySplit {
   const gross = payment.amountPaise - payment.refundedPaise;
   return split(gross, netOfTax(gross, payment.taxRateBps));
@@ -113,7 +113,7 @@ export function keptMoney(payment: { amountPaise: number; refundedPaise: number;
 
 /**
  * `keptMoney` in SQL over payments aliased `p`: the same `netOfTax` formula, in bigint
- * integer division. Gross and net summed; GST is the difference.
+ * integer division. Gross and net summed; tax is the difference.
  */
 const KEPT_GROSS_SQL = `(p.amount_paise - p.amount_refunded_paise)::bigint`;
 const KEPT_NET_SQL = `((${KEPT_GROSS_SQL} * 20000 + (10000 + p.tax_rate_bps)) / (2 * (10000 + p.tax_rate_bps)))`;

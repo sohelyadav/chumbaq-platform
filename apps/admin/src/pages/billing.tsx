@@ -9,13 +9,13 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useAdminBillingSummary } from '@/hooks/use-admin-billing';
 import { useStaffAuth } from '@/hooks/use-staff-auth';
-import { formatPaise } from '@/lib/money';
+import { anyTax, formatPaise } from '@/lib/money';
 
 const dateTime = (iso: string) =>
   new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 const date = (iso: string) => new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 
-function MoneyCard({ title, money, note }: { title: string; money: MoneySplit; note: string }) {
+function MoneyCard({ title, money, note, taxed }: { title: string; money: MoneySplit; note: string; taxed: boolean }) {
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -24,7 +24,9 @@ function MoneyCard({ title, money, note }: { title: string; money: MoneySplit; n
       <CardContent>
         <div className="text-2xl font-bold tabular-nums">{formatPaise(money.netPaise)}</div>
         <p className="text-xs text-muted-foreground">
-          {note}, excluding GST. GST {formatPaise(money.taxPaise)}; with GST {formatPaise(money.grossPaise)}.
+          {taxed
+            ? `${note}, excluding tax. Tax ${formatPaise(money.taxPaise)}; with tax ${formatPaise(money.grossPaise)}.`
+            : `${note}.`}
         </p>
       </CardContent>
     </Card>
@@ -60,7 +62,7 @@ function RevenueTooltip({ active, payload }: TooltipProps<number, string>) {
     <div className="rounded-lg border bg-card px-3 py-2 text-sm shadow-sm">
       <p className="font-semibold tabular-nums">{formatPaise(point.netPaise)}</p>
       <p className="text-xs text-muted-foreground">
-        {point.month}, excluding GST ({formatPaise(point.taxPaise)} GST)
+        {point.taxPaise !== 0 ? `${point.month}, excluding tax (${formatPaise(point.taxPaise)} tax)` : point.month}
       </p>
     </div>
   );
@@ -90,7 +92,7 @@ function RevenueChart({ months }: { months: AdminBillingSummary['revenueByMonth'
   );
 }
 
-function PaymentsTable({ payments }: { payments: AdminBillingPayment[] }) {
+function PaymentsTable({ payments, taxed }: { payments: AdminBillingPayment[]; taxed: boolean }) {
   return (
     <Table>
       <TableHeader>
@@ -99,7 +101,7 @@ function PaymentsTable({ payments }: { payments: AdminBillingPayment[] }) {
           <TableHead>Tenant</TableHead>
           <TableHead className="text-right">Amount</TableHead>
           <TableHead className="text-right">Refunded</TableHead>
-          <TableHead className="text-right">Kept, excl. GST</TableHead>
+          <TableHead className="text-right">{taxed ? 'Kept, excl. tax' : 'Kept'}</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Method</TableHead>
         </TableRow>
@@ -137,6 +139,18 @@ export default function BillingPage() {
   const { profile } = useStaffAuth();
   const enabled = profile?.billingEnabled === true;
   const { data, isLoading, isError, error, refetch } = useAdminBillingSummary(enabled);
+  // Tax appears in the copy only when some amount here carries any: untaxed prices are charged as shown.
+  const taxed = data
+    ? anyTax([
+        data.mrr,
+        data.arr,
+        data.revenue30d,
+        ...data.revenueByMonth,
+        ...[...data.recentPayments, ...data.recentFailures].map((p) => ({
+          taxPaise: p.amountPaise - p.refundedPaise - p.netPaise,
+        })),
+      ])
+    : false;
 
   if (!enabled) {
     return (
@@ -152,8 +166,8 @@ export default function BillingPage() {
       <div>
         <h1 className="text-3xl font-bold">Billing</h1>
         <p className="mt-1 text-muted-foreground">
-          Paying accounts and money received. Amounts exclude GST unless they say otherwise. A comp is not revenue,
-          but a comped account that also subscribed is charged, so it counts.
+          Paying accounts and money received. Amounts exclude any tax unless they say otherwise. A comp is not
+          revenue, but a comped account that also subscribed is charged, so it counts.
         </p>
       </div>
 
@@ -168,9 +182,9 @@ export default function BillingPage() {
       ) : (
         <>
           <div className="grid gap-4 md:grid-cols-3">
-            <MoneyCard title="MRR" money={data.mrr} note="Monthly recurring revenue" />
-            <MoneyCard title="ARR" money={data.arr} note="Yearly recurring revenue" />
-            <MoneyCard title="Revenue, last 30 days" money={data.revenue30d} note="Received less refunds" />
+            <MoneyCard title="MRR" money={data.mrr} note="Monthly recurring revenue" taxed={taxed} />
+            <MoneyCard title="ARR" money={data.arr} note="Yearly recurring revenue" taxed={taxed} />
+            <MoneyCard title="Revenue, last 30 days" money={data.revenue30d} note="Received less refunds" taxed={taxed} />
           </div>
           {data.cancelling > 0 && (
             <p className="-mt-2 text-sm text-muted-foreground">
@@ -182,7 +196,7 @@ export default function BillingPage() {
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Revenue by month</CardTitle>
-              <CardDescription>Received less refunds, excluding GST, by UTC month.</CardDescription>
+              <CardDescription>Received less refunds{taxed ? ', excluding tax' : ''}, by UTC month.</CardDescription>
             </CardHeader>
             <CardContent>
               <RevenueChart months={data.revenueByMonth} />
@@ -195,7 +209,7 @@ export default function BillingPage() {
                 <TableRow>
                   <TableHead>Plan</TableHead>
                   <TableHead className="text-right">Accounts</TableHead>
-                  <TableHead className="text-right">MRR, excl. GST</TableHead>
+                  <TableHead className="text-right">{taxed ? 'MRR, excl. tax' : 'MRR'}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -244,11 +258,11 @@ export default function BillingPage() {
           </Section>
 
           <Section title="Recent payments" empty={data.recentPayments.length === 0}>
-            <PaymentsTable payments={data.recentPayments} />
+            <PaymentsTable payments={data.recentPayments} taxed={taxed} />
           </Section>
 
           <Section title="Recent failed payments" empty={data.recentFailures.length === 0}>
-            <PaymentsTable payments={data.recentFailures} />
+            <PaymentsTable payments={data.recentFailures} taxed={taxed} />
           </Section>
 
           <Section title="Over their monthly active devices" description="Nothing is blocked; the owner is emailed." empty={data.overMau.length === 0}>

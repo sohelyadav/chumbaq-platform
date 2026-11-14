@@ -18,10 +18,19 @@ export interface BillingConfig {
   graceDays: number;
   /** From the key id: Razorpay's test mode or live mode. Null while billing is off. */
   keyMode: 'test' | 'live' | null;
+  /**
+   * Tax added to a price staff add now, in basis points (`BILLING_TAX_RATE_BPS`, default
+   * 0: no tax). Each price stores the rate it was added with and keeps it, so changing
+   * this moves only prices added afterwards.
+   */
+  taxRateBps: number;
 }
 
 export const DEFAULT_BILLING_GRACE_DAYS = 14;
 export const MAX_BILLING_GRACE_DAYS = 60;
+
+export const DEFAULT_BILLING_TAX_RATE_BPS = 0;
+export const MAX_BILLING_TAX_RATE_BPS = 10_000;
 
 const KEY_ID_PATTERN = /^rzp_(test|live)_[A-Za-z0-9]{6,}$/;
 
@@ -38,8 +47,17 @@ function graceDays(raw: string | null): number {
   return Number(raw);
 }
 
+function taxRateBps(raw: string | null): number {
+  if (raw === null) return DEFAULT_BILLING_TAX_RATE_BPS;
+  if (!/^\d+$/.test(raw) || Number(raw) > MAX_BILLING_TAX_RATE_BPS) {
+    throw new Error(`BILLING_TAX_RATE_BPS must be a whole number from 0 to ${MAX_BILLING_TAX_RATE_BPS}`);
+  }
+  return Number(raw);
+}
+
 export function readBillingConfig(env: Record<string, string | undefined>): BillingConfig {
   const days = graceDays(read(env, 'BILLING_GRACE_DAYS'));
+  const rate = taxRateBps(read(env, 'BILLING_TAX_RATE_BPS'));
   const off: BillingConfig = {
     enabled: false,
     keyId: null,
@@ -47,6 +65,7 @@ export function readBillingConfig(env: Record<string, string | undefined>): Bill
     webhookSecret: null,
     graceDays: days,
     keyMode: null,
+    taxRateBps: rate,
   };
 
   const switchValue = read(env, 'BILLING_ENABLED');
@@ -88,6 +107,7 @@ export function readBillingConfig(env: Record<string, string | undefined>): Bill
     webhookSecret,
     graceDays: days,
     keyMode: match[1] as 'test' | 'live',
+    taxRateBps: rate,
   };
 }
 

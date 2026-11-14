@@ -43,8 +43,27 @@ export function intervalLabel(interval: BillingInterval): string {
   return interval === 'monthly' ? 'Monthly' : 'Yearly';
 }
 
-/** "₹999.00 + GST (₹179.82) a month": the price excluding GST, then the GST on it. */
+/** Whether a price carries tax. A price stored with a rate of 0 is charged exactly as shown. */
+export function hasTax(price: Pick<BillingPrice, 'taxRateBps'>): boolean {
+  return price.taxRateBps > 0;
+}
+
+/**
+ * Whether any price on offer carries tax, which decides whether the page speaks of GST
+ * at all. With none, prices are charged exactly as shown.
+ */
+export function anyPriceTaxed(plans: BillingPlanOption[]): boolean {
+  return plans.some((plan) => [plan.monthly, plan.yearly].some((price) => price !== null && hasTax(price)));
+}
+
+/**
+ * "₹999.00 / month" for a price with no tax; with tax, "₹999.00 + GST (₹179.82) a
+ * month": the price excluding GST, then the GST on it.
+ */
 export function priceLine(price: BillingPrice): string {
+  if (!hasTax(price)) {
+    return `${formatPaise(price.pricePaise)} / ${price.interval === 'monthly' ? 'month' : 'year'}`;
+  }
   const per = price.interval === 'monthly' ? 'a month' : 'a year';
   return `${formatPaise(price.pricePaise)} + GST (${formatPaise(price.taxPaise)}) ${per}`;
 }

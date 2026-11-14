@@ -16,17 +16,20 @@ export function billingErrorMessage(err: unknown, fallback: string): string {
 }
 
 /**
- * The details printed on tax invoices: legal name, optional GSTIN, billing address and
- * state (the place of supply). The server checks everything again, including that a
+ * The details shown on invoices: legal name, optional GSTIN, billing address and
+ * state (the place of supply when prices carry GST, `taxed`). The server checks everything again, including that a
  * GSTIN belongs to the chosen state, and its message is shown as it is. Once the
  * account has subscribed the GSTIN is shown but not editable (`gstinLocked`).
  */
 export function BillingDetailsForm({
   initial,
+  taxed,
   onSaved,
   onCancel,
 }: {
   initial: BillingDetails | null;
+  /** Whether prices on offer carry GST; without it the copy never mentions GST invoices. */
+  taxed: boolean;
   onSaved: () => void;
   onCancel?: () => void;
 }) {
@@ -82,7 +85,7 @@ export function BillingDetailsForm({
         <p className="text-xs text-muted-foreground">As it should appear on your invoices.</p>
       </div>
       <div className="space-y-2">
-        <Label htmlFor="billing-gstin">GSTIN (optional)</Label>
+        <Label htmlFor="billing-gstin">{taxed ? 'GSTIN (optional)' : 'GSTIN (optional, for your records)'}</Label>
         <Input
           id="billing-gstin"
           value={gstin}
@@ -145,7 +148,7 @@ export function BillingDetailsForm({
         </div>
       </div>
       <div className="space-y-2">
-        <Label htmlFor="billing-state">State</Label>
+        <Label htmlFor="billing-state">{taxed ? 'State' : 'Your state'}</Label>
         <Select value={stateCode} onValueChange={setStateCode}>
           <SelectTrigger id="billing-state" className="w-full">
             <SelectValue placeholder="Choose your state" />
@@ -158,7 +161,9 @@ export function BillingDetailsForm({
             ))}
           </SelectContent>
         </Select>
-        <p className="text-xs text-muted-foreground">The place of supply for GST. Billing is in India only for now.</p>
+        <p className="text-xs text-muted-foreground">
+          {taxed && 'The place of supply for GST. '}Billing is in India only for now.
+        </p>
       </div>
       {error && (
         <p role="alert" className="text-sm text-destructive">

@@ -10,7 +10,7 @@ import { fileURLToPath } from 'url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const jiti = createJiti(import.meta.url, { interopDefault: true });
-const { formatPaise, priceLine, mauShare, canBuy, BILLING_STATE_LABELS, intervalLabel, safeProviderUrl } = await jiti.import(
+const { formatPaise, hasTax, anyPriceTaxed, priceLine, mauShare, canBuy, BILLING_STATE_LABELS, intervalLabel, safeProviderUrl } = await jiti.import(
   path.join(here, 'billing-format.ts'),
 );
 
@@ -62,6 +62,14 @@ const monthly = { id: 'p1', interval: 'monthly', pricePaise: 99900, taxPaise: 17
 const yearly = { ...monthly, id: 'p2', interval: 'yearly', pricePaise: 999000, taxPaise: 179820, amountPaise: 1178820 };
 check('a month', priceLine(monthly) === '₹999.00 + GST (₹179.82) a month', priceLine(monthly));
 check('a year', priceLine(yearly) === '₹9,990.00 + GST (₹1,798.20) a year', priceLine(yearly));
+const untaxed = { id: 'p3', interval: 'monthly', pricePaise: 99900, taxPaise: 0, amountPaise: 99900, taxRateBps: 0 };
+check('no tax: the price alone, a month', priceLine(untaxed) === '₹999.00 / month', priceLine(untaxed));
+check('no tax: the price alone, a year', priceLine({ ...untaxed, interval: 'yearly' }) === '₹999.00 / year');
+check('no tax names no GST', !priceLine(untaxed).includes('GST'));
+check('hasTax follows the rate', hasTax(monthly) && !hasTax(untaxed));
+const planWith = (m, y) => ({ code: 'x', name: 'X', sortOrder: 1, mauLimit: null, projectLimit: null, seatLimit: null, monthly: m, yearly: y });
+check('no plans taxed', !anyPriceTaxed([planWith(null, null), planWith(untaxed, { ...untaxed, interval: 'yearly' })]));
+check('one taxed price is enough', anyPriceTaxed([planWith(untaxed, null), planWith(null, yearly)]));
 check('interval labels', intervalLabel('monthly') === 'Monthly' && intervalLabel('yearly') === 'Yearly');
 
 console.log('mauShare');

@@ -54,7 +54,7 @@ export interface ProviderInvoice {
   status: string;
   /** What the customer pays, the provider's tax included. */
   amountPaise: number;
-  /** The tax the provider put on the invoice. Our own GST comes from the price row, never from this. */
+  /** The tax the provider put on the invoice. Our own tax comes from the price row, never from this. */
   providerTaxPaise: number;
   currency: string;
   billingStart: Date | null;

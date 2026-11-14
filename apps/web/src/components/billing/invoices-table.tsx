@@ -43,6 +43,8 @@ export function InvoicesTable() {
     return <p className="text-sm text-muted-foreground">No invoices yet. They appear here after your first payment.</p>;
   }
   const pages = Math.max(1, Math.ceil(data.meta.total / INVOICES_PAGE_SIZE));
+  // No tax column when nothing listed carries any: untaxed prices are charged as shown.
+  const showTax = data.data.some((invoice) => invoice.taxPaise > 0);
 
   return (
     <div className="space-y-3">
@@ -52,7 +54,7 @@ export function InvoicesTable() {
             <TableHead>Invoice</TableHead>
             <TableHead>Period</TableHead>
             <TableHead className="text-right">Amount</TableHead>
-            <TableHead className="text-right">GST</TableHead>
+            {showTax && <TableHead className="text-right">GST</TableHead>}
             <TableHead>Status</TableHead>
             <TableHead className="sr-only">Link</TableHead>
           </TableRow>
@@ -63,7 +65,9 @@ export function InvoicesTable() {
               <TableCell className="font-mono text-xs">{invoice.number ?? day(invoice.issuedAt) ?? '—'}</TableCell>
               <TableCell>{period(invoice)}</TableCell>
               <TableCell className="text-right tabular-nums">{money(invoice.amountPaise, invoice.currency)}</TableCell>
-              <TableCell className="text-right tabular-nums">{money(invoice.taxPaise, invoice.currency)}</TableCell>
+              {showTax && (
+                <TableCell className="text-right tabular-nums">{money(invoice.taxPaise, invoice.currency)}</TableCell>
+              )}
               <TableCell>
                 <Badge variant={invoice.status === 'paid' ? 'secondary' : 'outline'}>{invoice.status}</Badge>
               </TableCell>

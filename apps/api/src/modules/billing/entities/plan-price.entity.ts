@@ -7,7 +7,7 @@ import type { BillingInterval } from '@chumbaq/shared';
  * one replaces it as current (at most one current per plan and interval), so a
  * subscription always points at the amount it was sold at.
  *
- * Money is integer paise. `price_paise` excludes GST; `amount_paise` is what the
+ * Money is integer paise. `price_paise` excludes tax; `amount_paise` is what the
  * provider charges, `price + roundHalfUp(price * tax_rate_bps / 10000)`, held by a
  * CHECK in bigint (price times basis points overflows int4). The free plan has
  * no price.
@@ -37,14 +37,14 @@ export class PlanPriceEntity {
   @Column({ type: 'varchar', length: 7 })
   interval: BillingInterval;
 
-  /** Excluding GST. */
+  /** Excluding tax. */
   @Column({ type: 'int', name: 'price_paise' })
   pricePaise: number;
 
   @Column({ type: 'int', name: 'tax_rate_bps' })
   taxRateBps: number;
 
-  /** Including GST: what the provider's plan charges. */
+  /** Including tax: what the provider's plan charges. */
   @Column({ type: 'int', name: 'amount_paise' })
   amountPaise: number;
 

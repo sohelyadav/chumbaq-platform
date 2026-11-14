@@ -61,7 +61,7 @@ export function useUpdatePlan(code: string) {
   });
 }
 
-/** The price excluding GST only: the server works out the charged amount and checks it against Razorpay. */
+/** The price excluding any tax only: the server works out the charged amount and checks it against Razorpay. */
 export function useAddPrice(code: string) {
   const invalidate = useInvalidateAdmin();
   return useMutation({
