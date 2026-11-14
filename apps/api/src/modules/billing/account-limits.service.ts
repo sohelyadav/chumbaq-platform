@@ -71,7 +71,9 @@ export class AccountLimitsService {
       };
     }
 
-    const [state, plans] = await Promise.all([this.billingState(manager, userId), this.plans(manager)]);
+    // One after another: callers pass a transaction's manager, a single connection.
+    const state = await this.billingState(manager, userId);
+    const plans = await this.plans(manager);
     const plan = effectivePlan(state, now, rankOf(plans));
     const row = plans.get(plan.planCode) ?? null;
     return {
@@ -93,10 +95,8 @@ export class AccountLimitsService {
     if (!account) return toBillingState(null, null, null);
     const subscriptionOf = (id: string | null) =>
       id ? manager.findOne(BillingSubscriptionEntity, { where: { id, userId } }) : Promise.resolve(null);
-    const [current, next] = await Promise.all([
-      subscriptionOf(account.currentSubscriptionId),
-      subscriptionOf(account.nextSubscriptionId),
-    ]);
+    const current = await subscriptionOf(account.currentSubscriptionId);
+    const next = await subscriptionOf(account.nextSubscriptionId);
     return toBillingState(account, current, next);
   }
 

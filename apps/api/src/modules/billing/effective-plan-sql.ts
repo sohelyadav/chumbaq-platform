@@ -72,7 +72,8 @@ type SubscriptionRow = Pick<
   'planCode' | 'interval' | 'status' | 'currentEnd' | 'startAt' | 'graceUntil' | 'cancelAtPeriodEnd'
 >;
 
-function toSubscriptionState(row: SubscriptionRow | null): SubscriptionState | null {
+/** The rule's view of one subscription row. */
+export function toSubscriptionState(row: SubscriptionRow | null): SubscriptionState | null {
   if (!row) return null;
   return {
     planCode: row.planCode,

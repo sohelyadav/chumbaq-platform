@@ -2,7 +2,8 @@ import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EntityManager } from 'typeorm';
 import { type BillingConfig, DEFAULT_BILLING_GRACE_DAYS } from '../../config/billing.config';
-import { isLive, SubscriptionState } from './effective-plan';
+import { isLive } from './effective-plan';
+import { toSubscriptionState } from './effective-plan-sql';
 import { BillingAccountEntity } from './entities/billing-account.entity';
 import { BillingSubscriptionEntity } from './entities/billing-subscription.entity';
 import { PlanPriceEntity } from './entities/plan-price.entity';
@@ -170,7 +171,7 @@ export class BillingStateService {
       : null;
 
     if (next.status === 'authenticated') {
-      if (next.startAt && current && isLive(stateOf(current), now) && !current.cancelAtPeriodEnd) {
+      if (next.startAt && current && isLive(toSubscriptionState(current), now) && !current.cancelAtPeriodEnd) {
         await this.requestCancelAtCycleEnd(manager, current.id, now);
       }
       return;
@@ -179,7 +180,7 @@ export class BillingStateService {
     if (STARTED.has(next.status)) {
       if (current && current.id !== next.id) {
         await manager.update(BillingSubscriptionEntity, { id: current.id }, { supersededBy: next.id });
-        if (isLive(stateOf(current), now)) await this.requestCancelAtCycleEnd(manager, current.id, now);
+        if (isLive(toSubscriptionState(current), now)) await this.requestCancelAtCycleEnd(manager, current.id, now);
       }
       await manager.update(BillingSubscriptionEntity, { id: next.id }, { wasCurrent: true });
       await manager.update(
@@ -440,16 +441,4 @@ export class BillingStateService {
     await manager.query(`INSERT INTO billing_accounts (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [userId]);
     return manager.findOneOrFail(BillingAccountEntity, { where: { userId }, lock: { mode: 'pessimistic_write' } });
   }
-}
-
-function stateOf(s: BillingSubscriptionEntity): SubscriptionState {
-  return {
-    planCode: s.planCode,
-    interval: s.interval,
-    status: s.status,
-    currentEnd: s.currentEnd,
-    startAt: s.startAt,
-    graceUntil: s.graceUntil,
-    cancelAtPeriodEnd: s.cancelAtPeriodEnd,
-  };
 }

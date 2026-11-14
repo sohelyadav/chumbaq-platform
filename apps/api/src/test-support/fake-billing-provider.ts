@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import {
   BillingEvent,
   BillingProvider,
@@ -50,6 +51,7 @@ export class FakeBillingProvider implements BillingProvider {
   private readonly failures = new Map<Method, Error[]>();
   private readonly webhookSecret: string;
   private sequence = 0;
+  private readonly run = randomBytes(5).toString('hex');
 
   constructor({
     keyId = FAKE_BILLING_KEY_ID,
@@ -221,9 +223,13 @@ export class FakeBillingProvider implements BillingProvider {
     return subscription;
   }
 
+  /**
+   * Unique across runs too: the integration database is kept, and provider ids are
+   * unique columns there, so ids from an earlier run must not come back.
+   */
   private newId(prefix: string): string {
     this.sequence += 1;
-    return `${prefix}_fake${String(this.sequence).padStart(10, '0')}`;
+    return `${prefix}_fake${this.run}${String(this.sequence).padStart(6, '0')}`;
   }
 }
 
