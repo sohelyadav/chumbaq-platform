@@ -53,9 +53,20 @@ export class StaffAlarmsService {
       `SELECT user_agent FROM staff_sessions WHERE user_id = $1 AND id <> $2 ORDER BY created_at DESC LIMIT $3`,
       [user.id, sessionId, DEVICE_HISTORY_LIMIT],
     );
-    // A first-ever sign-in has nothing to compare with, as on the customer side.
-    if (earlier.length === 0) return;
-    if (earlier.some((s) => deviceFamily(s.user_agent) === device)) return;
+    // A first-ever sign-in has nothing to compare with, as on the customer side. Staff
+    // sessions are pruned a month after they end, so an empty list after that is a
+    // dormant account signing in, told apart by the audit log, which is never pruned.
+    if (earlier.length === 0) {
+      const before: unknown[] = await this.dataSource.query(
+        `SELECT 1 FROM admin_audit_logs
+          WHERE actor_id = $1 AND action = 'staff.signed_in' AND created_at < now() - interval '1 minute'
+          LIMIT 1`,
+        [user.id],
+      );
+      if (before.length === 0) return;
+    } else if (earlier.some((s) => deviceFamily(s.user_agent) === device)) {
+      return;
+    }
     await this.alerts.raise(
       'staff.new_device',
       `${user.id}:${device}`,

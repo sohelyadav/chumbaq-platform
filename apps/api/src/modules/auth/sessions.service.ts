@@ -91,8 +91,22 @@ export class SessionsService {
       order: { createdAt: 'DESC' },
       take: DEVICE_HISTORY_LIMIT,
     });
-    if (earlier.length === 0) return false;
+    // No session rows is not proof of a first sign-in: retention deletes the sessions
+    // of an account unused for a month, which would silence the notice exactly when a
+    // dormant account is signed into from somewhere new. Sign-ins are kept far longer.
+    if (earlier.length === 0) return this.signedInBefore(userId);
     return !earlier.some((session) => deviceFamily(session.userAgent) === device);
+  }
+
+  /** A successful sign-in recorded before this one (a minute's margin for its own row). */
+  private async signedInBefore(userId: string): Promise<boolean> {
+    const rows: unknown[] = await this.repository.query(
+      `SELECT 1 FROM auth_events
+        WHERE user_id = $1 AND type = 'login.succeeded' AND created_at < now() - interval '1 minute'
+        LIMIT 1`,
+      [userId],
+    );
+    return rows.length > 0;
   }
 
   /**

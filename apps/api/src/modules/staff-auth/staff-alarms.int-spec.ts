@@ -67,6 +67,18 @@ describe('staff sign-in alarms', () => {
       expect(raised).toEqual([]);
     });
 
+    it('raises staff.new_device for a dormant account whose sessions were pruned', async () => {
+      const user = await staff();
+      await ds.query(
+        `INSERT INTO admin_audit_logs (actor_id, actor_email, action, target_type, target_id, created_at)
+         VALUES ($1, $2, 'staff.signed_in', 'user', $1, now() - interval '90 days')`,
+        [user.id, user.email],
+      );
+      const now = await session(user.id, CHROME_MAC);
+      await service().signedIn(user, now, { ipAddress: '203.0.113.1', userAgent: CHROME_MAC });
+      expect(raised.map((r) => r.kind)).toEqual(['staff.new_device']);
+    });
+
     it('raises nothing on a device used before', async () => {
       const user = await staff();
       await session(user.id, CHROME_MAC);

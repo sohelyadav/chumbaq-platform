@@ -112,6 +112,17 @@ describe('Security notices (integration)', () => {
       expect(await subjects()).toEqual([]);
     });
 
+    // Retention deletes a dormant account's sessions; its sign-ins are kept far longer.
+    it('is told about for a dormant account whose sessions were pruned', async () => {
+      await signIn(CHROME_MAC);
+      await ds.query(`UPDATE auth_events SET created_at = now() - interval '60 days' WHERE email = $1`, [EMAIL]);
+      await ds.query(`DELETE FROM auth_sessions WHERE user_id = (SELECT id FROM users WHERE email = $1)`, [EMAIL]);
+      sent.length = 0;
+
+      await signIn(SAFARI_IPHONE);
+      expect(await subjects()).toHaveLength(1);
+    });
+
     it('stays quiet when the user agent says nothing it can name', async () => {
       await signIn(CHROME_MAC);
       await signIn('curl/8.7.1');
