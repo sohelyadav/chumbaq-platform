@@ -173,6 +173,12 @@ API_DOWNLOAD_ALERT_REQUESTS=2000
 # PLATFORM_BREVO_API_KEY=xkeysib-...
 # PLATFORM_EMAIL_FROM=Chumbaq <noreply@chumbaq.com>
 
+# Paid plans through Razorpay Subscriptions. Billing stays off unless all three keys are set.
+# RAZORPAY_KEY_ID=
+# RAZORPAY_KEY_SECRET=
+# RAZORPAY_WEBHOOK_SECRET=
+# BILLING_GRACE_DAYS=14
+
 # Admin API (staff only), a second process on the same database. nginx serves the admin
 # app on ADMIN_SERVER_NAME and proxies its /api to this port on 127.0.0.1.
 ENVEOF

@@ -11,6 +11,7 @@ import appConfig from './config/app.config';
 import redisConfig from './config/redis.config';
 import retentionConfig from './config/retention.config';
 import staffConfig from './config/staff.config';
+import billingConfig from './config/billing.config';
 
 @Module({
   imports: [
@@ -19,7 +20,7 @@ import staffConfig from './config/staff.config';
       envFilePath: '../../.env',
       // retentionConfig here only: the worker is what prunes, and it refuses to start
       // on a retention below the legal floor. staffConfig for how long staff sessions last.
-      load: [databaseConfig, jwtConfig, appConfig, redisConfig, retentionConfig, staffConfig],
+      load: [databaseConfig, jwtConfig, appConfig, redisConfig, retentionConfig, staffConfig, billingConfig],
     }),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],

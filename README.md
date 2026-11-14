@@ -50,6 +50,20 @@ cd apps/api && npm run test:int   # integration tests, needs a Postgres test dat
 certbot) and `scripts/deploy-update.sh` updates it. Read the top of each script for the
 settings; set `APP_SERVER_NAME` and `ADMIN_SERVER_NAME` to your own hosts.
 
+Billing is optional and off by default: with it off there are no plans, no plan limits and
+no billing routes, and the project and seat limits are `MAX_PROJECTS_PER_ACCOUNT` and
+`MAX_SEATS_PER_ACCOUNT`. To charge for plans through Razorpay Subscriptions, set all of:
+
+| Variable | Notes |
+|---|---|
+| `RAZORPAY_KEY_ID` | `rzp_test_…` or `rzp_live_…`; billing stays off unless all three keys are set |
+| `RAZORPAY_KEY_SECRET` | |
+| `RAZORPAY_WEBHOOK_SECRET` | the secret of the Razorpay webhook pointed at the API |
+| `BILLING_GRACE_DAYS` | days a halted subscription keeps its plan, 1 to 60, default 14 |
+| `BILLING_ENABLED` | optional; `false` keeps billing off even with keys set |
+
+Some of the three keys without the others stop the app at start-up, unless `BILLING_ENABLED=false`.
+
 ## Security
 
 Please report vulnerabilities privately to security@chumbaq.com rather than in a public issue.

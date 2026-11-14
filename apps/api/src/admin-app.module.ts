@@ -11,6 +11,7 @@ import webauthnConfig from './config/webauthn.config';
 import mfaConfig from './config/mfa.config';
 import projectsConfig from './config/projects.config';
 import staffConfig from './config/staff.config';
+import billingConfig from './config/billing.config';
 import { QueueModule } from './queue/queue.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { StaffAuthModule } from './modules/staff-auth/staff-auth.module';
@@ -31,7 +32,17 @@ import { HealthModule } from './modules/health/health.module';
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: '../../.env',
-      load: [databaseConfig, jwtConfig, appConfig, redisConfig, webauthnConfig, mfaConfig, projectsConfig, staffConfig],
+      load: [
+        databaseConfig,
+        jwtConfig,
+        appConfig,
+        redisConfig,
+        webauthnConfig,
+        mfaConfig,
+        projectsConfig,
+        staffConfig,
+        billingConfig,
+      ],
     }),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],

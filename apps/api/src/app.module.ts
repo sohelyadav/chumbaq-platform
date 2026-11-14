@@ -46,6 +46,7 @@ import webauthnConfig from './config/webauthn.config';
 import mfaConfig from './config/mfa.config';
 import projectsConfig from './config/projects.config';
 import staffConfig from './config/staff.config';
+import billingConfig from './config/billing.config';
 import { QueueModule } from './queue/queue.module';
 
 @Module({
@@ -55,7 +56,17 @@ import { QueueModule } from './queue/queue.module';
       isGlobal: true,
       envFilePath: '../../.env',
       // staffConfig: JwtStrategy ends a view-as whose staff session is past its end.
-      load: [databaseConfig, jwtConfig, appConfig, redisConfig, webauthnConfig, mfaConfig, projectsConfig, staffConfig],
+      load: [
+        databaseConfig,
+        jwtConfig,
+        appConfig,
+        redisConfig,
+        webauthnConfig,
+        mfaConfig,
+        projectsConfig,
+        staffConfig,
+        billingConfig,
+      ],
     }),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
