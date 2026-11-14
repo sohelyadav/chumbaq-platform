@@ -175,6 +175,27 @@ describe('Seats (integration)', () => {
       await assertRoom(o2, `Invited${DOMAIN}`);
     });
 
+    // An admin of one project must not learn who is on the account's other projects.
+    it('answers an admin of one project the same whoever is on the account\'s other projects', async () => {
+      const { owner, p } = await limited(2, 'acct');
+      const other = await project(owner);
+      const dev = await user('elsewhere');
+      await member(other, dev);
+      await invite(other, `pending${DOMAIN}`);
+
+      // The billing owner sees the whole account: no new seat for either.
+      await assertRoom(owner, `elsewhere${DOMAIN}`);
+      await assertRoom(owner, `pending${DOMAIN}`);
+      // An admin of p at the limit is refused for them exactly as for a stranger.
+      await refused(assertRoom(owner, `elsewhere${DOMAIN}`, { visibleProjectId: p }));
+      await refused(assertRoom(owner, `pending${DOMAIN}`, { visibleProjectId: p }));
+      await refused(assertRoom(owner, `stranger${DOMAIN}`, { visibleProjectId: p }));
+      // Someone already in p, which the admin can see, still needs no new seat.
+      await invite(p, `inp${DOMAIN}`);
+      await refused(assertRoom(owner, `stranger2${DOMAIN}`, { visibleProjectId: p }));
+      await assertRoom(owner, `inp${DOMAIN}`, { visibleProjectId: p });
+    });
+
     it('counts an expired invite as a free seat', async () => {
       const { owner, p } = await limited(2);
       await invite(p, `stale${DOMAIN}`, 'expired');

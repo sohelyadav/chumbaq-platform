@@ -195,7 +195,7 @@ export class InvitationsService {
       }
       await this.assertNotMember(manager, projectId, email);
       if (await this.lockBillingOwner(manager, project)) throw new ForbiddenException(INVITES_SUSPENDED);
-      await this.seats.assertRoomFor(manager, project.ownerId, email);
+      await this.seats.assertRoomFor(manager, project.ownerId, email, visibleTo(project, user.userId));
 
       const pending = await manager.findOne(ProjectInvitationEntity, {
         where: { projectId, email, acceptedAt: IsNull(), revokedAt: IsNull() },
@@ -244,7 +244,7 @@ export class InvitationsService {
       await this.assertNotMember(manager, projectId, invitation.email);
       if (await this.lockBillingOwner(manager, project)) throw new ForbiddenException(INVITES_SUSPENDED);
       // An expired invite holds no seat, so reviving it is checked like a new one.
-      await this.seats.assertRoomFor(manager, project.ownerId, invitation.email);
+      await this.seats.assertRoomFor(manager, project.ownerId, invitation.email, visibleTo(project, user.userId));
       const plan = await this.planEmail(manager, project);
       await this.reissue(manager, invitation.id, token, user.userId, invitation.role);
       await this.log(manager, user.userId, projectId, 'invite.resent', invitation, ctx);
@@ -514,4 +514,9 @@ export class InvitationsService {
     if (!account) throw new BadRequestException(INVITE_GONE);
     return account;
   }
+}
+
+/** For anyone but the billing owner, the seat check may consider this project only (see `assertRoomFor`). */
+function visibleTo(project: { id: string; ownerId: string }, userId: string): { visibleProjectId?: string } {
+  return project.ownerId === userId ? {} : { visibleProjectId: project.id };
 }

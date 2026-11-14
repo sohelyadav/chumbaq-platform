@@ -71,22 +71,36 @@ export class SeatsService {
     manager: EntityManager,
     billingOwnerId: string,
     email: string,
-    opts: { acceptingInvitationId?: string } = {},
+    opts: {
+      acceptingInvitationId?: string;
+      /**
+       * Set when the caller is not the billing owner: the only project whose people they
+       * may know about. Whether someone already holds a seat through the account's
+       * other projects then plays no part, so the answer cannot tell an admin of one
+       * project who belongs to, or is invited to, the others. Such an admin at the
+       * limit is refused even for someone who would take no new seat.
+       */
+      visibleProjectId?: string;
+    } = {},
   ): Promise<void> {
     const limit = await this.seatLimitOf(manager, billingOwnerId);
     if (limit === null) return;
 
     const address = email.trim().toLowerCase();
+    const visible = opts.visibleProjectId ?? null;
     const [{ is_member: isMember, is_invited: isInvited, is_accepting: isAccepting }] = await manager.query(
       `${COUNTED_PEOPLE_SQL}
-       SELECT EXISTS (SELECT 1 FROM counted WHERE email = $3) AS is_member,
+       SELECT EXISTS (SELECT 1 FROM counted c WHERE c.email = $3
+                        AND ($5::uuid IS NULL OR c.id = $1 OR c.id IN (
+                          SELECT m.user_id FROM project_members m WHERE m.project_id = $5::uuid))) AS is_member,
               EXISTS (SELECT 1 FROM project_invitations i
                        WHERE i.project_id IN (SELECT id FROM billed)
+                         AND ($5::uuid IS NULL OR i.project_id = $5::uuid)
                          AND ${LIVE_INVITE_SQL} AND i.email = $3) AS is_invited,
               EXISTS (SELECT 1 FROM project_invitations i
                        WHERE i.id = $4::uuid AND i.project_id IN (SELECT id FROM billed)
                          AND ${LIVE_INVITE_SQL}) AS is_accepting`,
-      [billingOwnerId, null, address, opts.acceptingInvitationId ?? null],
+      [billingOwnerId, null, address, opts.acceptingInvitationId ?? null, visible],
     );
     if (isMember) return;
 
