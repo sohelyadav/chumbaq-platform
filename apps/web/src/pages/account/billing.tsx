@@ -20,14 +20,21 @@ import { toast } from '@/components/ui/use-toast';
 import { useBilling, useBillingEnabled, useCancelBilling, useChangePlan, useSubscribe } from '@/hooks/use-billing';
 import { getImpersonation } from '@/lib/auth';
 import { BILLING_STATE_LABELS, formatPaise, mauShare } from '@/lib/billing-format';
-import { paymentConfirmed, POLL_INTERVAL_MS, POLL_LIMIT_MS } from '@/lib/billing-route';
+import {
+  beforeCheckout,
+  cancelOffer,
+  paymentConfirmed,
+  POLL_INTERVAL_MS,
+  POLL_LIMIT_MS,
+  type BeforeCheckout,
+} from '@/lib/billing-route';
 import { checkoutOptions, loadRazorpayCheckout } from '@/lib/razorpay-checkout';
 
 const count = new Intl.NumberFormat('en-IN');
 const day = (iso: string) => new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
 
 type PlanPick = { plan: BillingPlanOption; interval: BillingInterval; action: 'choose' | 'switch' | 'keep' };
-type Payment = { op: 'subscribe' | 'change'; phase: 'processing' | 'received' | 'still' };
+type Payment = { op: 'subscribe' | 'change'; phase: 'processing' | 'received' | 'still'; before: BeforeCheckout };
 
 /** When the plan renews, ends or changes, in one sentence. */
 function scheduleLine(o: BillingOverview): string | null {
@@ -122,7 +129,7 @@ export default function BillingPage() {
 
   // Done once the webhook has landed; "still processing" after the time limit.
   useEffect(() => {
-    if (payment?.phase === 'processing' && o && paymentConfirmed(payment.op, o)) {
+    if (payment?.phase === 'processing' && o && paymentConfirmed(payment.op, o, payment.before)) {
       setPayment({ ...payment, phase: 'received' });
     }
   }, [o, payment]);
@@ -161,6 +168,8 @@ export default function BillingPage() {
   const start = async (pick: PlanPick) => {
     setBusyPlan(pick.plan.code);
     const op = pick.action === 'choose' ? 'subscribe' : 'change';
+    // Confirmation waits for the subscription this Checkout makes, not the account's state.
+    const before = beforeCheckout(o);
     try {
       const body = { plan: pick.plan.code, interval: pick.interval };
       const checkout = await (op === 'subscribe' ? subscribe.mutateAsync(body) : change.mutateAsync(body));
@@ -169,7 +178,7 @@ export default function BillingPage() {
       const razorpay = new window.Razorpay(
         checkoutOptions(
           checkout,
-          () => setPayment({ op, phase: 'processing' }),
+          () => setPayment({ op, phase: 'processing', before }),
           () => {
             void billing.refetch();
           },
@@ -219,10 +228,11 @@ export default function BillingPage() {
     }
   };
 
-  const canCancel =
-    o?.current &&
-    (o.current.status === 'active' || o.current.status === 'pending') &&
-    !o.current.cancelAtPeriodEnd;
+  const offer = o ? cancelOffer(o) : 'none';
+  const periodEnd = o?.current?.currentPeriodEnd ? day(o.current.currentPeriodEnd) : null;
+  const scheduled = o?.next;
+  const keeping =
+    scheduled && o?.current && scheduled.planCode === o.current.planCode && scheduled.interval === o.current.interval;
 
   return (
     <div className="container mx-auto max-w-5xl space-y-8 px-4 py-8">
@@ -289,7 +299,7 @@ export default function BillingPage() {
             <p className="text-sm text-muted-foreground">
               Prices exclude GST, which is added at checkout. Need more than the largest plan? Contact us.
             </p>
-            {canCancel && (
+            {offer !== 'none' && (
               <Button variant="outline" onClick={() => setConfirmCancel(true)}>
                 Cancel plan
               </Button>
@@ -346,9 +356,11 @@ export default function BillingPage() {
               <DialogHeader>
                 <DialogTitle>Cancel your plan?</DialogTitle>
                 <DialogDescription>
-                  {o.current?.currentPeriodEnd
-                    ? `Your plan stays until ${day(o.current.currentPeriodEnd)}.`
-                    : 'Your plan stays until the end of this period.'}{' '}
+                  {offer === 'drop_change' && scheduled
+                    ? `${keeping ? 'Keeping your plan is undone' : `Your scheduled change to ${scheduled.planName} is dropped`} and your plan ends ${periodEnd ? `on ${periodEnd}` : 'at the end of this period'}.`
+                    : periodEnd
+                      ? `Your plan stays until ${periodEnd}.`
+                      : 'Your plan stays until the end of this period.'}{' '}
                   After that your account moves to Free; nothing is deleted.
                 </DialogDescription>
               </DialogHeader>
