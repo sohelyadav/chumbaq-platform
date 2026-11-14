@@ -97,6 +97,27 @@ limits on sign-up and sign-in treat every test as a separate client.
 
 Locators are the ones a person uses: roles, labels and visible text.
 
+### Factor and browser helpers
+
+`support/factors.ts`: virtual authenticators in their variants (`addAuthenticator`: user
+verification verified, failing or unsupported; synced credentials with the backup flags
+set; listing and removing credentials), `rejectNextCredentialPrompt` (the next WebAuthn
+prompt fails as a dismissed one does), the customer app's passkey screens
+(`enrolTenantPasskey`, `signInWithTenantPasskey`, `signInWithPasskeyAutofill`), and
+authenticator-app codes (`totpCode(secret, offsetSteps)`, `enrolTotp(page | { ip }, account)`
+answering the secret and recovery codes, `nextTotpCode`, `signInWithTotp`). The codes come
+from otplib, not from the API's own implementation. The stack turns on
+`PASSKEYS_FOR_TENANTS` and sets a per-run `MFA_ENCRYPTION_KEY`.
+
+Chromium's virtual authenticator answers the sign-in page's passkey autofill at once, so a
+tab holding a customer passkey signs straight back in on `/login`. Call
+`blockPasskeyAutofill(page)` first when a test means to use the sign-in page itself.
+
+`support/browser-tools.ts`: `readDownload` / `downloadFrom` (bytes, BOM, line endings, and
+the text with BOM and CR made visible), `decodeQr` / `decodeQrOnPage` (jsqr), `mobileContext`
+(iPhone or Pixel), `fixedLocaleContext` (default en-IN, Asia/Kolkata), `allowClipboard` and
+`readClipboard`. `tests/_helpers/factors.spec.ts` shows each in use.
+
 ## Known gaps
 
 - **Chromium only.** WebKit and Firefox are not run yet. WebKit needs its own answer for
