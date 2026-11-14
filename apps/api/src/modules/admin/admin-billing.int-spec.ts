@@ -8,7 +8,9 @@ import { issueStaffSessionForTest } from '../../test-support/staff-session';
 import { REAUTH_REQUIRED_MESSAGE } from '../auth/guards/recent-auth.guard';
 import { BillingOverviewService } from '../billing/billing-overview.service';
 import { netOfTax } from '../billing/money';
-import { BILLING_PROVIDER } from '../billing/providers/billing-provider';
+import { BillingOutboxService } from '../billing/billing-outbox.service';
+import { BILLING_PROVIDER, BillingProviderError } from '../billing/providers/billing-provider';
+import { parkOtherOutboxRows } from '../../test-support/billing-outbox';
 import { AdminAuditService } from './admin-audit.service';
 import { AdminBillingService } from './admin-billing.service';
 
@@ -226,12 +228,20 @@ describe('admin billing API (integration)', () => {
         const subB = await subscription(q, b.id, p, { currentEnd: end, cancelAtPeriodEnd: true });
         const c = await user(q, 'c');
         const subC = await subscription(q, c.id, p, { interval: 'yearly', currentEnd: end });
-        // Comped while paying: not counted as revenue, listed as comped.
+        // Comped while paying: charged all the same, so counted as recurring revenue, and
+        // listed as comped and paying.
         const d = await user(q, 'd');
         await subscription(q, d.id, p, { currentEnd: end });
         await q.query(
           `UPDATE billing_accounts SET comp_plan_code = $2, comp_reason = 'partner', comped_at = $3 WHERE user_id = $1`,
           [d.id, p.code, NOW],
+        );
+        // Comped over a subscription that ended: not paying.
+        const k = await user(q, 'k');
+        await subscription(q, k.id, p, { status: 'cancelled', currentEnd: end });
+        await q.query(
+          `UPDATE billing_accounts SET comp_plan_code = $2, comp_reason = 'trial', comped_at = $3 WHERE user_id = $1`,
+          [k.id, p.code, new Date(NOW.getTime() - 60_000)],
         );
         // Halted three days and an hour ago; payment retried since yesterday (still counted).
         const e = await user(q, 'e');
@@ -274,9 +284,10 @@ describe('admin billing API (integration)', () => {
 
         const after: AdminBillingSummary = await service.summary(NOW, q);
 
-        // Recurring: A, B and F monthly, C yearly; D comped and E halted are not paying.
-        const arrNet = 3 * 99900 * 12 + 999000;
-        const arrGross = 3 * 117882 * 12 + 1178820;
+        // Recurring: A, B, D (comped, still charged) and F monthly, C yearly; E halted and K
+        // (comped, its subscription ended) are not paying.
+        const arrNet = 4 * 99900 * 12 + 999000;
+        const arrGross = 4 * 117882 * 12 + 1178820;
         expect(delta(after.arr, before.arr)).toEqual({ netPaise: arrNet, grossPaise: arrGross, taxPaise: arrGross - arrNet });
         expect(after.mrr.netPaise).toBe(Math.floor(after.arr.netPaise / 12));
         expect(after.mrr.grossPaise).toBe(Math.floor(after.arr.grossPaise / 12));
@@ -284,7 +295,7 @@ describe('admin billing API (integration)', () => {
         expect(after.byPlan.find((row) => row.planCode === p.code)).toEqual({
           planCode: p.code,
           planName: 'Scratch',
-          accounts: 4,
+          accounts: 5,
           mrrNetPaise: Math.floor(arrNet / 12),
         });
 
@@ -313,7 +324,10 @@ describe('admin billing API (integration)', () => {
           netPaise: 0,
         });
         expect(after.recentFailures.every((row) => row.status === 'failed')).toBe(true);
-        expect(after.comped.find((row) => row.tenantId === d.id)).toEqual({ tenantId: d.id, email: d.email, planCode: p.code, until: null, reason: 'partner' });
+        expect(after.comped.filter((row) => [d.id, k.id].includes(row.tenantId))).toEqual([
+          { tenantId: d.id, email: d.email, planCode: p.code, until: null, reason: 'partner', paying: true },
+          { tenantId: k.id, email: k.email, planCode: p.code, until: null, reason: 'trial', paying: false },
+        ]);
         expect(after.cancelling - before.cancelling).toBe(1);
         expect(after.outboxErrors.find((row) => row.subscriptionId === subH.id)).toEqual({
           subscriptionId: subH.id,
@@ -458,6 +472,131 @@ describe('admin billing API (integration)', () => {
       const nothing = await call(on, 'POST', `/tenants/${none.id}/billing/cancel`, { atCycleEnd: false, reason: REASON });
       expect([nothing.status, nothing.message]).toEqual([409, JSON.stringify('There is no subscription to cancel.')]);
       expect((await call(on, 'POST', `/tenants/${t.id}/billing/cancel`, { atCycleEnd: 'false', reason: REASON })).status).toBe(400);
+    });
+  });
+
+  describe('cancel: the other paths', () => {
+    const providerSub = (id: string, status: 'active' | 'authenticated' | 'created') =>
+      fake.setSubscription({
+        id,
+        planId: 'plan_x',
+        customerId: null,
+        status,
+        currentStart: null,
+        currentEnd: null,
+        startAt: null,
+        chargeAt: null,
+        endedAt: null,
+        paidCount: status === 'active' ? 1 : 0,
+        shortUrl: null,
+      });
+    const cancelColumns = (id: string) =>
+      ds
+        .query(
+          `SELECT cancel_at_period_end, cancel_at_cycle_end, cancel_requested_at IS NOT NULL AS requested,
+                  cancel_requested_by, cancel_sent_at IS NOT NULL AS sent
+             FROM billing_subscriptions WHERE id = $1`,
+          [id],
+        )
+        .then((rows: unknown[]) => rows[0]);
+    const pointers = (userId: string) =>
+      ds
+        .query(`SELECT current_subscription_id, next_subscription_id FROM billing_accounts WHERE user_id = $1`, [userId])
+        .then((rows: unknown[]) => rows[0]);
+    const untouched = {
+      cancel_at_period_end: false,
+      cancel_at_cycle_end: null,
+      requested: false,
+      cancel_requested_by: null,
+      sent: false,
+    };
+
+    it.each(['authenticated', 'created'] as const)(
+      'queues a waiting %s successor for the outbox to cancel at once, and drops it from the account',
+      async (nextStatus) => {
+        const p = await plan();
+        const t = await user();
+        const current = await subscription(ds, t.id, p);
+        providerSub(current.providerId, 'active');
+        const next = await subscription(ds, t.id, p, { status: nextStatus, current: false, wasCurrent: false });
+        providerSub(next.providerId, nextStatus);
+        await ds.query(`UPDATE billing_accounts SET next_subscription_id = $2 WHERE user_id = $1`, [t.id, next.id]);
+
+        const res = await call(on, 'POST', `/tenants/${t.id}/billing/cancel`, { atCycleEnd: true, reason: REASON });
+        expect(res.status).toBe(200);
+        // Only the current one is cancelled by the request; the successor goes to the outbox.
+        expect(fake.callsOf('cancelSubscription').filter(([id]) => id === next.providerId)).toEqual([]);
+        expect(await cancelColumns(next.id)).toEqual({
+          cancel_at_period_end: false,
+          cancel_at_cycle_end: false,
+          requested: true,
+          cancel_requested_by: staff.id,
+          sent: false,
+        });
+        expect(await pointers(t.id)).toEqual({ current_subscription_id: current.id, next_subscription_id: null });
+        expect((res.data as AdminTenantBilling).overview.next).toBeNull();
+
+        await parkOtherOutboxRows(ds, [t.id]);
+        expect(await new BillingOutboxService(ds, fake).runOnce()).toBe(1);
+        expect(fake.callsOf('cancelSubscription').filter(([id]) => id === next.providerId)).toEqual([[next.providerId, false]]);
+        expect(await cancelColumns(next.id)).toMatchObject({ sent: true, cancel_at_period_end: false });
+      },
+    );
+
+    it('cancels a live subscription at once without marking it as ending at the period end', async () => {
+      const p = await plan();
+      const t = await user();
+      const sub = await subscription(ds, t.id, p);
+      providerSub(sub.providerId, 'active');
+
+      const res = await call(on, 'POST', `/tenants/${t.id}/billing/cancel`, { atCycleEnd: false, reason: REASON });
+      expect(res.status).toBe(200);
+      expect(fake.callsOf('cancelSubscription').filter(([id]) => id === sub.providerId)).toEqual([[sub.providerId, false]]);
+      expect(await cancelColumns(sub.id)).toEqual({
+        cancel_at_period_end: false,
+        cancel_at_cycle_end: false,
+        requested: true,
+        cancel_requested_by: staff.id,
+        sent: true,
+      });
+      expect((await auditOf('billing.subscription_cancelled', t.id)).map((r: { metadata: unknown }) => r.metadata)).toEqual([
+        { subscriptionId: sub.id, atCycleEnd: false },
+      ]);
+    });
+
+    it('answers 502 and records nothing when the provider refuses', async () => {
+      const p = await plan();
+      const t = await user();
+      const sub = await subscription(ds, t.id, p);
+      providerSub(sub.providerId, 'active');
+      fake.failNext('cancelSubscription', new BillingProviderError(400, 'BAD_REQUEST_ERROR', 'Something went wrong'));
+
+      const res = await call(on, 'POST', `/tenants/${t.id}/billing/cancel`, { atCycleEnd: true, reason: REASON });
+      expect([res.status, res.message]).toEqual([502, JSON.stringify('Razorpay could not cancel the subscription. Try again later.')]);
+      expect(await cancelColumns(sub.id)).toEqual(untouched);
+      expect(await auditOf('billing.subscription_cancelled', t.id)).toEqual([]);
+    });
+
+    it('answers 409 and records nothing when the current subscription changed during the provider call', async () => {
+      const p = await plan();
+      const t = await user();
+      const sub = await subscription(ds, t.id, p);
+      providerSub(sub.providerId, 'active');
+      const replacement = await subscription(ds, t.id, p, { current: false });
+      const spy = jest.spyOn(fake, 'cancelSubscription').mockImplementationOnce(async (id, atCycleEnd) => {
+        // A webhook makes another subscription current while the request is at the provider.
+        await ds.query(`UPDATE billing_accounts SET current_subscription_id = $2 WHERE user_id = $1`, [t.id, replacement.id]);
+        return FakeBillingProvider.prototype.cancelSubscription.call(fake, id, atCycleEnd);
+      });
+      try {
+        const res = await call(on, 'POST', `/tenants/${t.id}/billing/cancel`, { atCycleEnd: true, reason: REASON });
+        expect([res.status, res.message]).toEqual([409, JSON.stringify('The subscription changed meanwhile. Try again.')]);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await cancelColumns(sub.id)).toEqual(untouched);
+      expect(await cancelColumns(replacement.id)).toEqual(untouched);
+      expect(await auditOf('billing.subscription_cancelled', t.id)).toEqual([]);
     });
   });
 

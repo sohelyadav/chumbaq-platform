@@ -118,6 +118,14 @@ const KEPT_GROSS_SQL = `(p.amount_paise - p.amount_refunded_paise)::bigint`;
 const KEPT_NET_SQL = `((${KEPT_GROSS_SQL} * 20000 + (10000 + p.tax_rate_bps)) / (2 * (10000 + p.tax_rate_bps)))`;
 const REVENUE_STATUSES = `p.status IN ('captured', 'refunded')`;
 
+/**
+ * The account's current subscription charges on its own (`cur` is it): active, or
+ * pending while the provider retries a payment. Counted as recurring revenue whatever
+ * the comp: a comped account may still subscribe (the comp gives the plan meanwhile),
+ * and its charges are revenue like anyone's, so MRR agrees with the money received.
+ */
+const PAYING_SQL = `cur.status IN ('active', 'pending')`;
+
 /** A comp is in force with no end, or until a time still ahead. */
 const COMP_ACTIVE_SQL = (now: string) =>
   `(ba.comp_plan_code IS NOT NULL AND (ba.comp_until IS NULL OR ba.comp_until > ${now}))`;
@@ -201,8 +209,7 @@ export class AdminBillingService {
          FROM billing_accounts ba
          JOIN billing_subscriptions cur ON cur.id = ba.current_subscription_id
          JOIN plan_prices pp ON pp.id = cur.price_id
-        WHERE cur.status IN ('active', 'pending') AND NOT ${COMP_ACTIVE_SQL('$1')}`,
-      [now],
+        WHERE ${PAYING_SQL}`,
     );
     const money = summariseMoney(
       recurring.map((r) => ({
@@ -264,10 +271,20 @@ export class AdminBillingService {
       `${PAYMENT_SELECT} WHERE p.status = 'failed' ORDER BY p.paid_at DESC, p.id LIMIT ${RECENT_PAYMENTS}`,
     );
 
-    const comped: Array<{ user_id: string; email: string; comp_plan_code: string; comp_until: Date | null; comp_reason: string | null }> =
+    const comped: Array<{
+      user_id: string;
+      email: string;
+      comp_plan_code: string;
+      comp_until: Date | null;
+      comp_reason: string | null;
+      paying: boolean;
+    }> =
       await manager.query(
-        `SELECT ba.user_id, u.email, ba.comp_plan_code, ba.comp_until, ba.comp_reason
-           FROM billing_accounts ba JOIN users u ON u.id = ba.user_id
+        `SELECT ba.user_id, u.email, ba.comp_plan_code, ba.comp_until, ba.comp_reason,
+                (cur.id IS NOT NULL AND ${PAYING_SQL}) AS paying
+           FROM billing_accounts ba
+           JOIN users u ON u.id = ba.user_id
+           LEFT JOIN billing_subscriptions cur ON cur.id = ba.current_subscription_id
           WHERE ${COMP_ACTIVE_SQL('$1')}
           ORDER BY ba.comped_at DESC NULLS LAST, ba.user_id`,
         [now],
@@ -308,6 +325,7 @@ export class AdminBillingService {
         planCode: r.comp_plan_code,
         until: iso(r.comp_until),
         reason: r.comp_reason ?? '',
+        paying: r.paying,
       })),
       cancelling,
       outboxErrors: outbox.map((r) => ({

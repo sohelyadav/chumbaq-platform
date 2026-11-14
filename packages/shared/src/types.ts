@@ -1617,7 +1617,10 @@ export interface AdminBillingPayment {
 }
 
 export interface AdminBillingSummary {
-  /** Monthly recurring revenue of paying accounts (comps excluded). */
+  /**
+   * Monthly recurring revenue: every account whose current subscription is active or
+   * pending, comped or not (a comped account that subscribed is charged all the same).
+   */
   mrr: MoneySplit;
   arr: MoneySplit;
   byPlan: { planCode: string; planName: string; accounts: number; mrrNetPaise: number }[];
@@ -1638,7 +1641,8 @@ export interface AdminBillingSummary {
   /** The 20 newest failed payments. */
   recentFailures: AdminBillingPayment[];
   overMau: { tenantId: string; email: string; planCode: string; mau: number; limit: number }[];
-  comped: { tenantId: string; email: string; planCode: string; until: string | null; reason: string }[];
+  /** Comps in force. `paying`: the account also has a subscription charging it, counted in MRR. */
+  comped: { tenantId: string; email: string; planCode: string; until: string | null; reason: string; paying: boolean }[];
   /** Accounts whose subscription ends at the period end. */
   cancelling: number;
   /** Cancels the worker could not send yet; `error` is the provider's answer as stored. */

@@ -152,8 +152,8 @@ export default function BillingPage() {
       <div>
         <h1 className="text-3xl font-bold">Billing</h1>
         <p className="mt-1 text-muted-foreground">
-          Paying accounts and money received. Amounts exclude GST unless they say otherwise; comped accounts are not
-          revenue.
+          Paying accounts and money received. Amounts exclude GST unless they say otherwise. A comp is not revenue,
+          but a comped account that also subscribed is charged, so it counts.
         </p>
       </div>
 
@@ -284,6 +284,7 @@ export default function BillingPage() {
                   <TableHead>Plan</TableHead>
                   <TableHead>Until</TableHead>
                   <TableHead>Reason</TableHead>
+                  <TableHead>Also paying</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -295,6 +296,9 @@ export default function BillingPage() {
                     <TableCell className="font-mono text-xs">{row.planCode}</TableCell>
                     <TableCell className="whitespace-nowrap text-sm">{row.until ? date(row.until) : 'Until ended'}</TableCell>
                     <TableCell className="max-w-[360px] whitespace-pre-wrap break-words text-sm">{row.reason}</TableCell>
+                    <TableCell className="whitespace-nowrap text-sm">
+                      {row.paying ? 'Yes: a subscription charges it' : 'No'}
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>

@@ -296,16 +296,41 @@ describe('admin plans API (integration)', () => {
 
     const free = await call(on, 'POST', '/plans/free/prices', { interval: 'monthly', pricePaise: 100, razorpayPlanId: rzpPlanId(), reason: REASON });
     expect([free.status, free.message]).toEqual([400, JSON.stringify('The Free plan has no price.')]);
-    // The client never names the charged amount.
+  });
+
+  it('refuses a charged amount named by the client and a malformed Razorpay plan id', async () => {
+    const code = await newPlan();
+    // A plan Razorpay has and that matches, so the only thing wrong is the extra field.
+    const id = rzpPlanId();
+    fake.seedPlan({ id, period: 'monthly', interval: 1, amountPaise: 117882, currency: 'INR' });
     const extra = await call(on, 'POST', `/plans/${code}/prices`, {
       interval: 'monthly',
       pricePaise: 99900,
       amountPaise: 117882,
-      razorpayPlanId: rzpPlanId(),
+      razorpayPlanId: id,
       reason: REASON,
     });
-    expect(extra.status).toBe(400);
-    expect((await call(on, 'POST', `/plans/${code}/prices`, { interval: 'monthly', pricePaise: 99900, razorpayPlanId: 'plan_short', reason: REASON })).status).toBe(400);
+    expect([extra.status, extra.message]).toEqual([400, JSON.stringify(['property amountPaise should not exist'])]);
+    expect(await priceRows(code)).toEqual([]);
+
+    // The malformed id is refused by its pattern, before Razorpay is asked about it.
+    fake.seedPlan({ id: 'plan_short', period: 'monthly', interval: 1, amountPaise: 117882, currency: 'INR' });
+    const short = await call(on, 'POST', `/plans/${code}/prices`, {
+      interval: 'monthly',
+      pricePaise: 99900,
+      razorpayPlanId: 'plan_short',
+      reason: REASON,
+    });
+    expect([short.status, short.message]).toEqual([
+      400,
+      JSON.stringify(['razorpayPlanId must be a Razorpay plan id (plan_ and 14 letters or digits)']),
+    ]);
+    expect(await priceRows(code)).toEqual([]);
+
+    // The same request with the extra field dropped is accepted, so neither refusal above
+    // came from the plan itself.
+    const ok = await call(on, 'POST', `/plans/${code}/prices`, { interval: 'monthly', pricePaise: 99900, razorpayPlanId: id, reason: REASON });
+    expect(ok.status).toBe(201);
   });
 
   it('retires a current price once', async () => {
