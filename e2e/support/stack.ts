@@ -169,6 +169,8 @@ export interface RunSecrets {
   jwtRefreshSecret: string;
   /** CREDENTIALS_ENCRYPTION_KEY: the seed helpers store channel credentials with it. */
   credentialsKey: string;
+  /** MFA_ENCRYPTION_KEY (32 bytes of base64): encrypts TOTP secrets, keys recovery codes. */
+  mfaKey: string;
   razorpayKeyId: string;
   razorpayKeySecret: string;
   razorpayWebhookSecret: string;
@@ -179,6 +181,7 @@ export function newRunSecrets(): RunSecrets {
     jwtSecret: randomBytes(32).toString('hex'),
     jwtRefreshSecret: randomBytes(32).toString('hex'),
     credentialsKey: randomBytes(32).toString('hex'),
+    mfaKey: randomBytes(32).toString('base64'),
     // Obviously fake: Razorpay's key shape, a test-mode prefix and a mock-only body.
     razorpayKeyId: 'rzp_test_E2eMockOnly000',
     razorpayKeySecret: `e2e-fake-${randomBytes(8).toString('hex')}`,
@@ -190,6 +193,7 @@ const SECRET_VARS: Record<keyof RunSecrets, string> = {
   jwtSecret: 'E2E_JWT_SECRET',
   jwtRefreshSecret: 'E2E_JWT_REFRESH_SECRET',
   credentialsKey: 'E2E_CREDENTIALS_ENCRYPTION_KEY',
+  mfaKey: 'E2E_MFA_ENCRYPTION_KEY',
   razorpayKeyId: 'E2E_RAZORPAY_KEY_ID',
   razorpayKeySecret: 'E2E_RAZORPAY_KEY_SECRET',
   razorpayWebhookSecret: 'E2E_RAZORPAY_WEBHOOK_SECRET',
@@ -225,6 +229,10 @@ export function appEnvironment(secrets: RunSecrets, ports: StackPorts): Record<s
     JWT_REFRESH_SECRET: secrets.jwtRefreshSecret,
     // The database starts empty each run, so nothing is encrypted under the .env's key.
     CREDENTIALS_ENCRYPTION_KEY: secrets.credentialsKey,
+    // Authenticator apps and recovery codes on (they need the key), and passkeys for
+    // tenants, so the customer app's factor screens exist whatever the .env says.
+    MFA_ENCRYPTION_KEY: secrets.mfaKey,
+    PASSKEYS_FOR_TENANTS: 'true',
     // Billing on, against the local mock only. Fake keys; the mock checks the pair.
     BILLING_ENABLED: 'true',
     RAZORPAY_KEY_ID: secrets.razorpayKeyId,
