@@ -152,6 +152,8 @@ export function appEnvironment(secrets: RunSecrets, ports: StackPorts): Record<s
     RAZORPAY_KEY_SECRET: secrets.razorpayKeySecret,
     RAZORPAY_WEBHOOK_SECRET: secrets.razorpayWebhookSecret,
     RAZORPAY_API_BASE_URL: `http://127.0.0.1:${ports.razorpayMock}/v1`,
+    // No tax, whatever the .env says, so a price's charged amount is the price itself.
+    BILLING_TAX_RATE_BPS: '0',
     // No account email can leave the machine, whatever the .env holds.
     PLATFORM_BREVO_API_KEY: '',
     PLATFORM_EMAIL_FROM: '',

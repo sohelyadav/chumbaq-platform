@@ -44,7 +44,7 @@ test('compose an email to everyone, see who it reaches, and schedule it', async 
   await optInOnly.click();
   await expect(optInOnly).not.toBeChecked();
   await page.getByRole('button', { name: 'Save sender' }).click();
-  await expect(page.getByText('Sender saved')).toBeVisible();
+  await expect(page.getByText('Sender saved', { exact: true })).toBeVisible();
 
   await connectFakeEmailProvider(project.id);
   await page.reload();

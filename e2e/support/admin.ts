@@ -43,3 +43,42 @@ export async function addVirtualAuthenticator(page: Page): Promise<{ cdp: CDPSes
   });
   return { cdp, authenticatorId };
 }
+
+/**
+ * A super admin's first staff sign-in, through the admin app: the password opens an
+ * enrolment-only session, a passkey is added on /enrol with the tab's virtual
+ * authenticator, and the person signs in with it. Answers the staff access token, for
+ * setting things up through the admin API (it carries a fresh sign-in, which staff
+ * writes need).
+ */
+export async function enrolAndSignInStaff(page: Page, staff: { email: string; password: string }): Promise<string> {
+  await addVirtualAuthenticator(page);
+  await page.goto(adminUrl('/sign-in'));
+  await page.getByLabel('Email').fill(staff.email);
+  await page.getByLabel('Password', { exact: true }).fill(staff.password);
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByLabel('Passkey name').fill('E2E virtual authenticator');
+  await page.getByRole('button', { name: 'Add a passkey' }).click();
+  await page.getByText('Done. Sign in with your new passkey.').waitFor();
+  const [verified] = await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith('/api/staff/auth/passkey/verify')),
+    page.getByRole('button', { name: 'Sign in with a passkey' }).click(),
+  ]);
+  if (!verified.ok()) throw new Error(`Staff passkey sign-in answered ${verified.status()}`);
+  const body = (await verified.json()) as { data: { accessToken: string } };
+  return body.data.accessToken;
+}
+
+/** A request to the admin API with a staff token; answers the `data` of its envelope. */
+export async function adminApi<T = unknown>(method: string, path: string, body: unknown, token: string, ip: string): Promise<T> {
+  const base = process.env.E2E_ADMIN_API_URL;
+  if (!base) throw new Error('E2E_ADMIN_API_URL is not set: run the specs through playwright.config.ts');
+  const response = await fetch(`${base}${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'X-Forwarded-For': ip },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`${method} ${path} answered ${response.status}: ${text.slice(0, 500)}`);
+  return (JSON.parse(text) as { data: T }).data;
+}

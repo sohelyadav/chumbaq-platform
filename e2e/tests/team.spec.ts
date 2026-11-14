@@ -71,7 +71,7 @@ test('owner invites a member, who accepts, sees no owner-only pages, and is remo
   await page.getByRole('button', { name: `Remove ${mate.name}` }).click();
   const confirm = page.getByRole('dialog', { name: `Remove ${mate.name}?` });
   await confirm.getByRole('button', { name: 'Remove', exact: true }).click();
-  await expect(page.getByText('Removed from the project')).toBeVisible();
+  await expect(page.getByText('Removed from the project', { exact: true })).toBeVisible();
   await expect(mateRow).toHaveCount(0);
 
   // Teammate: the project is no longer theirs.
