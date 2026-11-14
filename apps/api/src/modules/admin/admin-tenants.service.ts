@@ -27,6 +27,7 @@ import { toAuditLog } from './admin-audit-logs.service';
 import { AdminTenantsFilterDto, ListAdminTenantsDto } from './dto/admin-tenants.dto';
 import { QUIET_AFTER_DAYS, TenantUsageAggregate, tenantUsageCte } from './admin-usage.service';
 import { readUsageCoverage } from '../usage/usage-rollup.service';
+import { TENANT_EXPORT_ROW_CAP, toTenantsCsv } from './tenants-csv';
 import { AdminAuditLogEntity } from './entities/admin-audit-log.entity';
 
 export interface AdminActor {
@@ -139,6 +140,15 @@ function usageOfRow(row: Pick<TenantListRow, 'mau' | 'messages' | 'lastUsageDay'
   };
 }
 
+/** What the export was asked for, so its audit row reads as the request did. */
+function appliedTenantFilters(filters: AdminTenantsFilterDto): Record<string, unknown> {
+  const applied: Record<string, unknown> = { sort: filters.sort, order: filters.order };
+  if (filters.search !== undefined) applied.search = filters.search;
+  if (filters.status !== undefined) applied.status = filters.status;
+  if (filters.activity !== undefined) applied.activity = filters.activity;
+  return applied;
+}
+
 /** `\` first, or it would re-escape the backslashes added for `%` and `_`. */
 function escapeLikePattern(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
@@ -196,6 +206,57 @@ export class AdminTenantsService {
         countedThrough,
       },
     };
+  }
+
+  /**
+   * The list as a CSV file: the same filters and sort, unpaged, at most `cap`
+   * rows (the route never passes one). Holds the account and its usage counts,
+   * with the project count but none of the other per-tenant counts. Audited
+   * before the file leaves: an export that could not be recorded is not served.
+   */
+  async exportCsv(
+    filters: AdminTenantsFilterDto,
+    actor: AdminActor,
+    cap: number = TENANT_EXPORT_ROW_CAP,
+  ): Promise<{ csv: string; rowCount: number; truncated: boolean }> {
+    const manager = this.userRepository.manager;
+    const coverage = await readUsageCoverage(manager);
+    const countedThrough = coverage?.countedThrough ?? null;
+    const { sql, params } = filteredTenantsSql(filters, countedThrough);
+    // One past the cap, to know whether the cap cut anything off.
+    const rows: TenantListRow[] = await manager.query(`${sql} LIMIT $${params.length + 1}`, [...params, cap + 1]);
+    const truncated = rows.length > cap;
+    const kept = truncated ? rows.slice(0, cap) : rows;
+    const projects = await this.projectCounts(kept.map((row) => row.id));
+
+    await this.auditService.record({
+      actorId: actor.userId,
+      actorEmail: actor.email,
+      action: 'tenants.exported',
+      targetType: 'tenant_list',
+      metadata: {
+        filters: appliedTenantFilters(filters),
+        rowCount: kept.length,
+        rowCap: cap,
+        truncated,
+      },
+      ipAddress: actor.ipAddress || null,
+    });
+
+    const csv = toTenantsCsv(
+      kept.map((row) => ({
+        id: row.id,
+        email: row.email,
+        name: row.name,
+        status: row.suspendedAt ? 'suspended' : 'active',
+        isSuperAdmin: row.isSuperAdmin,
+        createdAt: new Date(row.createdAt).toISOString(),
+        projectCount: projects.get(row.id) ?? 0,
+        ...usageOfRow(row),
+      })),
+      countedThrough,
+    );
+    return { csv, rowCount: kept.length, truncated };
   }
 
   /**

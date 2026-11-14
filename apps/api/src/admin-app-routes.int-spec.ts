@@ -42,6 +42,7 @@ const ADMIN_ROUTES = [
   'GET /api/admin/overview',
   'GET /api/admin/health',
   'GET /api/admin/tenants',
+  'GET /api/admin/tenants/export',
   'GET /api/admin/tenants/:id',
   'GET /api/admin/tenants/:id/usage',
   'POST /api/admin/tenants/:id/suspend',

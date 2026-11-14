@@ -6,7 +6,8 @@ import { UserEntity } from '../users/entities/user.entity';
 import { AdminAuditService } from './admin-audit.service';
 import { AdminActor, AdminTenantsService } from './admin-tenants.service';
 import { SeatsService } from '../project-access/seats.service';
-import { ListAdminTenantsDto } from './dto/admin-tenants.dto';
+import { AdminTenantsFilterDto, ListAdminTenantsDto } from './dto/admin-tenants.dto';
+import { TENANT_CSV_HEADER } from './tenants-csv';
 import { AdminAuditLogEntity } from './entities/admin-audit-log.entity';
 
 // Every fixture carries this domain and every list query is scoped by it, so
@@ -464,6 +465,61 @@ describe('AdminTenantsService (integration)', () => {
       } finally {
         await ds.query(`DELETE FROM auth_events WHERE user_id = $1`, [heavy]);
       }
+    });
+
+    it('exports the filtered list up to the cap, audited with what was asked', async () => {
+      const filters = Object.assign(new AdminTenantsFilterDto(), { search: DOMAIN, activity: 'never_used' as const });
+
+      const result = await service.exportCsv(filters, actor, 2);
+
+      expect(result.rowCount).toBe(2);
+      expect(result.truncated).toBe(true);
+      const lines = result.csv.split('\r\n').filter((line) => line.length > 0);
+      expect(lines[0]).toBe(TENANT_CSV_HEADER.join(','));
+      expect(lines).toHaveLength(3);
+      expect(lines[1].split(',').slice(0, 2)).toEqual([fresh, `fresh${DOMAIN}`]);
+      expect(lines[2].split(',').slice(0, 2)).toEqual([never, `never${DOMAIN}`]);
+      for (const line of lines) expect(line.split(',')).toHaveLength(TENANT_CSV_HEADER.length);
+
+      const [audit] = await ds.query(
+        `SELECT action, actor_id, target_type, metadata FROM admin_audit_logs
+          WHERE action = 'tenants.exported' AND actor_id = $1`,
+        [actor.userId],
+      );
+      expect(audit).toEqual({
+        action: 'tenants.exported',
+        actor_id: actor.userId,
+        target_type: 'tenant_list',
+        metadata: {
+          filters: { search: DOMAIN, activity: 'never_used', sort: 'created_at', order: 'desc' },
+          rowCount: 2,
+          rowCap: 2,
+          truncated: true,
+        },
+      });
+    });
+
+    it('exports usage columns sorted as asked, and says when nothing was cut', async () => {
+      const filters = Object.assign(new AdminTenantsFilterDto(), {
+        search: DOMAIN,
+        sort: 'messages_sent_30d' as const,
+      });
+
+      const result = await service.exportCsv(filters, actor);
+
+      expect(result.truncated).toBe(false);
+      const [, first] = result.csv.split('\r\n');
+      const cells = first.split(',');
+      const column = (name: (typeof TENANT_CSV_HEADER)[number]) => cells[TENANT_CSV_HEADER.indexOf(name)];
+      expect(cells[0]).toBe(heavy);
+      expect(column('projects')).toBe('1');
+      expect(column('mau_this_month')).toBe('5');
+      expect(column('messages_sent_30d')).toBe('50');
+      expect(column('last_usage_day')).toBe('2026-11-13');
+      expect(column('counted_through')).toBe('2026-11-13');
+      expect(column('status')).toBe('active');
+      expect(column('signed_up_at')).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      expect(result.csv).not.toContain(PASSWORD_HASH);
     });
 
     it('gives nothing counted before the roll-up has run', async () => {
