@@ -5,9 +5,10 @@ import {
   InternalServerErrorException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { QueryFailedError, Repository } from 'typeorm';
+import { EntityManager, Not, QueryFailedError, Repository } from 'typeorm';
 import { nanoid } from 'nanoid';
 import { LinkEntity } from './entities/link.entity';
+import { ReleasedShortCodeEntity } from './entities/released-short-code.entity';
 import { CreateLinkDto } from './dto/create-link.dto';
 import { UpdateLinkDto } from './dto/update-link.dto';
 import { PaginationDto } from '../../common/dto/pagination.dto';
@@ -60,6 +61,8 @@ export class LinksService {
   constructor(
     @InjectRepository(LinkEntity)
     private readonly linkRepository: Repository<LinkEntity>,
+    @InjectRepository(ReleasedShortCodeEntity)
+    private readonly releasedCodes: Repository<ReleasedShortCodeEntity>,
     private readonly activity: ProjectActivityService,
   ) {}
 
@@ -69,7 +72,7 @@ export class LinksService {
   ): Promise<LinkEntity> {
     const { shortCode: customShortCode, ...linkData } = dto;
     const shortCode = customShortCode
-      ? await this.claimCustomShortCode(customShortCode)
+      ? await this.claimCustomShortCode(projectId, customShortCode)
       : await this.generateUniqueShortCode();
 
     const link = this.linkRepository.create({
@@ -78,20 +81,30 @@ export class LinksService {
       projectId,
     });
 
-    try {
-      return await this.linkRepository.save(link);
-    } catch (err) {
-      // Race: another request may have claimed the same custom slug between
-      // our existence check and the insert. The unique index on short_code
-      // catches it — translate to 409 so the client sees the same error as
-      // the pre-check path.
-      if (customShortCode && this.isUniqueViolation(err)) {
-        throw new ConflictException(
-          `Short code "${customShortCode}" is already taken`,
-        );
+    return this.linkRepository.manager.transaction(async (manager) => {
+      let saved: LinkEntity;
+      try {
+        saved = await manager.getRepository(LinkEntity).save(link);
+      } catch (err) {
+        // Race: another request may have claimed the same custom slug between
+        // our existence check and the insert. The unique index on short_code
+        // catches it — translate to 409 so the client sees the same error as
+        // the pre-check path.
+        if (customShortCode && this.isUniqueViolation(err)) {
+          throw new ConflictException(
+            `Short code "${customShortCode}" is already taken`,
+          );
+        }
+        throw err;
       }
-      throw err;
-    }
+      // Another project may have created and deleted a link with this code between the
+      // checks above and this insert. Its release is committed by now, and this
+      // transaction holds the code, so a second look closes that gap.
+      if (await this.releasedToAnotherProject(manager, shortCode, projectId)) {
+        throw new ConflictException(`Short code "${shortCode}" is already taken`);
+      }
+      return saved;
+    });
   }
 
   async findAllByProject(
@@ -200,7 +213,8 @@ export class LinksService {
       const existing = await this.linkRepository.findOne({
         where: { shortCode },
       });
-      if (!existing) {
+      const released = await this.releasedCodes.findOne({ where: { shortCode } });
+      if (!existing && !released) {
         return shortCode;
       }
     }
@@ -209,7 +223,12 @@ export class LinksService {
     );
   }
 
-  private async claimCustomShortCode(shortCode: string): Promise<string> {
+  /**
+   * A code is free when no link holds it and no other project ever released it: a URL
+   * already given out must not start sending its visitors somewhere else. The project
+   * that released a code may take it back.
+   */
+  private async claimCustomShortCode(projectId: string, shortCode: string): Promise<string> {
     if (RESERVED_SHORT_CODES.has(shortCode.toLowerCase())) {
       throw new ConflictException(
         `"${shortCode}" is a reserved word and cannot be used as a short code`,
@@ -218,12 +237,23 @@ export class LinksService {
     const existing = await this.linkRepository.findOne({
       where: { shortCode },
     });
-    if (existing) {
+    if (existing || (await this.releasedToAnotherProject(this.linkRepository.manager, shortCode, projectId))) {
       throw new ConflictException(
         `Short code "${shortCode}" is already taken`,
       );
     }
     return shortCode;
+  }
+
+  private async releasedToAnotherProject(
+    manager: EntityManager,
+    shortCode: string,
+    projectId: string,
+  ): Promise<boolean> {
+    const released = await manager
+      .getRepository(ReleasedShortCodeEntity)
+      .findOne({ where: { shortCode, projectId: Not(projectId) } });
+    return released !== null;
   }
 
   private isUniqueViolation(err: unknown): boolean {

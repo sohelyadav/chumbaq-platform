@@ -8,6 +8,7 @@ import {
 import { QueryFailedError } from 'typeorm';
 import { LinksService } from './links.service';
 import { LinkEntity } from './entities/link.entity';
+import { ReleasedShortCodeEntity } from './entities/released-short-code.entity';
 import { PaginationDto } from '../../common/dto/pagination.dto';
 import { nanoid } from 'nanoid';
 import { ProjectActivityService } from '../project-activity/project-activity.service';
@@ -45,6 +46,9 @@ describe('LinksService', () => {
     delete: jest.fn(async () => ({ affected: 1 })),
   };
 
+  // Short codes released by deleted links: none unless a test adds one.
+  const releasedRepo = { findOne: jest.fn(async () => null) };
+
   const makePagination = (overrides: Partial<PaginationDto> = {}): PaginationDto => {
     const p = new PaginationDto();
     Object.assign(p, { page: 1, limit: 20, ...overrides });
@@ -66,13 +70,17 @@ describe('LinksService', () => {
 
     // Deletes and status changes write their activity entry in the same transaction.
     Object.assign(linkRepo, {
-      manager: { transaction: async (work: (m: unknown) => unknown) => work({ getRepository: () => linkRepo }) },
+      manager: {
+        transaction: async (work: (m: unknown) => unknown) => work((linkRepo as unknown as { manager: unknown }).manager),
+        getRepository: (entity: unknown) => (entity === ReleasedShortCodeEntity ? releasedRepo : linkRepo),
+      },
     });
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         { provide: ProjectActivityService, useValue: activity },
         LinksService,
         { provide: getRepositoryToken(LinkEntity), useValue: linkRepo },
+        { provide: getRepositoryToken(ReleasedShortCodeEntity), useValue: releasedRepo },
       ],
     }).compile();
 
