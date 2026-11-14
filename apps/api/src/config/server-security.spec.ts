@@ -144,6 +144,24 @@ describe('scripts/server-security.sh', () => {
       expect(conf()).toContain('$time_iso8601');
     });
 
+    // nginx writes to every error_log declared at a level, so the distribution's own
+    // (default level, request lines included) must go, as its access_log does.
+    it("comments out the distribution's own access_log and error_log, and nothing else", () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "nginx-conf-"));
+      const file = path.join(dir, "nginx.conf");
+      writeFileSync(
+        file,
+        'http {\n\taccess_log /var/log/nginx/access.log;\n\terror_log /var/log/nginx/error.log;\n\terror_log /var/log/nginx/error.log crit;\n}\n',
+      );
+      // GNU sed on the server; BSD sed (macOS) needs an empty suffix after -i.
+      const sudo = `sudo() { if [ "$1" = sed ] && [ "$2" = -i ] && ! sed --version >/dev/null 2>&1; then shift 2; sed -i '' "$@"; else "$@"; fi; }`;
+      expect(run(`${sudo}\nneutralise_distribution_logs "${file}"`).ok).toBe(true);
+      const out = readFileSync(file, 'utf8');
+      expect(out).toMatch(/^\t# access_log \/var\/log\/nginx\/access\.log;/m);
+      expect(out).toMatch(/^\t# error_log \/var\/log\/nginx\/error\.log;/m);
+      expect(out).toMatch(/^\terror_log \/var\/log\/nginx\/error\.log crit;$/m);
+    });
+
     it('keeps the error log to critical errors, which never carry a request line', () => {
       expect(conf()).toMatch(/^error_log \/var\/log\/nginx\/error\.log crit;$/m);
     });

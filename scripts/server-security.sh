@@ -368,12 +368,23 @@ setup_clock() {
   return 1
 }
 
+# $1 = the distribution's nginx.conf. Its own access_log and error_log lines are
+# commented out, so conf.d/chumbaq-logging.conf decides both: the access_log logs full
+# request lines (query strings too), and the error_log, at nginx's default level,
+# repeats the request line (webhook tokens in the path, unsubscribe query strings) of
+# every error. A second error_log does not replace the first; nginx writes to both.
+neutralise_distribution_logs() {
+  sudo sed -i -E \
+    -e 's/^([[:space:]]*)access_log[[:space:]]+\/var\/log\/nginx\/access\.log;/\1# access_log \/var\/log\/nginx\/access.log; # replaced by conf.d\/chumbaq-logging.conf/' \
+    -e 's/^([[:space:]]*)error_log[[:space:]]+\/var\/log\/nginx\/error\.log;/\1# error_log \/var\/log\/nginx\/error.log; # replaced by conf.d\/chumbaq-logging.conf/' \
+    "$1"
+}
+
 # $1 = SECURITY_CONTACT (may be empty: then nothing is served).
 setup_nginx_logging() {
   local contact="$1"
   nginx_logging_conf | sys_write "$(R /etc/nginx/conf.d/chumbaq-logging.conf)"
-  # The distribution's own access_log line logs full request lines (query strings too).
-  sudo sed -i -E 's/^([[:space:]]*)access_log[[:space:]]+\/var\/log\/nginx\/access\.log;/\1# access_log \/var\/log\/nginx\/access.log; # replaced by conf.d\/chumbaq-logging.conf/' "$(R /etc/nginx/nginx.conf)"
+  neutralise_distribution_logs "$(R /etc/nginx/nginx.conf)"
   if [ -n "$contact" ]; then
     security_txt "$contact" "$(date -u -d '+1 year' +%Y-%m-%dT00:00:00Z)" | sys_write "$(R /etc/chumbaq/security.txt)"
   else
