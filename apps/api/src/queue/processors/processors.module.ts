@@ -13,6 +13,7 @@ import { SecurityRetentionScheduler } from '../scheduler/security-retention.sche
 import { FactorResetScheduler } from '../scheduler/factor-reset.scheduler';
 import { ClockCheckScheduler } from '../scheduler/clock-check.scheduler';
 import { UsageRollupScheduler } from '../scheduler/usage-rollup.scheduler';
+import { BillingScheduler } from '../scheduler/billing.scheduler';
 import {
   QUEUE_COHORT_SYNC,
   QUEUE_PUSH_CAMPAIGN,
@@ -37,6 +38,7 @@ import { ProjectSuspensionModule } from '../../modules/projects/project-suspensi
 import { FactorResetsModule } from '../../modules/factor-resets/factor-resets.module';
 import { IncidentsModule } from '../../modules/incidents/incidents.module';
 import { UsageModule } from '../../modules/usage/usage.module';
+import { BillingCoreModule } from '../../modules/billing/billing-core.module';
 
 /**
  * Worker-only module. Importing this registers BullMQ consumers, so it must be
@@ -79,6 +81,8 @@ import { UsageModule } from '../../modules/usage/usage.module';
     FactorResetsModule,
     // The hourly usage roll-up (UsageRollupScheduler).
     UsageModule,
+    // Billing's outbox, reconciliation and MAU notices (BillingScheduler; off unless billing is on).
+    BillingCoreModule,
   ],
   providers: [
     PushCampaignProcessor,
@@ -93,6 +97,7 @@ import { UsageModule } from '../../modules/usage/usage.module';
     FactorResetScheduler,
     ClockCheckScheduler,
     UsageRollupScheduler,
+    BillingScheduler,
   ],
 })
 export class ProcessorsModule {}

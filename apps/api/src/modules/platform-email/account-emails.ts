@@ -405,3 +405,63 @@ export function staffResetLinkCancelledEmail(
     { label: 'Review your security settings', url: settingsLink },
   );
 }
+
+/** "November 2026" from the first day of a month, `YYYY-MM-01`. */
+function formatMonth(month: string): string {
+  return new Date(`${month.slice(0, 7)}-01T00:00:00Z`).toLocaleString('en-GB', {
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+const formatCount = (n: number): string => n.toLocaleString('en-IN');
+
+/**
+ * An account's apps reached 80% or 100% of its plan's monthly active devices. MAU
+ * limits are soft: the email says so, and that the owner chooses whether to move up.
+ */
+export function mauNoticeEmail(
+  user: Recipient,
+  input: { level: 80 | 100; mau: number; limit: number; planName: string; month: string },
+  billingLink: string,
+): PlatformEmail {
+  const month = formatMonth(input.month);
+  const subject =
+    input.level === 100
+      ? "Your apps passed this month's active device limit"
+      : "Your apps are at 80% of this month's active devices";
+  const where =
+    input.level === 100
+      ? `Your apps have reached ${formatCount(input.mau)} monthly active devices in ${month}, past the ${formatCount(input.limit)} included in your ${input.planName} plan.`
+      : `Your apps have reached ${formatCount(input.mau)} monthly active devices in ${month}, 80% or more of the ${formatCount(input.limit)} included in your ${input.planName} plan.`;
+  return compose(
+    user.email,
+    subject,
+    user.name,
+    [
+      where,
+      'Nothing is blocked: your messages keep sending and your apps keep working. You choose whether to move to a larger plan.',
+    ],
+    { label: 'See your plan and usage', url: billingLink },
+  );
+}
+
+/**
+ * The provider stopped retrying a payment (the subscription is halted). The plan's
+ * limits stay for the grace period; after it the free plan's limits apply, and only
+ * to creating projects and inviting people.
+ */
+export function paymentHaltedEmail(user: Recipient, graceUntil: Date, billingLink: string): PlatformEmail {
+  return compose(
+    user.email,
+    'Your payment did not go through',
+    user.name,
+    [
+      'We could not collect the payment for your Chumbaq plan, and the payment provider has stopped retrying it.',
+      `Your plan's limits stay until ${formatInstant(graceUntil)}. After that the Free plan's limits apply to new projects and invitations only: nothing is deleted, and messages keep sending.`,
+      'To keep your plan, choose it again from your billing page.',
+    ],
+    { label: 'Open billing', url: billingLink },
+  );
+}

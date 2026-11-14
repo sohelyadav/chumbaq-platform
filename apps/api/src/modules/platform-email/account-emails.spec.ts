@@ -1,4 +1,4 @@
-import { accountLink, projectInviteEmail, safeDisplayName } from './account-emails';
+import { accountLink, mauNoticeEmail, paymentHaltedEmail, projectInviteEmail, safeDisplayName } from './account-emails';
 
 describe('accountLink', () => {
   it('puts the token in the fragment, which browsers never send to a server', () => {
@@ -141,5 +141,62 @@ describe('projectInviteEmail with names that are links', () => {
     });
     expect(email.text).toContain(`${'I'.repeat(60)}… invited you to join the project "${'P'.repeat(60)}…"`);
     expect(email.text).not.toContain('P'.repeat(61));
+  });
+});
+
+describe('billing emails', () => {
+  const user = { email: 'owner@example.com', name: 'Asha <b>Rao</b>' };
+  const link = accountLink('https://app.example', '/account/billing');
+
+  describe('mauNoticeEmail', () => {
+    const build = (level: 80 | 100) =>
+      mauNoticeEmail(user, { level, mau: 2600, limit: 2500, planName: 'Team <b>plan</b>', month: '2026-11-01' }, link);
+
+    it('says the limit was passed at 100%, and that nothing is blocked', () => {
+      const email = build(100);
+      expect(email.to).toBe('owner@example.com');
+      expect(email.subject).toBe("Your apps passed this month's active device limit");
+      for (const part of [email.html, email.text]) {
+        expect(part).toContain('2,600');
+        expect(part).toContain('2,500');
+        expect(part).toContain('November 2026');
+        expect(part).toContain('Nothing is blocked');
+        expect(part).toContain('https://app.example/account/billing');
+      }
+    });
+
+    it('says 80% at the first level', () => {
+      expect(build(80).subject).toBe("Your apps are at 80% of this month's active devices");
+    });
+
+    it('escapes the plan and person names in the HTML part', () => {
+      const email = build(100);
+      expect(email.html).not.toContain('<b>');
+      expect(email.html).toContain('Team &lt;b&gt;plan&lt;/b&gt;');
+      expect(email.html).toContain('Asha &lt;b&gt;Rao&lt;/b&gt;');
+      expect(email.text).toContain('Team <b>plan</b>');
+    });
+
+    it('links only to the app URL it is given', () => {
+      expect(build(100).html).toMatch(/href="https:\/\/app\.example\/account\/billing"/);
+    });
+  });
+
+  describe('paymentHaltedEmail', () => {
+    const email = paymentHaltedEmail(user, new Date('2026-12-01T10:00:00Z'), link);
+
+    it('says when the plan limits end, and that only new projects and invitations are affected', () => {
+      expect(email.subject).toBe('Your payment did not go through');
+      for (const part of [email.html, email.text]) {
+        expect(part).toContain('Tue, 01 Dec 2026 10:00:00 UTC');
+        expect(part).toContain('new projects and invitations');
+        expect(part).toContain('https://app.example/account/billing');
+      }
+    });
+
+    it('escapes the name in the HTML part', () => {
+      expect(email.html).not.toContain('<b>');
+      expect(email.html.startsWith('<p>Hi Asha &lt;b&gt;Rao&lt;/b&gt;,</p>')).toBe(true);
+    });
   });
 });
