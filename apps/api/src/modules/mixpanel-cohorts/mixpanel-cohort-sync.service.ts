@@ -7,6 +7,9 @@ import { MixpanelApiService, MixpanelProfile } from './mixpanel-api.service';
 import { MixpanelCohortsService } from './mixpanel-cohorts.service';
 import { DeviceIdentityEntity } from '../identity/entities/device-identity.entity';
 
+/** A sync still `syncing` after this long is taken as stranded (as the hourly scheduler does). */
+const SYNC_STALE_AFTER_MS = 2 * 60 * 60 * 1000;
+
 @Injectable()
 export class MixpanelCohortSyncService {
   private readonly logger = new Logger(MixpanelCohortSyncService.name);
@@ -46,12 +49,26 @@ export class MixpanelCohortSyncService {
     });
 
     if (cohort) {
-      cohort.name = cohortInfo.name;
-      cohort.description = cohortInfo.description ?? null;
-      cohort.mixpanelUserCount = cohortInfo.count;
-      cohort.status = 'syncing';
-      cohort.errorMessage = null;
-      cohort = await this.cohortRepo.save(cohort);
+      // Claimed with one conditional UPDATE: a cohort already syncing (and not left
+      // stranded) is not synced again. Each sync is a full Mixpanel import held in this
+      // process's memory, so otherwise every request started another one.
+      const claimed = await this.cohortRepo
+        .createQueryBuilder()
+        .update(MixpanelCohortEntity)
+        .set({
+          name: cohortInfo.name,
+          description: cohortInfo.description ?? null,
+          mixpanelUserCount: cohortInfo.count,
+          status: 'syncing',
+          errorMessage: null,
+        })
+        .where('id = :id', { id: cohort.id })
+        .andWhere(`(status <> 'syncing' OR "updatedAt" < :staleBefore)`, {
+          staleBefore: new Date(Date.now() - SYNC_STALE_AFTER_MS),
+        })
+        .execute();
+      if (!claimed.affected) return cohort;
+      cohort = (await this.cohortRepo.findOne({ where: { id: cohort.id } })) ?? cohort;
     } else {
       cohort = this.cohortRepo.create({
         projectId,

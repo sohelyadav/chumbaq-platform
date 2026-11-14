@@ -165,31 +165,7 @@ describe('MixpanelCohortSyncService', () => {
       expect(result.status).toBe('syncing');
     });
 
-    it('updates an existing cohort entity with status "syncing" instead of creating', async () => {
-      mixpanelCohortsService.getDecryptedConfig.mockResolvedValueOnce({
-        username: 'u',
-        password: 'p',
-        mixpanelProjectId: 'mp-1',
-      });
-      mixpanelApiService.listCohorts.mockResolvedValueOnce([
-        { id: 42, name: 'Alpha Cohort Updated', count: 10, created: '2024-01-01' },
-      ]);
-
-      const existing = makeCohortEntity({ name: 'Alpha Cohort', status: 'synced' });
-      cohortRepo.findOne.mockResolvedValueOnce(existing);
-      const updated = { ...existing, name: 'Alpha Cohort Updated', status: 'syncing' };
-      cohortRepo.save.mockResolvedValueOnce(updated);
-
-      // Stub background sync
-      mixpanelApiService.getCohortMembers.mockResolvedValue([]);
-      cohortRepo.save.mockResolvedValue(updated as any);
-
-      const result = await service.importCohort('proj-1', 42);
-
-      expect(cohortRepo.create).not.toHaveBeenCalled();
-      expect(result.status).toBe('syncing');
-      expect(result.name).toBe('Alpha Cohort Updated');
-    });
+    // Claiming an existing cohort is a conditional UPDATE: see mixpanel-sync-claim.int-spec.ts.
 
     it('returns the cohort entity immediately without waiting for background sync', async () => {
       mixpanelCohortsService.getDecryptedConfig.mockResolvedValueOnce({
