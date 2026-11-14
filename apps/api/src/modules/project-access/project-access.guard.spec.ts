@@ -174,6 +174,15 @@ describe('ProjectAccessGuard', () => {
     }
   });
 
+  // Postgres matches a uuid in any case; the handler would then see the id as typed.
+  it('answers 404 to a project id that is not in lower case, wherever it comes from', async () => {
+    const upper = mine.id.toUpperCase();
+    await expectNotFound('byParam', request({ params: { projectId: upper } }));
+    await expectNotFound('byBody', request({ body: { projectId: upper } }));
+    await expectNotFound('byQuery', request({ query: { projectId: upper } }));
+    await expectNotFound('byParam', request({ params: { projectId: mine.id }, body: { projectId: upper } }));
+  });
+
   it('answers 404 to a query project id given twice', async () => {
     await expectNotFound('byQuery', request({ query: { projectId: [mine.id, mine.id] } }));
   });

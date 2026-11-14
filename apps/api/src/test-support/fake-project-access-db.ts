@@ -5,9 +5,16 @@ import type { ProjectRole } from '../modules/project-access/project-permissions'
  * In-memory tables for `ProjectAccessService` unit tests, behaving like TypeORM over
  * Postgres rather than like the code under test: `findOne` matches every column named
  * in `where`, and (as TypeORM does) a key whose value is `undefined` is no condition at
- * all, so a lookup that forgets the user id matches every member of the project.
+ * all, so a lookup that forgets the user id matches every member of the project. A
+ * uuid column matches its value in any letter case, as Postgres does.
  */
 type Row = Record<string, unknown>;
+
+const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const sameValue = (stored: unknown, wanted: unknown) =>
+  typeof stored === 'string' && typeof wanted === 'string' && UUID_LIKE.test(stored) && UUID_LIKE.test(wanted)
+    ? stored.toLowerCase() === wanted.toLowerCase()
+    : stored === wanted;
 
 interface FindOne {
   where: Row;
@@ -25,7 +32,7 @@ export class FakeTable<T extends Row> {
   async findOne(options: FindOne): Promise<T | null> {
     this.calls.push(options);
     const found = this.rows.find((row) =>
-      Object.entries(options.where).every(([key, value]) => value === undefined || row[key] === value),
+      Object.entries(options.where).every(([key, value]) => value === undefined || sameValue(row[key], value)),
     );
     if (!found) return null;
     const copy: Row = { ...found };

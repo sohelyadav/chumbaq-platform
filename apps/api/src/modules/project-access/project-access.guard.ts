@@ -76,7 +76,7 @@ export class ProjectAccessGuard implements CanActivate {
       (value) => value !== ABSENT,
     );
     for (const value of others) {
-      if (!isUuid(value)) throw new NotFoundException(PROJECT_NOT_FOUND);
+      if (!isCanonicalId(value)) throw new NotFoundException(PROJECT_NOT_FOUND);
     }
 
     const projectAccess = await this.access.require(user, declared, metadata.permission);
@@ -105,7 +105,18 @@ export class ProjectAccessGuard implements CanActivate {
     } else {
       throw new InternalServerErrorException('Unknown project source');
     }
-    if (!isUuid(value)) throw new NotFoundException(PROJECT_NOT_FOUND);
+    if (!isCanonicalId(value)) throw new NotFoundException(PROJECT_NOT_FOUND);
     return value;
   }
+}
+
+/**
+ * A uuid as Postgres writes it, in lower case. Postgres matches a uuid in any case, so
+ * `ABC…` would pass the access check and then reach the handler spelled as typed, where
+ * anything keyed on the string (the WhatsApp template cache) counts it as another
+ * project: one project could add entries without end. Every id the API hands out is
+ * lower case, so no client sends another spelling.
+ */
+function isCanonicalId(value: unknown): value is string {
+  return isUuid(value) && value === value.toLowerCase();
 }
