@@ -41,7 +41,9 @@ export function mailboxOf(address: string): string {
   if (at < 1) return address.toLowerCase();
   let local = address.slice(0, at).toLowerCase();
   // One spelling of the domain: no trailing dots, internationalised names as punycode.
-  let domain = domainToASCII(address.slice(at + 1).toLowerCase().replace(/\.+$/, '')) || address.slice(at + 1).toLowerCase();
+  // IDNA first (it turns other full stops, such as 。, into "."), then the trailing dots.
+  const raw = address.slice(at + 1).toLowerCase();
+  let domain = (domainToASCII(raw) || raw).replace(/\.+$/, '');
   const plus = local.indexOf('+');
   if (plus > 0) local = local.slice(0, plus);
   if (domain === 'googlemail.com') domain = 'gmail.com';
