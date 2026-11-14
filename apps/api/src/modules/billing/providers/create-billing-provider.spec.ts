@@ -39,6 +39,29 @@ describe('createBillingProvider', () => {
     expect(provider.keyId).toBe('rzp_test_AbC123xyz');
   });
 
+  it('hands a configured API base to Razorpay, which only development and test allow', async () => {
+    const calls: string[] = [];
+    const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
+      calls.push(String(input));
+      return new Response(JSON.stringify({ error: { code: 'BAD_REQUEST_ERROR' } }), { status: 400 });
+    });
+    try {
+      const provider = createBillingProvider(
+        readBillingConfig({
+          NODE_ENV: 'test',
+          RAZORPAY_API_BASE_URL: 'http://127.0.0.1:4010/v1',
+          RAZORPAY_KEY_ID: 'rzp_test_AbC123xyz',
+          RAZORPAY_KEY_SECRET: 'secret',
+          RAZORPAY_WEBHOOK_SECRET: 'whsec',
+        }),
+      );
+      await expect(provider.fetchSubscription('sub_00000000000001')).rejects.toThrow();
+      expect(calls).toEqual(['http://127.0.0.1:4010/v1/subscriptions/sub_00000000000001']);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('refuses a config that says enabled but holds no keys', () => {
     expect(() =>
       createBillingProvider({ ...readBillingConfig({}), enabled: true }),

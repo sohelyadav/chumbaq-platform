@@ -24,6 +24,12 @@ export interface BillingConfig {
    * this moves only prices added afterwards.
    */
   taxRateBps: number;
+  /**
+   * Where Razorpay's REST API is reached (`RAZORPAY_API_BASE_URL`), or null for Razorpay
+   * itself. For a local mock in end-to-end tests only: refused unless `NODE_ENV` is
+   * `development` or `test`, so no deployed install can send its key pair elsewhere.
+   */
+  apiBaseUrl: string | null;
 }
 
 export const DEFAULT_BILLING_GRACE_DAYS = 14;
@@ -55,9 +61,27 @@ function taxRateBps(raw: string | null): number {
   return Number(raw);
 }
 
+function apiBaseUrl(raw: string | null, nodeEnv: string | null): string | null {
+  if (raw === null) return null;
+  if (nodeEnv !== 'development' && nodeEnv !== 'test') {
+    throw new Error('RAZORPAY_API_BASE_URL is only allowed when NODE_ENV is development or test');
+  }
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error('RAZORPAY_API_BASE_URL must be an http or https URL');
+  }
+  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password || url.search || url.hash) {
+    throw new Error('RAZORPAY_API_BASE_URL must be an http or https URL');
+  }
+  return raw.replace(/\/+$/, '');
+}
+
 export function readBillingConfig(env: Record<string, string | undefined>): BillingConfig {
   const days = graceDays(read(env, 'BILLING_GRACE_DAYS'));
   const rate = taxRateBps(read(env, 'BILLING_TAX_RATE_BPS'));
+  const baseUrl = apiBaseUrl(read(env, 'RAZORPAY_API_BASE_URL'), read(env, 'NODE_ENV'));
   const off: BillingConfig = {
     enabled: false,
     keyId: null,
@@ -66,6 +90,7 @@ export function readBillingConfig(env: Record<string, string | undefined>): Bill
     graceDays: days,
     keyMode: null,
     taxRateBps: rate,
+    apiBaseUrl: null,
   };
 
   const switchValue = read(env, 'BILLING_ENABLED');
@@ -108,6 +133,7 @@ export function readBillingConfig(env: Record<string, string | undefined>): Bill
     graceDays: days,
     keyMode: match[1] as 'test' | 'live',
     taxRateBps: rate,
+    apiBaseUrl: baseUrl,
   };
 }
 

@@ -67,6 +67,19 @@ describe('RazorpayProvider', () => {
     expect(p.keyId).toBe(KEY_ID);
   });
 
+  it('sends requests to the configured API base instead, for a local mock', async () => {
+    const base = 'http://127.0.0.1:4010/v1';
+    const { impl, calls } = stubFetch({
+      [`GET ${base}/subscriptions/sub_00000000000001`]: () => json(fixture('subscription.json')),
+    });
+    const mocked = new RazorpayProvider(
+      { keyId: KEY_ID, keySecret: KEY_SECRET, webhookSecret: WEBHOOK_SECRET, apiBaseUrl: base },
+      impl,
+    );
+    await mocked.fetchSubscription('sub_00000000000001');
+    expect(calls.map((call) => call.url)).toEqual([`${base}/subscriptions/sub_00000000000001`]);
+  });
+
   it('sends Basic auth, JSON and a 15 second time limit on every request', async () => {
     const timeout = jest.spyOn(AbortSignal, 'timeout');
     const { impl, calls } = stubFetch({

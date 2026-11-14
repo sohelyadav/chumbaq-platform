@@ -36,6 +36,8 @@ export interface RazorpayKeys {
   keyId: string;
   keySecret: string;
   webhookSecret: string;
+  /** Razorpay's own API unless set; see `BillingConfig.apiBaseUrl`. */
+  apiBaseUrl?: string;
 }
 
 /** An id that is not Razorpay-shaped, refused before it goes near a URL or a request body. */
@@ -85,9 +87,11 @@ export class RazorpayProvider implements BillingProvider {
   readonly #authorization: string;
   readonly #webhookSecret: string;
   readonly #fetch: typeof fetch;
+  readonly #apiBase: string;
 
   constructor(keys: RazorpayKeys, fetchImpl: typeof fetch = (input, init) => fetch(input, init)) {
     this.keyId = keys.keyId;
+    this.#apiBase = keys.apiBaseUrl ?? API_BASE;
     this.#authorization = 'Basic ' + Buffer.from(`${keys.keyId}:${keys.keySecret}`).toString('base64');
     this.#webhookSecret = keys.webhookSecret;
     this.#fetch = fetchImpl;
@@ -200,7 +204,7 @@ export class RazorpayProvider implements BillingProvider {
   }
 
   private async request(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<object> {
-    const response = await this.#fetch(`${API_BASE}${path}`, {
+    const response = await this.#fetch(`${this.#apiBase}${path}`, {
       method,
       headers: {
         Authorization: this.#authorization,

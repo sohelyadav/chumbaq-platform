@@ -13,5 +13,6 @@ export function createBillingProvider(config: BillingConfig | undefined): Billin
     keyId: config.keyId,
     keySecret: config.keySecret,
     webhookSecret: config.webhookSecret,
+    apiBaseUrl: config.apiBaseUrl ?? undefined,
   });
 }

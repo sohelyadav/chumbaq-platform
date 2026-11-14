@@ -16,6 +16,7 @@ describe('readBillingConfig', () => {
       graceDays: 14,
       keyMode: null,
       taxRateBps: 0,
+      apiBaseUrl: null,
     });
   });
 
@@ -28,6 +29,45 @@ describe('readBillingConfig', () => {
       graceDays: 14,
       keyMode: 'test',
       taxRateBps: 0,
+      apiBaseUrl: null,
+    });
+  });
+
+  describe('RAZORPAY_API_BASE_URL (a local mock for end-to-end tests)', () => {
+    const MOCK = 'http://127.0.0.1:4010/v1';
+
+    it('is used in development and test', () => {
+      expect(readBillingConfig({ ...KEYS, NODE_ENV: 'test', RAZORPAY_API_BASE_URL: MOCK }).apiBaseUrl).toBe(MOCK);
+      expect(readBillingConfig({ ...KEYS, NODE_ENV: 'development', RAZORPAY_API_BASE_URL: `${MOCK}/` }).apiBaseUrl).toBe(
+        MOCK,
+      );
+    });
+
+    it('is refused in production, and wherever NODE_ENV is anything else or unset', () => {
+      const refused = /RAZORPAY_API_BASE_URL is only allowed when NODE_ENV is development or test/;
+      for (const NODE_ENV of ['production', 'staging', 'integration', undefined]) {
+        expect(() => readBillingConfig({ ...KEYS, NODE_ENV, RAZORPAY_API_BASE_URL: MOCK })).toThrow(refused);
+      }
+      // Refused even while billing is off, so the setting can never sit unnoticed.
+      expect(() => readBillingConfig({ NODE_ENV: 'production', RAZORPAY_API_BASE_URL: MOCK })).toThrow(refused);
+    });
+
+    it('is refused unless it is a plain http or https URL', () => {
+      for (const value of ['not a url', 'ftp://127.0.0.1/v1', 'http://user:pass@127.0.0.1/v1', 'http://127.0.0.1/v1?x=1']) {
+        expect(() => readBillingConfig({ ...KEYS, NODE_ENV: 'test', RAZORPAY_API_BASE_URL: value })).toThrow(
+          'RAZORPAY_API_BASE_URL must be an http or https URL',
+        );
+      }
+    });
+
+    it('never names the value in its error', () => {
+      expect(() =>
+        readBillingConfig({ ...KEYS, NODE_ENV: 'production', RAZORPAY_API_BASE_URL: 'https://secret-host.example/v1' }),
+      ).toThrow(expect.objectContaining({ message: expect.not.stringContaining('secret-host') }));
+    });
+
+    it('is null when unset, which is Razorpay itself', () => {
+      expect(readBillingConfig({ ...KEYS, NODE_ENV: 'production' }).apiBaseUrl).toBeNull();
     });
   });
 
