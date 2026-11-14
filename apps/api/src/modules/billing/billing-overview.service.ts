@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 import type {
   BillingDetails,
+  BillingInvoiceView,
   BillingOverview,
   BillingPlanOption,
   BillingPrice,
@@ -14,6 +15,7 @@ import { AccountLimitsService } from './account-limits.service';
 import { accountState, effectivePlan, FREE_PLAN } from './effective-plan';
 import { toBillingState } from './effective-plan-sql';
 import { BillingAccountEntity } from './entities/billing-account.entity';
+import { BillingInvoiceEntity } from './entities/billing-invoice.entity';
 import { BillingSubscriptionEntity } from './entities/billing-subscription.entity';
 import { PlanPriceEntity } from './entities/plan-price.entity';
 import { PlanEntity } from './entities/plan.entity';
@@ -76,6 +78,21 @@ export class BillingOverviewService {
       details: detailsOf(account),
       keyId: this.provider.keyId ?? '',
     };
+  }
+
+  /** The account's own invoices, newest first (unissued ones last). */
+  async invoices(
+    userId: string,
+    page: number,
+    limit: number,
+  ): Promise<{ data: BillingInvoiceView[]; meta: { total: number; page: number; limit: number } }> {
+    const [rows, total] = await this.dataSource.manager.findAndCount(BillingInvoiceEntity, {
+      where: { userId },
+      order: { issuedAt: { direction: 'DESC', nulls: 'LAST' }, createdAt: 'DESC', id: 'ASC' },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+    return { data: rows.map(invoiceView), meta: { total, page, limit } };
   }
 
   private async usage(
@@ -151,6 +168,22 @@ function subscriptionView(s: BillingSubscriptionEntity, plans: Map<string, PlanE
     startAt: iso(s.startAt),
     cancelAtPeriodEnd: s.cancelAtPeriodEnd,
     graceUntil: iso(s.graceUntil),
+  };
+}
+
+function invoiceView(i: BillingInvoiceEntity): BillingInvoiceView {
+  return {
+    id: i.id,
+    number: i.number,
+    status: i.status,
+    amountPaise: i.amountPaise,
+    taxPaise: i.taxPaise,
+    currency: i.currency,
+    periodStart: iso(i.periodStart),
+    periodEnd: iso(i.periodEnd),
+    issuedAt: iso(i.issuedAt),
+    paidAt: iso(i.paidAt),
+    shortUrl: i.shortUrl,
   };
 }
 

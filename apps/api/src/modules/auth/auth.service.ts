@@ -23,7 +23,8 @@ import { FACTOR_CHANGE_PROOF, PreAuthService } from './pre-auth.service';
 import { DEFAULT_REFRESH_LIFETIME_MS, DEFAULT_SESSION_MAX_AGE_MS } from '../../config/jwt.config';
 import { SecondFactorMethod, SecondFactorsService } from './second-factors.service';
 import { FactorResetsService } from '../factor-resets/factor-resets.service';
-import type { ProfileStaffLink } from '@chumbaq/shared';
+import type { ProfileBilling, ProfileStaffLink } from '@chumbaq/shared';
+import type { BillingConfig } from '../../config/billing.config';
 import { STAFF_KEYS_ONLY_MESSAGE } from '../staff-auth/staff-messages';
 
 export interface AuthTokens {
@@ -492,13 +493,15 @@ export class AuthService {
   async getProfile(
     userId: string,
     { impersonated = false }: { impersonated?: boolean } = {},
-  ): Promise<Partial<UserEntity> & ProfileStaffLink> {
+  ): Promise<Partial<UserEntity> & ProfileStaffLink & ProfileBilling> {
     const user = await this.usersService.findById(userId);
     if (!user) {
       throw new UnauthorizedException('User not found');
     }
     const staffLinkPending = !impersonated && (await this.factorResets.staffLinkPending(user.id));
-    return { ...this.sanitizeUser(user), staffLinkPending };
+    // View-as never sees billing: the billing routes refuse it, and staff see billing in the admin app.
+    const billingEnabled = !impersonated && this.configService.get<BillingConfig>('billing')?.enabled === true;
+    return { ...this.sanitizeUser(user), staffLinkPending, billingEnabled };
   }
 
   private async startSession(

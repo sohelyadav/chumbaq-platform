@@ -5,6 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { BillingConfig } from '../../config/billing.config';
 import { DataSource } from 'typeorm';
 import type {
   StaffEnrolmentStarted,
@@ -478,6 +479,7 @@ export class StaffAuthService {
       enrolmentOnly: staff.enrolmentOnly,
       factors: { passkeys, totp: methods.includes('totp') },
       session: this.sessionInfo(row.id, row.enrolmentOnly, accessExpiresAt, row.createdAt),
+      billingEnabled: this.config.get<BillingConfig>('billing')?.enabled === true,
     };
   }
 

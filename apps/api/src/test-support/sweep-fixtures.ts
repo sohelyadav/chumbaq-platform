@@ -85,6 +85,7 @@ export const ACCOUNT_SCOPED: Array<{ match: RegExp; reason: string }> = [
   { match: /^PATCH \/api\/users\/me\/password$/, reason: 'the caller\'s own password' },
   { match: /^\S+ \/api\/auth\//, reason: 'the caller\'s own sessions, factors and sign-in; covered by the auth int-specs' },
   { match: /^\S+ \/api\/invitations\//, reason: 'the caller\'s own invite, by token' },
+  { match: /^\S+ \/api\/billing(\/|$)/, reason: "the caller's own billing account" },
   // Staff routes live on the admin API now; admin-app-routes.int-spec.ts holds that
   // this app serves none of them.
 ];

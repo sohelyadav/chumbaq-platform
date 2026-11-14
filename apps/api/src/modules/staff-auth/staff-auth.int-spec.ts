@@ -269,7 +269,7 @@ describe('Staff sign-in (integration)', () => {
 
       const me = await staffApi('GET', '/me', { token });
       expect(me.status).toBe(200);
-      expect(me.body.data).toMatchObject({ email: staff.email, enrolmentOnly: true, factors: { passkeys: 0, totp: false } });
+      expect(me.body.data).toMatchObject({ email: staff.email, enrolmentOnly: true, factors: { passkeys: 0, totp: false }, billingEnabled: false });
 
       const overview = await adminApi('GET', '/overview', { token });
       expect(overview.status).toBe(403);

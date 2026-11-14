@@ -258,6 +258,14 @@ export interface ProfileStaffLink {
   staffLinkPending: boolean;
 }
 
+/**
+ * `GET /auth/me` adds this: whether this install takes payments (so the dashboard shows
+ * its billing page). Always false while viewing as another account.
+ */
+export interface ProfileBilling {
+  billingEnabled: boolean;
+}
+
 /** `POST /auth/staff-reset-link/cancel`: how many unused links were spent. */
 export interface CancelStaffLinkResponse {
   cancelled: number;
@@ -909,6 +917,8 @@ export interface StaffProfile {
   enrolmentOnly: boolean;
   factors: { passkeys: number; totp: boolean };
   session: StaffSessionInfo;
+  /** Whether this install takes payments, so the admin app shows its billing pages. */
+  billingEnabled: boolean;
 }
 
 export interface StaffEnrolled {
@@ -1514,7 +1524,8 @@ export interface BillingInvoiceView {
   status: string;
   amountPaise: number;
   taxPaise: number;
-  currency: 'INR';
+  /** As the provider reported it: INR for every invoice our prices produce. */
+  currency: string;
   periodStart: string | null;
   periodEnd: string | null;
   issuedAt: string | null;
