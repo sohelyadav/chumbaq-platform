@@ -94,6 +94,12 @@ export class WhatsAppPublicController {
 
     const authenticated = provider.authenticateWebhook(credentials, request);
     if (authenticated === false) throw new UnauthorizedException('Signature did not verify.');
+    // The token is in every provider's URL and an earlier provider's credentials stay
+    // stored, so unsigned events are taken only at the URL of the provider the project
+    // sends through now. A signed report from an earlier one could only come from it.
+    if (authenticated !== true && settings.provider !== name) {
+      throw new ForbiddenException(`This project no longer sends WhatsApp through ${name}.`);
+    }
 
     const recorded = await this.events.ingest(
       settings.projectId,

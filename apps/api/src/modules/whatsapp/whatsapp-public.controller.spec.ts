@@ -39,7 +39,7 @@ describe('WhatsAppPublicController', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    settings.findByWebhookToken.mockResolvedValue({ projectId: 'proj-1', webhookToken: TOKEN });
+    settings.findByWebhookToken.mockResolvedValue({ projectId: 'proj-1', webhookToken: TOKEN, provider: 'meta' });
     settings.credentialsFor.mockResolvedValue({ appSecret: 's' });
     controller = new WhatsAppPublicController(settings as never, events as never, registry as never);
   });
@@ -75,6 +75,22 @@ describe('WhatsAppPublicController', () => {
     settings.credentialsFor.mockResolvedValueOnce(null);
     await expect(controller.receive('meta', TOKEN, request({}), response())).rejects.toBeInstanceOf(ForbiddenException);
     expect(events.ingest).not.toHaveBeenCalled();
+  });
+
+  // One token is in every provider's URL, and an earlier provider's credentials stay
+  // stored, so the path must not reopen an unsigned route after a move to a signed one.
+  it('refuses unsigned events at the URL of a provider the project no longer sends through', async () => {
+    settings.findByWebhookToken.mockResolvedValue({ projectId: 'proj-1', webhookToken: TOKEN, provider: 'twilio_whatsapp' });
+    provider.authenticateWebhook.mockReturnValueOnce('unsigned');
+    await expect(controller.receive('gupshup', TOKEN, request({}), response())).rejects.toBeInstanceOf(ForbiddenException);
+    expect(events.ingest).not.toHaveBeenCalled();
+  });
+
+  it("still takes an earlier provider's signed reports, which only it could send", async () => {
+    settings.findByWebhookToken.mockResolvedValue({ projectId: 'proj-1', webhookToken: TOKEN, provider: 'twilio_whatsapp' });
+    provider.authenticateWebhook.mockReturnValueOnce(true);
+    await controller.receive('meta', TOKEN, request({}), response());
+    expect(events.ingest.mock.calls[0][4]).toEqual({ signed: true, attributeByRecency: false });
   });
 
   it('hands the provider the public URL, which is what Twilio signs', async () => {
