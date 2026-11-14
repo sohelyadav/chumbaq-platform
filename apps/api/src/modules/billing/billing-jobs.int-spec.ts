@@ -194,6 +194,34 @@ describe('billing worker jobs (integration)', () => {
       expect(await sub(live.id)).toMatchObject({ cancel_at_period_end: true, cancel_error: null });
     });
 
+    it('never marks a newer decision sent: a cycle-end call answered after staff chose "now" leaves "now" to send', async () => {
+      const u = await user();
+      const live = await subscription(u, await plan(), {
+        status: 'active',
+        currentEnd: new Date(Date.now() + 9 * DAY),
+        cancelRequested: true,
+        atCycleEnd: true,
+      });
+      const spy = jest.spyOn(fake, 'cancelSubscription').mockImplementationOnce(async (id, atCycleEnd) => {
+        // Staff turn the queued cycle-end cancel into an immediate one while this call is out.
+        await ds.query(
+          `UPDATE billing_subscriptions SET cancel_requested_at = now() + interval '1 second', cancel_at_cycle_end = false
+            WHERE id = $1`,
+          [live.id],
+        );
+        return FakeBillingProvider.prototype.cancelSubscription.call(fake, id, atCycleEnd);
+      });
+      try {
+        await outbox.runOnce();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await sub(live.id)).toMatchObject({ cancel_sent_at: null, cancel_at_period_end: false, cancel_at_cycle_end: false });
+      expect(await outbox.sendQueued(live.id)).toEqual({ sent: true });
+      expect(fake.callsOf('cancelSubscription').slice(-1)).toEqual([[live.providerId, false]]);
+      expect((await sub(live.id)).cancel_sent_at).not.toBeNull();
+    });
+
     it('backs off after a failure and never gives up on a cancel', async () => {
       const u = await user();
       const p = await plan();

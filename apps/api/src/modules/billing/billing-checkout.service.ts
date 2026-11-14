@@ -49,6 +49,9 @@ export const BILLING_MESSAGES = {
 
 const PROVIDER_LABEL = 'Razorpay';
 
+/** What the customer can cancel: a subscription that can still charge. */
+const CUSTOMER_CANCELLABLE: ReadonlySet<string> = new Set(['active', 'pending', 'halted']);
+
 /** No plan change this close to a renewal: the successor would start after a renewal it should replace. */
 export const CHANGE_RENEWAL_MARGIN_MS = 10 * 60_000;
 /**
@@ -193,34 +196,31 @@ export class BillingCheckoutService {
    * Cancels at the end of the period, and drops a change or "keep my plan" waiting to
    * start, whether or not the current one is already ending (once a change is
    * authorised the worker sets the current to end, and the successor is then the only
-   * thing left that would charge).
+   * thing left that would charge). A halted subscription has no paid period left to
+   * finish, so it is cancelled at once, which also stops the provider retrying it.
+   *
+   * The provider is called first, with no lock held. What it cancelled is then
+   * recorded on that subscription even if another became current meanwhile (the
+   * request is then refused, 409), so the record never lags behind the provider.
    */
   async cancel(userId: string, now: Date = new Date()): Promise<BillingOverview> {
     const { current } = await this.read(this.dataSource.manager, userId);
-    if (!current || (current.status !== 'active' && current.status !== 'pending')) {
+    if (!current || !CUSTOMER_CANCELLABLE.has(current.status)) {
       throw new ConflictException(BILLING_MESSAGES.noActiveToCancel);
     }
-    if (!current.cancelAtPeriodEnd) {
+    const atCycleEnd = current.status !== 'halted';
+    const alreadySent = atCycleEnd
+      ? current.cancelAtPeriodEnd
+      : current.cancelSentAt !== null && current.cancelAtCycleEnd === false;
+    if (!alreadySent) {
       await this.call(BILLING_MESSAGES.providerRefusedCancel, () =>
-        this.provider.cancelSubscription(current.providerSubscriptionId, true),
+        this.provider.cancelSubscription(current.providerSubscriptionId, atCycleEnd),
       );
     }
     const refusal = await this.dataSource.transaction(async (manager) => {
       const locked = await this.read(manager, userId, true);
+      if (!alreadySent) await this.recordSentCancel(manager, current.id, atCycleEnd, userId, now);
       if (locked.current?.id !== current.id) return new ConflictException(BILLING_MESSAGES.changedMeanwhile);
-      if (!current.cancelAtPeriodEnd) {
-        await manager.update(
-          BillingSubscriptionEntity,
-          { id: current.id },
-          {
-            cancelAtPeriodEnd: true,
-            cancelRequestedAt: now,
-            cancelAtCycleEnd: true,
-            cancelRequestedBy: userId,
-            cancelSentAt: now,
-          },
-        );
-      }
       // A change waiting to start goes with it, and stops counting at once.
       if (locked.next && (locked.next.status === 'authenticated' || locked.next.status === 'created')) {
         await this.requestCancel(manager, locked.next.id, false, userId, now);
@@ -342,6 +342,30 @@ export class BillingCheckoutService {
               updated_at = now()
         WHERE user_id = $1`,
       [userId, id, customerId],
+    );
+  }
+
+  /**
+   * Records a cancel this request has just sent to the provider: as sent, so the
+   * worker does not send it again. A cycle-end cancel never marks an immediate one
+   * queued meanwhile as sent (a pending or halted subscription replaced by a
+   * successor is queued to stop at once); that one stays for the worker.
+   */
+  private async recordSentCancel(
+    manager: EntityManager,
+    id: string,
+    atCycleEnd: boolean,
+    by: string,
+    now: Date,
+  ): Promise<void> {
+    await manager.query(
+      `UPDATE billing_subscriptions
+          SET cancel_at_period_end = cancel_at_period_end OR $2,
+              cancel_requested_at = $3, cancel_at_cycle_end = $2, cancel_requested_by = $4, cancel_sent_at = $3,
+              cancel_error = NULL, cancel_retry_at = NULL, updated_at = now()
+        WHERE id = $1
+          AND NOT ($2 AND cancel_requested_at IS NOT NULL AND cancel_sent_at IS NULL AND cancel_at_cycle_end = false)`,
+      [id, atCycleEnd, now, by],
     );
   }
 

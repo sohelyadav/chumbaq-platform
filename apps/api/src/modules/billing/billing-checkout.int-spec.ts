@@ -449,6 +449,52 @@ describe('BillingCheckoutService (integration)', () => {
       const promoted = await subByProvider(changed.subscriptionId);
       expect((await account(w.user.userId)).current_subscription_id).toBe(promoted.id);
       expect(promoted).toMatchObject({ cancel_at_period_end: false, cancel_requested_at: null });
+      // What Razorpay cancelled is on record, so neither the worker nor a retry sends it again.
+      const old = await sub(w.currentId);
+      expect(old).toMatchObject({ cancel_at_period_end: true, cancel_at_cycle_end: true, cancel_requested_by: w.user.userId });
+      expect(old.cancel_sent_at).not.toBeNull();
+      const before = fake.callsOf('cancelSubscription').length;
+      await runOutbox(w.user.userId);
+      expect(fake.callsOf('cancelSubscription').length).toBe(before);
+    });
+
+    it('never marks an immediate cancel queued meanwhile as sent by its own cycle-end one', async () => {
+      const w = await subscribed();
+      const original = fake.cancelSubscription.bind(fake);
+      const spy = jest.spyOn(fake, 'cancelSubscription').mockImplementationOnce(async (id, atCycleEnd) => {
+        // The subscription goes pending and a successor replaces it: its retries must stop now.
+        await ds.query(
+          `UPDATE billing_subscriptions SET cancel_requested_at = now(), cancel_at_cycle_end = false WHERE id = $1`,
+          [w.currentId],
+        );
+        await ds.query(`UPDATE billing_accounts SET current_subscription_id = NULL WHERE user_id = $1`, [w.user.userId]);
+        return original(id, atCycleEnd);
+      });
+      expect((await refusal(checkout.cancel(w.user.userId))).status).toBe(409);
+      spy.mockRestore();
+      expect(await sub(w.currentId)).toMatchObject({ cancel_at_cycle_end: false, cancel_sent_at: null, cancel_requested_by: null });
+      await runOutbox(w.user.userId);
+      const current = await sub(w.currentId);
+      expect(fake.callsOf('cancelSubscription').slice(-1)).toEqual([[current.provider_subscription_id, false]]);
+      expect(current.cancel_sent_at).not.toBeNull();
+    });
+
+    it('cancels a halted subscription at once, and only once', async () => {
+      const w = await subscribed();
+      const current = await sub(w.currentId);
+      await ds.query(`UPDATE billing_subscriptions SET status = 'halted', grace_until = now() + interval '14 days' WHERE id = $1`, [
+        w.currentId,
+      ]);
+      const before = fake.callsOf('cancelSubscription').length;
+      await checkout.cancel(w.user.userId);
+      expect(fake.callsOf('cancelSubscription').slice(before)).toEqual([[current.provider_subscription_id, false]]);
+      const row = await sub(w.currentId);
+      expect(row).toMatchObject({ cancel_at_cycle_end: false, cancel_at_period_end: false, cancel_requested_by: w.user.userId });
+      expect(row.cancel_sent_at).not.toBeNull();
+
+      // Until the cancelled webhook lands the row is still halted: a second click calls nobody.
+      await checkout.cancel(w.user.userId);
+      expect(fake.callsOf('cancelSubscription').length - before).toBe(1);
     });
 
     it('says Razorpay could not be reached, and changes nothing', async () => {

@@ -218,7 +218,7 @@ export default function BillingPage() {
     try {
       await cancel.mutateAsync();
       setConfirmCancel(false);
-      toast({ title: 'Your plan will end at the end of this period' });
+      toast({ title: offer === 'cancel_now' ? 'Your plan is cancelled' : 'Your plan will end at the end of this period' });
     } catch (err) {
       toast({
         title: 'Could not cancel',
@@ -356,12 +356,15 @@ export default function BillingPage() {
               <DialogHeader>
                 <DialogTitle>Cancel your plan?</DialogTitle>
                 <DialogDescription>
-                  {offer === 'drop_change' && scheduled
+                  {offer === 'cancel_now'
+                    ? 'Your plan ends now and the failed payment is not tried again.'
+                    : offer === 'drop_change' && scheduled
                     ? `${keeping ? 'Keeping your plan is undone' : `Your scheduled change to ${scheduled.planName} is dropped`} and your plan ends ${periodEnd ? `on ${periodEnd}` : 'at the end of this period'}.`
                     : periodEnd
                       ? `Your plan stays until ${periodEnd}.`
                       : 'Your plan stays until the end of this period.'}{' '}
-                  After that your account moves to Free; nothing is deleted.
+                  {offer === 'cancel_now' ? 'Your account moves to Free' : 'After that your account moves to Free'}; nothing
+                  is deleted.
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter>

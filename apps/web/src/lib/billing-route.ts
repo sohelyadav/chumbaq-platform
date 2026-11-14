@@ -60,12 +60,15 @@ export function planAction(plan: BillingPlanOption, interval: BillingInterval, o
  * - `drop_change`: a change or "keep my plan" is authorised to start at the period
  *   end, and cancelling drops it too. The current one is usually already set to end
  *   by then, and the successor is the only thing left that would charge.
+ * - `cancel_now`: the payment failed and is being retried (halted): there is no paid
+ *   period left to finish, so it ends now and the retries stop.
  * - `none`: nothing to cancel (no live subscription, or it already ends with nothing after it).
  */
-export type CancelOffer = 'none' | 'cancel' | 'drop_change';
+export type CancelOffer = 'none' | 'cancel' | 'cancel_now' | 'drop_change';
 
 export function cancelOffer(overview: Pick<BillingOverview, 'current' | 'next'>): CancelOffer {
   const { current, next } = overview;
+  if (current?.status === 'halted') return 'cancel_now';
   if (!current || (current.status !== 'active' && current.status !== 'pending')) return 'none';
   if (next?.status === 'authenticated') return 'drop_change';
   return current.cancelAtPeriodEnd ? 'none' : 'cancel';

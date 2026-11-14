@@ -19,6 +19,7 @@ import type {
 import { logValue } from '../../common/log-value';
 import { reachProvider } from '../push-notifications/services/per-recipient-provider';
 import { readUsageCoverage } from '../usage/usage-rollup.service';
+import { BillingOutboxService, OUTBOX_REQUEST_HOLD_MS } from '../billing/billing-outbox.service';
 import { BillingOverviewService, invoiceView } from '../billing/billing-overview.service';
 import { FREE_PLAN, isLive } from '../billing/effective-plan';
 import { toSubscriptionState } from '../billing/effective-plan-sql';
@@ -42,8 +43,8 @@ export const ADMIN_BILLING_MESSAGES = {
   compUntil: 'A comp must end in the future, and within five years.',
   nothingToCancel: 'There is no subscription to cancel.',
   alreadyEnding: 'The subscription already ends at the period end.',
-  changedMeanwhile: 'The subscription changed meanwhile. Try again.',
-  providerRefusedCancel: 'Razorpay could not cancel the subscription. Try again later.',
+  alreadyCancelling: 'A cancel for this subscription is already on its way.',
+  cancelQueued: 'Razorpay could not cancel the subscription yet. The cancel is recorded and will be retried.',
   providerRefusedResend: 'Razorpay could not send the invoice. Try again later.',
 } as const;
 
@@ -195,6 +196,7 @@ export class AdminBillingService {
     private readonly audit: AdminAuditService,
     private readonly overviews: BillingOverviewService,
     @Inject(BILLING_PROVIDER) private readonly provider: BillingProvider,
+    private readonly outbox: BillingOutboxService,
   ) {}
 
   async summary(now: Date = new Date(), manager: EntityManager = this.dataSource.manager): Promise<AdminBillingSummary> {
@@ -466,47 +468,48 @@ export class AdminBillingService {
   }
 
   /**
-   * Cancels the account's current subscription at the provider (at the cycle end, or
-   * now), then records it under the locks. An immediate cancel changes the account's
-   * plan when the provider's webhook arrives, as every subscription change does.
+   * Cancels the account's current subscription (at the cycle end, or now).
+   *
+   * The decision comes first: under the locks the subscription is checked, the
+   * cancel is queued on it (the outbox columns) and the audit row written, in one
+   * transaction. Only once that has committed is the provider called, from this
+   * request (`BillingOutboxService.sendQueued`), with the worker held off for
+   * `OUTBOX_REQUEST_HOLD_MS`. So the provider never cancels anything that has no
+   * record and no audit row, whatever happens to the subscription or the database
+   * meanwhile; a call that fails or never happens is sent by the worker, retried
+   * like every other cancel, and staff are told so (502). Two staff cancelling at
+   * once are serialised by the locks, and the second is refused before any call.
+   * An immediate cancel changes the account's plan when the provider's webhook
+   * arrives, as every subscription change does.
    */
   async cancel(id: string, dto: AdminCancelSubscriptionDto, actor: AdminActor, now: Date = new Date()): Promise<AdminTenantBilling> {
-    const [user] = await this.dataSource.query(`SELECT id FROM users WHERE id = $1`, [id]);
-    if (!user) throw new NotFoundException(ADMIN_BILLING_MESSAGES.tenantNotFound);
-    const account = await this.dataSource.manager.findOne(BillingAccountEntity, { where: { userId: id } });
-    const current = account?.currentSubscriptionId
-      ? await this.dataSource.manager.findOne(BillingSubscriptionEntity, {
-          where: { id: account.currentSubscriptionId, userId: id },
-        })
-      : null;
-    if (!current || !CANCELLABLE.has(current.status)) {
-      throw new ConflictException(ADMIN_BILLING_MESSAGES.nothingToCancel);
-    }
-    if (dto.atCycleEnd && current.cancelAtPeriodEnd) throw new ConflictException(ADMIN_BILLING_MESSAGES.alreadyEnding);
-
-    await this.call(ADMIN_BILLING_MESSAGES.providerRefusedCancel, () =>
-      this.provider.cancelSubscription(current.providerSubscriptionId, dto.atCycleEnd),
-    );
-
-    await this.dataSource.transaction(async (manager) => {
+    const subscriptionId = await this.dataSource.transaction(async (manager) => {
       const email = await this.lockUser(manager, id);
-      const locked = await this.lockAccount(manager, id);
-      if (locked.current?.id !== current.id) throw new ConflictException(ADMIN_BILLING_MESSAGES.changedMeanwhile);
+      const { current, next } = await this.lockAccount(manager, id);
+      if (!current || !CANCELLABLE.has(current.status)) {
+        throw new ConflictException(ADMIN_BILLING_MESSAGES.nothingToCancel);
+      }
+      // An immediate cancel is queued or sent: nothing is left to decide.
+      if (current.cancelRequestedAt && current.cancelAtCycleEnd === false) {
+        throw new ConflictException(ADMIN_BILLING_MESSAGES.alreadyCancelling);
+      }
+      const queued = current.cancelRequestedAt !== null && current.cancelSentAt === null;
+      if (dto.atCycleEnd && (current.cancelAtPeriodEnd || queued)) {
+        throw new ConflictException(ADMIN_BILLING_MESSAGES.alreadyEnding);
+      }
       await manager.update(
         BillingSubscriptionEntity,
         { id: current.id },
         {
-          ...(dto.atCycleEnd ? { cancelAtPeriodEnd: true } : {}),
           cancelRequestedAt: now,
           cancelAtCycleEnd: dto.atCycleEnd,
           cancelRequestedBy: actor.userId,
-          cancelSentAt: now,
+          cancelSentAt: null,
           cancelError: null,
-          cancelRetryAt: null,
+          cancelRetryAt: new Date(now.getTime() + OUTBOX_REQUEST_HOLD_MS),
         },
       );
       // A change waiting to start goes with it: queued for the worker to cancel at once.
-      const next = locked.next;
       if (next && (next.status === 'authenticated' || next.status === 'created')) {
         await manager.query(
           `UPDATE billing_subscriptions
@@ -524,7 +527,11 @@ export class AdminBillingService {
         },
         manager,
       );
+      return current.id;
     });
+
+    const outcome = await this.outbox.sendQueued(subscriptionId, now);
+    if (!outcome.sent) throw new HttpException(ADMIN_BILLING_MESSAGES.cancelQueued, HttpStatus.BAD_GATEWAY);
     return this.tenantBilling(id, now);
   }
 
