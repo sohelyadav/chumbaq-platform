@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsageDailyEntity } from './entities/usage-daily.entity';
 import { MonthlyActiveDeviceEntity } from './entities/monthly-active-device.entity';
 import { UsageRollupStateEntity } from './entities/usage-rollup-state.entity';
+import { UsageRollupService } from './usage-rollup.service';
 
 /**
  * Daily usage counts per project. No controllers: the worker fills the tables
@@ -12,6 +13,7 @@ import { UsageRollupStateEntity } from './entities/usage-rollup-state.entity';
   imports: [
     TypeOrmModule.forFeature([UsageDailyEntity, MonthlyActiveDeviceEntity, UsageRollupStateEntity]),
   ],
-  exports: [TypeOrmModule],
+  providers: [UsageRollupService],
+  exports: [TypeOrmModule, UsageRollupService],
 })
 export class UsageModule {}

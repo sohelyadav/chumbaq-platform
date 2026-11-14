@@ -12,6 +12,7 @@ import { JourneyScheduler } from '../scheduler/journey.scheduler';
 import { SecurityRetentionScheduler } from '../scheduler/security-retention.scheduler';
 import { FactorResetScheduler } from '../scheduler/factor-reset.scheduler';
 import { ClockCheckScheduler } from '../scheduler/clock-check.scheduler';
+import { UsageRollupScheduler } from '../scheduler/usage-rollup.scheduler';
 import {
   QUEUE_COHORT_SYNC,
   QUEUE_PUSH_CAMPAIGN,
@@ -35,6 +36,7 @@ import { WhatsAppModule } from '../../modules/whatsapp/whatsapp.module';
 import { ProjectSuspensionModule } from '../../modules/projects/project-suspension.module';
 import { FactorResetsModule } from '../../modules/factor-resets/factor-resets.module';
 import { IncidentsModule } from '../../modules/incidents/incidents.module';
+import { UsageModule } from '../../modules/usage/usage.module';
 
 /**
  * Worker-only module. Importing this registers BullMQ consumers, so it must be
@@ -75,6 +77,8 @@ import { IncidentsModule } from '../../modules/incidents/incidents.module';
     WhatsAppModule,
     ProjectSuspensionModule,
     FactorResetsModule,
+    // The hourly usage roll-up (UsageRollupScheduler).
+    UsageModule,
   ],
   providers: [
     PushCampaignProcessor,
@@ -88,6 +92,7 @@ import { IncidentsModule } from '../../modules/incidents/incidents.module';
     SecurityRetentionScheduler,
     FactorResetScheduler,
     ClockCheckScheduler,
+    UsageRollupScheduler,
   ],
 })
 export class ProcessorsModule {}
