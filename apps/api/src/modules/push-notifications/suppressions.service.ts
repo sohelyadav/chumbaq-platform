@@ -194,7 +194,11 @@ export class SuppressionsService {
   async testSendRefusal(projectId: string, channel: AddressedConsentChannel, address: string): Promise<string | null> {
     const normalised = normaliseAddress(channel, address);
     if (!normalised) return null;
-    const suppressed = await this.repository.exists({ where: { projectId, channel, address: normalised } });
+    // A suppression of an erased person's address is kept only as a hash, and a test
+    // send goes to a typed address that no identify ever restored, so both are checked.
+    const suppressed =
+      (await this.repository.exists({ where: { projectId, channel, address: normalised } })) ||
+      (await this.erased.isSuppressedAsHash(projectId, channel, normalised));
     if (suppressed) return 'This address is on the project’s suppression list.';
     // Allow-listed, never caller text: the columns are chosen from the channel.
     const column = channel === 'email' ? 'email' : 'phone_e164';

@@ -220,6 +220,15 @@ export class ErasedSuppressionsService {
     return taken;
   }
 
+  /** Whether this address has a suppression kept only as a hash (erased person, or a late one). */
+  async isSuppressedAsHash(projectId: string, channel: MessageChannel, address: string): Promise<boolean> {
+    const rows: unknown[] = await this.dataSource.query(
+      `SELECT 1 FROM erased_suppressions WHERE project_id = $1 AND channel = $2 AND address_hash = $3 LIMIT 1`,
+      [projectId, channel, this.hashes.suppressionHash(projectId, channel, address)],
+    );
+    return rows.length > 0;
+  }
+
   private keysFor(projectId: string, emails: string[], phones: string[]): AddressKey[] {
     const keys: AddressKey[] = [];
     const add = (channels: MessageChannel[], values: string[]) => {

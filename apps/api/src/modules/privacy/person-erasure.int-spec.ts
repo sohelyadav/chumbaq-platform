@@ -473,6 +473,9 @@ describe('PersonErasureService and PersonExportService (integration)', () => {
     // An address nobody erased stays visible to the tenant, as before.
     expect(await count('channel_suppressions WHERE project_id = $1 AND address = $2', [A, 'never-here@example.com'])).toBe(1);
 
+    // A test send to the address is refused although only the hash is kept.
+    expect(await late.testSendRefusal(A, 'email', ALICE_EMAIL)).toMatch(/suppression list/);
+
     // Still honoured: the address comes back suppressed when it is seen again.
     await identity.identify({ projectId: A, deviceFingerprint: 'fp-late', platform: 'ios', email: ALICE_EMAIL } as never);
     expect(await count('channel_suppressions WHERE project_id = $1 AND address = $2', [A, ALICE_EMAIL])).toBe(1);
