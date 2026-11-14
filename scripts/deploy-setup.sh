@@ -20,12 +20,12 @@ case $DEPLOY_ENV in
   prod)
     ENV_DIR=/home/ubuntu/chumbaq ENV_SITE=chumbaq ENV_APP_HOST=app.chumbaq.com
     ENV_ADMIN_HOST=admin.chumbaq.com ENV_API_PORT=3000 ENV_ADMIN_API_PORT=3011
-    ENV_DB=chumbaq ENV_REDIS_DB=0
+    ENV_DB=chumbaq ENV_REDIS_DB=0 ENV_REDIS_PORT=6379 ENV_REDIS_INSTANCE=
     ;;
   stage)
     ENV_DIR=/home/ubuntu/chumbaq-stage ENV_SITE=chumbaq-stage ENV_APP_HOST=stage.chumbaq.com
     ENV_ADMIN_HOST=admin-stage.chumbaq.com ENV_API_PORT=3100 ENV_ADMIN_API_PORT=3111
-    ENV_DB=chumbaq_stage ENV_REDIS_DB=1
+    ENV_DB=chumbaq_stage ENV_REDIS_DB=0 ENV_REDIS_PORT=6380 ENV_REDIS_INSTANCE=stage
     ;;
   *)
     echo "DEPLOY_ENV must be prod or stage, not '$DEPLOY_ENV'" >&2
@@ -43,6 +43,11 @@ ADMIN_API_PORT="$ENV_ADMIN_API_PORT"
 DB_NAME="$ENV_DB"
 DB_USER="$ENV_DB"
 REDIS_DB="$ENV_REDIS_DB"
+# Each environment has a Redis of its own (stage: the redis-server@stage instance on
+# 6380), with its own password: a DB number is chosen by the client and is no boundary,
+# so one shared password let stage's credential open prod's sign-in state and queues.
+REDIS_PORT="$ENV_REDIS_PORT"
+REDIS_INSTANCE="$ENV_REDIS_INSTANCE"
 REPO_URL="${REPO_URL:-}"
 BRANCH="${BRANCH:-main}"
 
@@ -57,7 +62,7 @@ APP_SERVER_NAME="${APP_SERVER_NAME:-$ENV_APP_HOST}"
 # .env that names another host the script stops (staff passkeys are bound to the host).
 ADMIN_SERVER_NAME="${ADMIN_SERVER_NAME:-$ENV_ADMIN_HOST}"
 
-# Shared by every environment on the server; read from redis.conf when already set.
+# This environment's Redis password; read from its redis config when already set.
 REDIS_PASSWORD="${REDIS_PASSWORD:-}"
 # Optional allow-list for the admin host: IPs or CIDRs, separated by commas or spaces,
 # e.g. ADMIN_ALLOWED_IPS="203.0.113.7, 198.51.100.0/24". Empty allows every address
@@ -117,9 +122,8 @@ write_env_template() {
     printf 'NODE_ENV=production\n\n'
     printf '# Database\nDATABASE_HOST=localhost\nDATABASE_PORT=5432\n'
     printf 'DATABASE_USER=%s\nDATABASE_PASSWORD=%s\nDATABASE_NAME=%s\n\n' "$DB_USER" "$(random_hex 24)" "$DB_NAME"
-    printf '# Redis, shared by every environment on this server. Each uses its own DB number,\n'
-    printf '# so their queues never mix.\n'
-    printf 'REDIS_HOST=127.0.0.1\nREDIS_PORT=6379\nREDIS_PASSWORD=%s\nREDIS_DB=%s\n\n' "$REDIS_PASSWORD" "$REDIS_DB"
+    printf '# Redis: this environment'"'"'s own instance and password, shared with no other.\n'
+    printf 'REDIS_HOST=127.0.0.1\nREDIS_PORT=%s\nREDIS_PASSWORD=%s\nREDIS_DB=%s\n\n' "$REDIS_PORT" "$REDIS_PASSWORD" "$REDIS_DB"
     printf '# API. nginx serves the dashboard on APP_SERVER_NAME and proxies /api, the short-link\n'
     printf '# redirect and /.well-known to this port, so the API is reached on the same host.\n'
     printf 'API_PORT=%s\n' "$API_PORT"
@@ -577,7 +581,7 @@ install_node() {
 # redis.conf from the .env and restarts Redis.
 redis_conf_password() {
   # shellcheck disable=SC2016 # expanded by the inner sh, from its arguments
-  sudo sh -c 'grep -E "^requirepass[[:space:]]" "$1" 2>/dev/null | tail -n 1' sh "$(R /etc/redis/redis.conf)" | awk '{print $2}' || true
+  sudo sh -c 'grep -E "^requirepass[[:space:]]" "$1" 2>/dev/null | tail -n 1' sh "$(R "$(redis_conf_path)")" | awk '{print $2}' || true
 }
 
 choose_redis_password() {
@@ -592,19 +596,28 @@ choose_redis_password() {
     echo "The Redis password must be at least 16 letters and digits" >&2
     return 1
   fi
-  sudo sed -i -E "s/^#?[[:space:]]*maxmemory-policy[[:space:]].*/maxmemory-policy noeviction/" "$(R /etc/redis/redis.conf)"
+  sudo sed -i -E "s/^#?[[:space:]]*maxmemory-policy[[:space:]].*/maxmemory-policy noeviction/" "$(R "$(redis_conf_path)")" 2>/dev/null || true
 }
 
-# $1 = .env. Adds REDIS_PASSWORD (the shared one) and REDIS_DB when missing, and stops if
-# the .env names another password than redis.conf has: setup_redis would switch Redis to
-# it, and every other environment on the server would lose its queues.
+# $1 = .env. Adds REDIS_PASSWORD (this environment's) and REDIS_DB when missing, and stops
+# if the .env names another password than this environment's redis config has. An .env
+# still pointing at another port (stage from when it shared prod's Redis) is moved to this
+# environment's own instance, with a new password of its own.
 ensure_redis_settings() {
-  local current set
+  local current set port
+  port=$(env_value "$1" REDIS_PORT)
+  if [ -n "$port" ] && [ "$port" != "$REDIS_PORT" ]; then
+    echo "  Moving $1 to this environment's own Redis (port $REDIS_PORT, its own password)"
+    env_remove "$1" REDIS_PORT
+    env_remove "$1" REDIS_PASSWORD
+    env_remove "$1" REDIS_DB
+    env_add_if_missing "$1" REDIS_PORT "$REDIS_PORT"
+  fi
   current=$(redis_conf_password)
   set=$(env_value "$1" REDIS_PASSWORD)
   if [ -n "$set" ] && [ -n "$current" ] && [ "$set" != "$current" ]; then
-    echo "REDIS_PASSWORD in $1 differs from the one in /etc/redis/redis.conf, which every" >&2
-    echo "  environment on this server shares. Set it to that one, then run this again." >&2
+    echo "REDIS_PASSWORD in $1 differs from the one in $(redis_conf_path), this" >&2
+    echo "  environment's Redis. Set it to that one, then run this again." >&2
     return 1
   fi
   if [ -z "$set" ]; then

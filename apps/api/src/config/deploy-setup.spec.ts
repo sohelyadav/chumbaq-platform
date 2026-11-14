@@ -174,7 +174,9 @@ describe('scripts/deploy-setup.sh', () => {
         ADMIN_API_PORT: '3111',
         DATABASE_NAME: 'chumbaq_stage',
         DATABASE_USER: 'chumbaq_stage',
-        REDIS_DB: '1',
+        // Its own Redis instance: a DB number is no boundary.
+        REDIS_PORT: '6380',
+        REDIS_DB: '0',
       });
       run(`write_env_template "${file}"`);
       expect(parseDotenv(readFileSync(file, 'utf8'))).toMatchObject({ API_PORT: '3000', REDIS_DB: '0' });
@@ -742,7 +744,8 @@ describe('scripts/deploy-setup.sh', () => {
         expect(result.log).toContain('--only chumbaq-stage-api');
         expect(result.log).toContain('--only chumbaq-stage-worker');
         expect(result.log).toContain('http://127.0.0.1:3100/api/health');
-        expect(readFileSync(path.join(result.app, '.env'), 'utf8')).toMatch(/^REDIS_DB=1$/m);
+        expect(readFileSync(path.join(result.app, '.env'), 'utf8')).toMatch(/^REDIS_PORT=6380$/m);
+        expect(result.log).toContain('sudo systemctl restart redis-server@stage');
       });
 
       // The clock, logs, alarms and file check are the server's, and the alarm script posts
@@ -757,8 +760,8 @@ describe('scripts/deploy-setup.sh', () => {
         expect(existsSync(path.join(result.system, 'etc/logrotate.d/chumbaq-retention'))).toBe(false);
         expect(result.log).not.toMatch(/apt install -y chrony|aideinit|aide --update/);
         expect(readFileSync(path.join(result.app, '.env'), 'utf8')).not.toMatch(/^SECURITY_ALERT_TOKEN=/m);
-        // Redis is still set up: stage's queues need it.
-        expect(result.log).toContain('sudo systemctl restart redis-server');
+        // Redis is still set up: stage's queues need it, in an instance of its own.
+        expect(result.log).toContain('sudo systemctl restart redis-server@stage');
       });
 
       describe('Redis, shared by every environment on the server', () => {
@@ -788,6 +791,43 @@ describe('scripts/deploy-setup.sh', () => {
           expect(result.log).not.toMatch(/^npm /m);
           expect(result.log).not.toContain('restart redis-server');
           expect(readFileSync(path.join(dir, 'system/etc/redis/redis.conf'), 'utf8')).toContain(`requirepass ${password}`);
+        });
+      });
+
+      // Following the audit: one Redis password for every environment let stage's own
+      // credential open prod's sign-in state and queues (a DB number is chosen by the client).
+      describe('Redis, one instance and password per environment', () => {
+        const stageVars = { DEPLOY_ENV: 'stage', ADMIN_SERVER_NAME: 'admin-stage.example.com', APP_SERVER_NAME: 'stage.example.com' };
+        const stageEnv = () => matching.replace(/admin\.example\.com/g, 'admin-stage.example.com');
+        const prodPassword = 'a1b2c3d4e5f6a7b8c9d0e1f2';
+        const prodConf = () => {
+          mkdirSync(path.join(dir, 'system/etc/redis'), { recursive: true });
+          writeFileSync(path.join(dir, 'system/etc/redis/redis.conf'), `requirepass ${prodPassword}\n`);
+        };
+
+        it('gives stage its own instance and password, never prod\'s', () => {
+          prodConf();
+          const result = runWholeScript(dir, { env: stageEnv(), vars: stageVars });
+          expect(result.ok).toBe(true);
+          const env = readFileSync(path.join(result.app, '.env'), 'utf8');
+          const password = /^REDIS_PASSWORD=(.*)$/m.exec(env)?.[1];
+          expect(password).toBeTruthy();
+          expect(password).not.toBe(prodPassword);
+          expect(readFileSync(path.join(result.system, 'etc/redis/redis-stage.conf'), 'utf8')).toContain(`requirepass ${password}`);
+          expect(readFileSync(path.join(result.system, 'etc/redis/redis.conf'), 'utf8')).toContain(`requirepass ${prodPassword}`);
+        });
+
+        it('moves a stage .env still on the shared Redis to its own, with a new password', () => {
+          prodConf();
+          const result = runWholeScript(dir, {
+            env: `${stageEnv()}REDIS_PORT=6379\nREDIS_PASSWORD=${prodPassword}\nREDIS_DB=1\n`,
+            vars: stageVars,
+          });
+          expect(result.ok).toBe(true);
+          const env = readFileSync(path.join(result.app, '.env'), 'utf8');
+          expect(env).toMatch(/^REDIS_PORT=6380$/m);
+          expect(env).toMatch(/^REDIS_DB=0$/m);
+          expect(env).not.toContain(prodPassword);
         });
       });
 

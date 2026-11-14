@@ -313,18 +313,47 @@ sys_append() {
 
 # $1 = .env. Redis on localhost with a password; the API, admin API and worker use it.
 setup_redis() {
-  local env="$1" password conf
-  conf=$(R /etc/redis/redis.conf)
+  local env="$1" password conf base
+  conf=$(R "$(redis_conf_path)")
+  base=$(R /etc/redis/redis.conf)
   sudo apt install -y redis-server
+  if [ -n "${REDIS_INSTANCE:-}" ] && [ ! -f "$conf" ]; then
+    # An instance of its own (redis-server@<name>, /etc/redis/redis-<name>.conf), from
+    # the distribution's config: its own port, data, pid and log.
+    sudo cp "$base" "$conf"
+    sudo sed -i -E \
+      -e "s/^#?[[:space:]]*port[[:space:]].*/port $REDIS_PORT/" \
+      -e "s|^#?[[:space:]]*pidfile[[:space:]].*|pidfile /run/redis-$REDIS_INSTANCE/redis-server.pid|" \
+      -e "s|^#?[[:space:]]*logfile[[:space:]].*|logfile /var/log/redis/redis-server-$REDIS_INSTANCE.log|" \
+      -e "s|^#?[[:space:]]*dir[[:space:]].*|dir /var/lib/redis-$REDIS_INSTANCE|" \
+      -e "/^#?[[:space:]]*unixsocket/d" \
+      "$conf"
+    sudo mkdir -p "$(R "/var/lib/redis-$REDIS_INSTANCE")"
+    sudo chown redis:redis "$(R "/var/lib/redis-$REDIS_INSTANCE")" "$conf"
+  fi
   env_add_if_missing "$env" REDIS_HOST 127.0.0.1
-  env_add_if_missing "$env" REDIS_PORT 6379
+  env_add_if_missing "$env" REDIS_PORT "${REDIS_PORT:-6379}"
   env_add_if_missing "$env" REDIS_PASSWORD "$(openssl rand -hex 32)"
   password=$(env_file_value "$env" REDIS_PASSWORD)
   sudo sed -i -E 's/^#?[[:space:]]*bind .*/bind 127.0.0.1 -::1/' "$conf"
   sudo sed -i -E '/^#?[[:space:]]*requirepass /d' "$conf"
   printf 'requirepass %s\n' "$password" | sys_append "$conf"
-  sudo systemctl enable redis-server
-  sudo systemctl restart redis-server
+  sudo systemctl enable "$(redis_service)"
+  sudo systemctl restart "$(redis_service)"
+}
+
+# This environment's Redis config and systemd unit: the distribution's for prod, an
+# instance of the redis-server@ template for any other (REDIS_INSTANCE, from deploy-setup.sh).
+redis_conf_path() {
+  if [ -n "${REDIS_INSTANCE:-}" ]; then printf '/etc/redis/redis-%s.conf' "$REDIS_INSTANCE"; else printf '/etc/redis/redis.conf'; fi
+}
+redis_service() {
+  if [ -n "${REDIS_INSTANCE:-}" ]; then printf 'redis-server@%s' "$REDIS_INSTANCE"; else printf 'redis-server'; fi
+}
+
+# $1 = .env file, $2 = name: removes every line that sets it.
+env_remove() {
+  sed -i.bak -E "/^[[:space:]]*(export[[:space:]]+)?$2[[:space:]]*[=:]/d" "$1" && rm -f "$1.bak"
 }
 
 # $1 = days. Logs kept $1 days, the distribution's rules moved aside.
