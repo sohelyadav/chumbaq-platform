@@ -168,3 +168,39 @@ describe('StaffAuthService while passkeys are required', () => {
     });
   });
 });
+
+describe('StaffAuthService refusing a wrong password', () => {
+  // The staff audit row is a transactional insert: awaited only for staff addresses, it
+  // made their refusal slower than anyone else's.
+  it('answers a staff address without waiting for the audit row', async () => {
+    const user = {
+      id: 'u1',
+      email: 'staff@example.com',
+      isSuperAdmin: true,
+      suspendedAt: null,
+      passwordHash: await bcrypt.hash('the-real-password', 4),
+    };
+    const audit = { record: jest.fn(() => new Promise(() => undefined)) };
+    const none = {} as any;
+    const service = new StaffAuthService(
+      { findByEmail: jest.fn().mockResolvedValue(user) } as any,
+      { assertUnderLoginLimit: jest.fn().mockResolvedValue(undefined) } as any,
+      { record: jest.fn().mockResolvedValue(undefined) } as any,
+      none,
+      none,
+      none,
+      { failedLater: jest.fn() } as any,
+      none,
+      none,
+      none,
+      audit as any,
+      none,
+      none,
+      config(true),
+      none,
+    );
+
+    await expect(service.login('staff@example.com', 'a-wrong-guess')).rejects.toThrow(UnauthorizedException);
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'staff.sign_in_failed' }));
+  });
+});

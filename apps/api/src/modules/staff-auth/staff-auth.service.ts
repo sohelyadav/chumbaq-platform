@@ -2,8 +2,10 @@ import * as bcrypt from 'bcrypt';
 import {
   ForbiddenException,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
+import { logValue } from '../../common/log-value';
 import { ConfigService } from '@nestjs/config';
 import type { BillingConfig } from '../../config/billing.config';
 import { DataSource } from 'typeorm';
@@ -70,6 +72,8 @@ export interface StaffRefreshResult {
  */
 @Injectable()
 export class StaffAuthService {
+  private readonly logger = new Logger(StaffAuthService.name);
+
   constructor(
     private readonly users: UsersService,
     private readonly auth: AuthService,
@@ -174,6 +178,12 @@ export class StaffAuthService {
     this.alarms.failedLater(user.email, context.ipAddress ?? null);
   }
 
+  private auditFailureLater(user: UserEntity, reason: string, context: RequestContext): void {
+    void this.auditFailure(user, reason, context).catch((error: unknown) => {
+      this.logger.error(`Could not audit a staff sign-in failure: ${logValue((error as Error).message)}`);
+    });
+  }
+
   // ---- Signing in
 
   async login(
@@ -194,7 +204,10 @@ export class StaffAuthService {
       throw await fail('unknown_email', null);
     }
     if (!(await bcrypt.compare(password, user.passwordHash))) {
-      if (user.isSuperAdmin) await this.auditFailure(user, 'wrong_password', context);
+      // Written after answering, not before: awaiting a transactional insert only for
+      // staff addresses made their refusal measurably slower than anyone else's, which
+      // told an anonymous caller which addresses are staff.
+      if (user.isSuperAdmin) this.auditFailureLater(user, 'wrong_password', context);
       throw await fail('wrong_password', user);
     }
     // After the password, and the same answer as a wrong one, so the admin app tells
