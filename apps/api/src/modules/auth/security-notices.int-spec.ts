@@ -123,11 +123,13 @@ describe('Security notices (integration)', () => {
       expect(await subjects()).toHaveLength(1);
     });
 
-    it('stays quiet when the user agent says nothing it can name', async () => {
+    // Leaving the header out must not be a way to sign in unannounced.
+    it('is told about a user agent that names nothing, once', async () => {
       await signIn(CHROME_MAC);
       await signIn('curl/8.7.1');
       await signIn(undefined);
-      expect(await subjects()).toEqual([]);
+      expect(await subjects()).toHaveLength(1);
+      expect(sent[0].text).toContain('an unrecognised browser or app');
     });
 
     it('remembers devices whose sessions have ended', async () => {

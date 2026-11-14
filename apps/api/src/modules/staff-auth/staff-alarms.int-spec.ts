@@ -102,12 +102,16 @@ describe('staff sign-in alarms', () => {
       ]);
     });
 
-    it('raises nothing when the device cannot be named', async () => {
+    it('raises staff.new_device for a user agent that names nothing, but not twice', async () => {
       const user = await staff();
       await session(user.id, CHROME_MAC);
       const now = await session(user.id, 'curl/8.4.0');
       await service().signedIn(user, now, { ipAddress: '203.0.113.3', userAgent: 'curl/8.4.0' });
-      expect(raised).toEqual([]);
+      expect(raised.map((r) => r.kind)).toEqual(['staff.new_device']);
+
+      const again = await session(user.id, '');
+      await service().signedIn(user, again, { ipAddress: '203.0.113.3', userAgent: '' });
+      expect(raised).toHaveLength(1);
     });
   });
 

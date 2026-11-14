@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
-import { deviceFamily } from '../auth/sessions.service';
+import { noticeDevice } from '../auth/sessions.service';
 import { SecurityAlertsService } from '../security-alerts/security-alerts.service';
 
 /** Failed staff sign-ins (by email or by address) within this many minutes ... */
@@ -47,8 +47,7 @@ export class StaffAlarmsService {
     sessionId: string,
     context: { ipAddress?: string | null; userAgent?: string | null },
   ): Promise<void> {
-    const device = deviceFamily(context.userAgent);
-    if (!device) return;
+    const device = noticeDevice(context.userAgent);
     const earlier: { user_agent: string | null }[] = await this.dataSource.query(
       `SELECT user_agent FROM staff_sessions WHERE user_id = $1 AND id <> $2 ORDER BY created_at DESC LIMIT $3`,
       [user.id, sessionId, DEVICE_HISTORY_LIMIT],
@@ -64,7 +63,7 @@ export class StaffAlarmsService {
         [user.id],
       );
       if (before.length === 0) return;
-    } else if (earlier.some((s) => deviceFamily(s.user_agent) === device)) {
+    } else if (earlier.some((s) => noticeDevice(s.user_agent) === device)) {
       return;
     }
     await this.alerts.raise(

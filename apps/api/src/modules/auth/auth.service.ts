@@ -17,7 +17,7 @@ import { LoginDto } from './dto/login.dto';
 import { UserEntity } from '../users/entities/user.entity';
 import { AuthEventsService, RequestContext } from '../auth-events/auth-events.service';
 import { SecurityNoticesService } from '../platform-email/security-notices.service';
-import { deviceFamily, SessionAuth, SessionsService } from './sessions.service';
+import { noticeDevice, SessionAuth, SessionsService } from './sessions.service';
 import { AccountRecoveryService } from './account-recovery.service';
 import { FACTOR_CHANGE_PROOF, PreAuthService } from './pre-auth.service';
 import { DEFAULT_REFRESH_LIFETIME_MS, DEFAULT_SESSION_MAX_AGE_MS } from '../../config/jwt.config';
@@ -291,7 +291,7 @@ export class AuthService {
       if (await this.sessions.isNewDevice(user.id, sessionId, context.userAgent)) {
         await this.notices.newDevice(
           user,
-          deviceFamily(context.userAgent) as string,
+          noticeDevice(context.userAgent),
           context.ipAddress,
         );
       }

@@ -23,6 +23,16 @@ export function deviceFamily(userAgent?: string | null): string | null {
   return browser.name && os.name ? `${browser.name} on ${os.name}` : null;
 }
 
+/**
+ * The device as the new-device checks compare it. A user agent that names nothing (a
+ * script, a blanked header) is one device of its own rather than none at all: treating
+ * it as nothing let anyone sign in unannounced just by leaving the header out.
+ */
+export const UNRECOGNISED_DEVICE = 'an unrecognised browser or app';
+export function noticeDevice(userAgent?: string | null): string {
+  return deviceFamily(userAgent) ?? UNRECOGNISED_DEVICE;
+}
+
 /** What the session's tokens say about how it was authenticated. */
 export interface SessionAuth {
   amr: string[];
@@ -78,13 +88,12 @@ export class SessionsService {
   /**
    * Whether this browser and operating system are new to the account. Not the address:
    * those change daily on a phone, and a notice for every change would train people to
-   * ignore it. False when nothing can be said, either because the device cannot be named
-   * or because the account has no earlier sessions to compare with, as with one from
-   * before this table existed, which would otherwise be told on its first sign-in.
+   * ignore it. A user agent that names nothing counts as one device of its own
+   * (`noticeDevice`). False on an account's first sign-in, which has nothing to compare
+   * with.
    */
   async isNewDevice(userId: string, sessionId: string, userAgent?: string | null): Promise<boolean> {
-    const device = deviceFamily(userAgent);
-    if (!device) return false;
+    const device = noticeDevice(userAgent);
     const earlier = await this.repository.find({
       select: { userAgent: true },
       where: { userId, id: Not(sessionId) },
@@ -95,7 +104,7 @@ export class SessionsService {
     // of an account unused for a month, which would silence the notice exactly when a
     // dormant account is signed into from somewhere new. Sign-ins are kept far longer.
     if (earlier.length === 0) return this.signedInBefore(userId);
-    return !earlier.some((session) => deviceFamily(session.userAgent) === device);
+    return !earlier.some((session) => noticeDevice(session.userAgent) === device);
   }
 
   /** A successful sign-in recorded before this one (a minute's margin for its own row). */
