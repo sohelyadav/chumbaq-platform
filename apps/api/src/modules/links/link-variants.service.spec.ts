@@ -14,6 +14,7 @@ describe('LinkVariantsService', () => {
   const repo = {
     create: jest.fn(),
     save: jest.fn(),
+    increment: jest.fn(),
     find: jest.fn(),
     findOne: jest.fn(),
     remove: jest.fn(),
@@ -224,7 +225,9 @@ describe('LinkVariantsService', () => {
 
       expect(result?.id).toBe('v-1');
       expect(result?.clicks).toBe(1);
-      expect(repo.save).toHaveBeenCalledWith(expect.objectContaining({ id: 'v-1', clicks: 1 }));
+      // Only the counter, atomically: never a save() of the row read before.
+      expect(repo.increment).toHaveBeenCalledWith({ id: 'v-1', linkId: 'l-1' }, 'clicks', 1);
+      expect(repo.save).not.toHaveBeenCalled();
     });
 
     it('selects the second variant when random skips past the first', async () => {

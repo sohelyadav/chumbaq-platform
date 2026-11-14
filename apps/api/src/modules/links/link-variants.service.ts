@@ -116,8 +116,11 @@ export class LinkVariantsService {
     for (const variant of variants) {
       random -= variant.weight;
       if (random <= 0) {
+        // One UPDATE of the counter alone. save() of the row read above would write
+        // back any destination or weight a tenant changed meanwhile, and insert a
+        // variant they deleted.
+        await this.variantRepository.increment({ id: variant.id, linkId }, 'clicks', 1);
         variant.clicks++;
-        await this.variantRepository.save(variant);
         return variant;
       }
     }
