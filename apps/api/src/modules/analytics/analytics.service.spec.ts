@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { AnalyticsService } from './analytics.service';
+import { AnalyticsService, CLICK_EXPORT_ROW_CAP } from './analytics.service';
 import { ClickEventEntity } from './entities/click-event.entity';
 import { ConversionEventEntity } from '../conversions/entities/conversion-event.entity';
 import { LinksService } from '../links/links.service';
@@ -563,6 +563,12 @@ describe('AnalyticsService', () => {
   // exportClicksAsCsv
   // ---------------------------------------------------------------------------
   describe('exportClicksAsCsv', () => {
+    it('reads at most the export cap, newest first', async () => {
+      clickQb.getMany.mockResolvedValueOnce([]);
+      await service.exportClicksAsCsv('link-1');
+      expect(clickQb.take).toHaveBeenCalledWith(CLICK_EXPORT_ROW_CAP);
+    });
+
     it('builds a CSV with header row', async () => {
       clickQb.getMany.mockResolvedValueOnce([
         {

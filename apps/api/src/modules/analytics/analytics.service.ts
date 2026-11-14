@@ -11,6 +11,9 @@ import { WebhooksService } from '../webhooks/webhooks.service';
 import { ProjectAccessService } from '../project-access/project-access.service';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 
+/** The most clicks one link export returns; the response says when it stopped there. */
+export const CLICK_EXPORT_ROW_CAP = 50_000;
+
 /**
  * Redirect types a deferred install can still follow from. See the note on
  * `isDeferred` in `recordClick` for why `app_deeplink` has to be in this list
@@ -445,7 +448,9 @@ export class AnalyticsService {
       qb.andWhere('click.clicked_at <= :end', { end });
     }
 
-    const clicks = await qb.getMany();
+    // Newest first, at most the cap: the file is built in memory in the shared API
+    // process, and a popular link has millions of clicks.
+    const clicks = await qb.take(CLICK_EXPORT_ROW_CAP).getMany();
 
     const header = 'id,clicked_at,ip_address,platform,device_type,os,browser,country,city,referrer,redirect_type';
     const rows = clicks.map((c) =>

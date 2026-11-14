@@ -24,7 +24,7 @@ import { ProjectAccessContext } from '../project-access/project-access.decorator
 import type { ProjectAccess } from '../project-access/project-access.service';
 import { requesterOf } from '../project-activity/messaging-activity';
 import { LinksService } from './links.service';
-import { QrCodeService } from './qr-code.service';
+import { QrCodeService, QR_MAX_SIZE, QR_MIN_SIZE } from './qr-code.service';
 import { BulkLinkService } from './bulk-link.service';
 import { LinkVariantsService } from './link-variants.service';
 import { CreateLinkDto } from './dto/create-link.dto';
@@ -111,12 +111,13 @@ export class LinksController {
     const link = await this.linksService.findOne(id);
     const appUrl = this.configService.getOrThrow<string>('app.appUrl');
     const shortUrl = `${appUrl}/${link.shortCode}`;
-    const qrData = await this.qrCodeService.generateQrCode(
-      shortUrl,
-      format || 'png',
-      size ? parseInt(size, 10) : 300,
-    );
-    return { qrCode: qrData, format: format || 'png', shortUrl };
+    // Bounded: the renderer allocates width x width pixels synchronously in the shared
+    // API process, so an unbounded size could block or exhaust it.
+    const requested = size ? parseInt(size, 10) : 300;
+    const width = Number.isFinite(requested) ? Math.min(Math.max(requested, QR_MIN_SIZE), QR_MAX_SIZE) : 300;
+    const kind = format === 'svg' ? 'svg' : 'png';
+    const qrData = await this.qrCodeService.generateQrCode(shortUrl, kind, width);
+    return { qrCode: qrData, format: kind, shortUrl };
   }
 
   @RequireProjectPermission('messaging.write', { resource: 'link', param: 'id' })

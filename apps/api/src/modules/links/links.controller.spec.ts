@@ -38,3 +38,29 @@ describe('LinksController route permissions', () => {
     );
   });
 });
+
+describe('LinksController QR size', () => {
+  const build = () => {
+    const qr = { generateQrCode: jest.fn(async () => 'data') };
+    const controller = new LinksController(
+      { findOne: jest.fn(async () => ({ shortCode: 'abc' })) } as never,
+      qr as never,
+      {} as never,
+      {} as never,
+      { getOrThrow: () => 'https://app.example.test' } as never,
+    );
+    return { controller, qr };
+  };
+
+  it.each([
+    ['100000000', 1024],
+    ['5', 64],
+    ['abc', 300],
+    [undefined, 300],
+    ['512', 512],
+  ])('renders size %p at %p pixels', async (size, width) => {
+    const { controller, qr } = build();
+    await controller.getQrCode('00000000-0000-0000-0000-000000000001', undefined, size);
+    expect(qr.generateQrCode).toHaveBeenCalledWith('https://app.example.test/abc', 'png', width);
+  });
+});

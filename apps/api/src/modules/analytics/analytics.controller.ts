@@ -10,7 +10,7 @@ import {
 import { Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
-import { AnalyticsService } from './analytics.service';
+import { AnalyticsService, CLICK_EXPORT_ROW_CAP } from './analytics.service';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { RequireProjectPermission } from '../project-access/require-project-permission.decorator';
 import { refuseViewAs } from '../project-access/view-as';
@@ -85,11 +85,14 @@ export class AnalyticsController {
     const startDate = start ? new Date(start) : undefined;
     const endDate = end ? new Date(end) : undefined;
     const csv = await this.analyticsService.exportClicksAsCsv(id, startDate, endDate);
-    this.volume.exported(user.userId, null, countCsvRows(csv), 'link clicks export');
+    const rows = countCsvRows(csv);
+    this.volume.exported(user.userId, null, rows, 'link clicks export');
 
     res.set({
       'Content-Type': 'text/csv',
       'Content-Disposition': `attachment; filename="analytics-${id}.csv"`,
+      'X-Export-Row-Cap': String(CLICK_EXPORT_ROW_CAP),
+      'X-Export-Truncated': String(rows >= CLICK_EXPORT_ROW_CAP),
     });
     res.send(csv);
   }

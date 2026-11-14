@@ -19,6 +19,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { RequireProjectPermission } from '../project-access/require-project-permission.decorator';
 import { MessageStatus } from './entities/in-app-message.entity';
+import { queryLimit } from '../../common/query-limit';
 
 @Controller('projects/:projectId/in-app-messages')
 @UseGuards(JwtAuthGuard)
@@ -47,7 +48,7 @@ export class InAppMessagesController {
   ) {
     return this.messagesService.findAll(projectId, {
       status,
-      limit: limit ? parseInt(limit, 10) : 50,
+      limit: queryLimit(limit, 50),
       offset: offset ? parseInt(offset, 10) : 0,
     });
   }

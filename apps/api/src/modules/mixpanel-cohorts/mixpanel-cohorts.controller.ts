@@ -26,6 +26,7 @@ import { redactSecrets } from '../project-access/redact-secrets';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { activityContext } from '../project-activity/activity-context';
 import { requesterOf } from '../project-activity/messaging-activity';
+import { queryLimit } from '../../common/query-limit';
 
 @Controller('projects/:projectId/mixpanel')
 @UseGuards(JwtAuthGuard)
@@ -126,7 +127,7 @@ export class MixpanelCohortsController {
       resolved === 'true' ? true : resolved === 'false' ? false : undefined;
     return this.mixpanelCohortsService.listCohortMembers(projectId, cohortId, {
       page: parseInt(page, 10),
-      limit: parseInt(limit, 10),
+      limit: queryLimit(limit, 50),
       resolved: resolvedFilter,
     });
   }

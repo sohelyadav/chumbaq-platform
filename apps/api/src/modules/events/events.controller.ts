@@ -15,6 +15,7 @@ import { TrackEventDto } from './dto/track-event.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RequireProjectPermission } from '../project-access/require-project-permission.decorator';
 import { ApiKeyGuard } from '../api-keys/guards/api-key.guard';
+import { queryLimit } from '../../common/query-limit';
 
 @Controller()
 export class EventsController {
@@ -43,7 +44,7 @@ export class EventsController {
     @Query('end') end?: string,
   ) {
     return this.eventsService.queryByProject(projectId, {
-      limit: limit ? parseInt(limit, 10) : 50,
+      limit: queryLimit(limit, 50),
       offset: offset ? parseInt(offset, 10) : 0,
       eventName,
       start,

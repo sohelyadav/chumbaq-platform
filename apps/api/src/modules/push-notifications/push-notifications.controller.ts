@@ -37,6 +37,7 @@ import { MESSAGE_CHANNELS, MessageChannel } from './message-channel';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { activityContext } from '../project-activity/activity-context';
 import { requesterOf } from '../project-activity/messaging-activity';
+import { queryLimit } from '../../common/query-limit';
 
 @Controller('push-notifications')
 @UseGuards(JwtAuthGuard)
@@ -297,7 +298,7 @@ export class PushNotificationsController {
     }
     return this.pushNotificationsService.getLogs(
       projectId,
-      limit ? parseInt(limit, 10) : 50,
+      queryLimit(limit, 50),
       offset ? parseInt(offset, 10) : 0,
       channel as MessageChannel | undefined,
     );

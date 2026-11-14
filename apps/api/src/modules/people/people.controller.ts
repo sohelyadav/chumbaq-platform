@@ -11,6 +11,7 @@ import {
 import { PeopleService } from './people.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RequireProjectPermission } from '../project-access/require-project-permission.decorator';
+import { queryLimit } from '../../common/query-limit';
 
 @Controller('projects/:projectId/users')
 @UseGuards(JwtAuthGuard)
@@ -33,7 +34,7 @@ export class PeopleController {
     return this.peopleService.listPeople(projectId, {
       search,
       page: page ? parseInt(page, 10) : 1,
-      limit: limit ? parseInt(limit, 10) : 20,
+      limit: queryLimit(limit, 20),
       status,
       pushEnabled: pushEnabled === 'true' ? true : pushEnabled === 'false' ? false : undefined,
       country,
@@ -72,7 +73,7 @@ export class PeopleController {
   ) {
     return this.peopleService.getPersonEvents(projectId, personId, {
       page: page ? parseInt(page, 10) : 1,
-      limit: limit ? parseInt(limit, 10) : 50,
+      limit: queryLimit(limit, 50),
       eventName,
     });
   }
