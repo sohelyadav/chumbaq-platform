@@ -37,9 +37,19 @@ const OVERRIDABLE = new Set([
   'tax_amount',
 ]);
 
-/** A fixture as Razorpay sent it, parsed from its file. */
+/**
+ * A fixture as Razorpay sends it, parsed from its file. One documented example,
+ * `subscription.activated` with a payment, has the event's `created_at` inside
+ * `payload` (a slip in the docs: every other example has it at the top), so it is
+ * moved up, as `razorpay-payload.spec.ts` does.
+ */
 export function razorpayFixture(name: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(path.join(FIXTURES, `${name}.json`), 'utf8'));
+  const body = JSON.parse(readFileSync(path.join(FIXTURES, `${name}.json`), 'utf8'));
+  if (body.created_at === undefined && body.payload?.created_at !== undefined) {
+    body.created_at = body.payload.created_at;
+    delete body.payload.created_at;
+  }
+  return body;
 }
 
 /**

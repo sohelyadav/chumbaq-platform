@@ -15,6 +15,7 @@ import { ConversionsModule } from './modules/conversions/conversions.module';
 import { TeamsModule } from './modules/teams/teams.module';
 import { RedirectModule } from './modules/redirect/redirect.module';
 import { HealthModule } from './modules/health/health.module';
+import { BillingModule } from './modules/billing/billing.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 
@@ -132,6 +133,8 @@ import { QueueModule } from './queue/queue.module';
     ProjectActivityApiModule,
     // Usage roll-up tables: registered here so dev synchronize creates them.
     UsageModule,
+    // Billing: the provider webhook; every route 404s while billing is off.
+    BillingModule,
     // GET /api/health: the deploy scripts wait on it after each (re)start.
     HealthModule,
     // RedirectModule must be last so /:shortCode doesn't intercept /api/* routes
