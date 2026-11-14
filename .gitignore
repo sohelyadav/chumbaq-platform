@@ -56,3 +56,8 @@ GoogleService-Info.plist
 .claude/*.bak*
 .claude-flow/
 .superpowers/
+
+# End-to-end test output (Playwright traces, screenshots, reports, stack logs)
+e2e/.artefacts/
+playwright-report/
+test-results/
