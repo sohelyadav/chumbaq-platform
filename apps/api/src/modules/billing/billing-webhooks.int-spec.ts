@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID } from 'crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'crypto';
 import { Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { BootedApp, bootIntApp } from '../../test-support/int-apps';
@@ -161,6 +161,34 @@ describe('billing webhook (integration)', () => {
     const [after] = await ds.query(`SELECT updated_at FROM billing_subscriptions WHERE id = $1`, [w.subId]);
     expect(after.updated_at.getTime()).toBe(before.updated_at.getTime());
     expect((await eventRow(first.eventId)).attempts).toBe(1);
+  });
+
+  it('replay: the same signed body under a new event id is the same event, and adds no row', async () => {
+    const w = await world();
+    const raw = charged(w);
+    const first = await post(raw);
+    expect(first.body.data).toEqual({ received: true });
+    const [{ n: before }] = await ds.query(`SELECT count(*)::int AS n FROM billing_events`);
+
+    // The signature covers the body only: anyone holding one genuine body can post it with any id.
+    for (let i = 0; i < 3; i++) {
+      const again = await post(raw);
+      expect(again.status).toBe(200);
+      expect(again.body.data).toEqual({ received: true, replay: true });
+      expect(await eventRow(again.eventId)).toBeUndefined();
+    }
+    const [{ n: after }] = await ds.query(`SELECT count(*)::int AS n FROM billing_events`);
+    expect(after).toBe(before);
+    expect((await eventRow(first.eventId)).body_sha256).toBe(createHash('sha256').update(raw).digest('hex'));
+  });
+
+  it('replay: a signed body it could not read, posted again under a new id, adds no row', async () => {
+    const raw = `{"event": "x", "unreadable": "${hex()}"}`;
+    const first = await post(raw);
+    expect(first.status).toBe(200);
+    const again = await post(raw);
+    expect(again.status).toBe(200);
+    expect(await eventRow(again.eventId)).toBeUndefined();
   });
 
   describe('foreign events', () => {

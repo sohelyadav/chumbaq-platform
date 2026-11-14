@@ -12,9 +12,9 @@ const DETAIL_CHARS = 320;
  * Records a billing event once per id in `billing_events` and applies it, the same
  * way for a verified webhook and for the worker's reconciliation:
  *
- * - inserted once per provider event id; a repeat of a settled event (applied or
- *   ignored) is a replay and changes nothing, while a pending or failed one is
- *   applied again;
+ * - inserted once per provider event id, and once per signed body (the provider
+ *   signs the body, not the id); a repeat of a settled event (applied or ignored)
+ *   is a replay and changes nothing, while a pending or failed one is applied again;
  * - applied in its own transaction, under a lock on the event row (so two copies
  *   arriving together apply it once), with the outcome written in the same
  *   transaction;
@@ -29,22 +29,28 @@ export class BillingLedgerService {
   ) {}
 
   /** Inserts a body that carried a valid signature but could not be read, as ignored. */
-  async recordInvalid(eventId: string, now: Date): Promise<void> {
+  async recordInvalid(eventId: string, now: Date, bodySha256: string | null = null): Promise<void> {
     await this.dataSource.query(
-      `INSERT INTO billing_events (provider, provider_event_id, type, event_created_at, payload, outcome, detail, received_at)
-       VALUES ('razorpay', $1, 'invalid', $2, '{}', 'ignored', 'invalid payload', $2)
-       ON CONFLICT (provider_event_id) DO NOTHING`,
-      [eventId, now],
+      `INSERT INTO billing_events
+         (provider, provider_event_id, type, event_created_at, payload, outcome, detail, received_at, body_sha256)
+       VALUES ('razorpay', $1, 'invalid', $2, '{}', 'ignored', 'invalid payload', $2, $3)
+       ON CONFLICT DO NOTHING`,
+      [eventId, now, bodySha256],
     );
   }
 
+  /**
+   * `bodySha256` is the hash of a webhook's signed body (null for synthetic events):
+   * a body already recorded is the same event, whatever id it carries now.
+   */
   async recordAndApply(
     eventId: string,
     event: BillingEvent,
     payload: Record<string, unknown>,
     now: Date,
+    bodySha256: string | null = null,
   ): Promise<LedgerResult> {
-    const recorded = await this.record(eventId, event, payload, now);
+    const recorded = await this.record(eventId, event, payload, now, bodySha256);
     if (recorded.settled) return { status: 'replay', notices: [] };
 
     try {
@@ -72,24 +78,32 @@ export class BillingLedgerService {
     }
   }
 
-  /** Inserts the event once; on a repeat, says whether an earlier copy settled it. */
+  /**
+   * Inserts the event once per id and once per body; on a repeat of either, says
+   * whether an earlier copy settled it (the row with this id first, else the one
+   * with this body).
+   */
   private async record(
     eventId: string,
     event: BillingEvent,
     payload: Record<string, unknown>,
     now: Date,
+    bodySha256: string | null,
   ): Promise<{ id: string; settled: boolean }> {
     const [inserted] = await this.dataSource.query(
-      `INSERT INTO billing_events (provider, provider_event_id, type, event_created_at, payload, received_at)
-       VALUES ('razorpay', $1, $2, $3, $4, $5)
-       ON CONFLICT (provider_event_id) DO NOTHING
+      `INSERT INTO billing_events (provider, provider_event_id, type, event_created_at, payload, received_at, body_sha256)
+       VALUES ('razorpay', $1, $2, $3, $4, $5, $6)
+       ON CONFLICT DO NOTHING
        RETURNING id`,
-      [eventId, event.type.slice(0, 64), event.createdAt, payload, now],
+      [eventId, event.type.slice(0, 64), event.createdAt, payload, now, bodySha256],
     );
     if (inserted) return { id: inserted.id, settled: false };
     const [existing] = await this.dataSource.query(
-      `SELECT id, outcome FROM billing_events WHERE provider_event_id = $1`,
-      [eventId],
+      `SELECT id, outcome FROM billing_events
+        WHERE provider_event_id = $1 OR ($2::char(64) IS NOT NULL AND body_sha256 = $2)
+        ORDER BY (provider_event_id = $1) DESC
+        LIMIT 1`,
+      [eventId, bodySha256],
     );
     return { id: existing.id, settled: existing.outcome === 'applied' || existing.outcome === 'ignored' };
   }

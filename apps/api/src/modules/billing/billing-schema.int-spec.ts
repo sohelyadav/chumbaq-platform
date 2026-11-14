@@ -319,6 +319,9 @@ describe('billing schema (integration)', () => {
       await expect(
         ds.query(`UPDATE billing_events SET received_at = received_at - interval '1 day' WHERE id = $1`, [id]),
       ).rejects.toThrow(/billing_events is append-only/);
+      await expect(
+        ds.query(`UPDATE billing_events SET body_sha256 = repeat('a', 64) WHERE id = $1`, [id]),
+      ).rejects.toThrow(/billing_events is append-only/);
       await expect(ds.query(`DELETE FROM billing_events WHERE id = $1`, [id])).rejects.toThrow(
         /billing_events is append-only/,
       );

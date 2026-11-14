@@ -1,4 +1,4 @@
-import { Check, Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
+import { Check, Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 
 export type BillingEventOutcome = 'pending' | 'applied' | 'ignored' | 'failed';
 
@@ -13,8 +13,13 @@ export type BillingEventOutcome = 'pending' | 'applied' | 'ignored' | 'failed';
  *
  * `payload` keeps allow-listed fields only (`storedPayload`): no card, bank, contact
  * or notes fields are stored.
+ *
+ * `body_sha256` is the hash of a webhook's signed body, unique: the provider signs
+ * the body and not the event id header, so a body already stored is a replay under
+ * whatever id it arrives with. Null for synthetic events.
  */
 @Entity('billing_events')
+@Index('IDX_billing_events_body_sha256', ['bodySha256'], { unique: true, where: '"body_sha256" IS NOT NULL' })
 @Check('CHK_billing_events_outcome', `"outcome" IN ('pending', 'applied', 'ignored', 'failed')`)
 export class BillingEventEntity {
   @PrimaryGeneratedColumn('uuid', { primaryKeyConstraintName: 'PK_billing_events' })
@@ -37,6 +42,9 @@ export class BillingEventEntity {
 
   @Column({ type: 'jsonb' })
   payload: Record<string, unknown>;
+
+  @Column({ type: 'char', length: 64, name: 'body_sha256', nullable: true })
+  bodySha256: string | null;
 
   @Column({ type: 'varchar', length: 8, default: 'pending' })
   outcome: BillingEventOutcome;
