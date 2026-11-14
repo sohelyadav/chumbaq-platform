@@ -28,6 +28,7 @@ import { SessionsService } from '../auth/sessions.service';
 import type { SecurityNoticesService } from '../platform-email/security-notices.service';
 import { UserEntity } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { UsersController } from '../users/users.controller';
 import { cancelAllRequestedBy, lockResetTargetsOf } from './cancel-requested-by';
 import { FactorResetEntity } from './entities/factor-reset.entity';
 import { FactorResetActor, FactorResetsService } from './factor-resets.service';
@@ -1196,6 +1197,27 @@ describe('FactorResetsService (integration)', () => {
 
       // A super admin who lost their keys and their password: passkeys-reset arms the
       // block, so only a link staff issue after checking who is asking gets them back in.
+      // Changing the password in a session proves control as a sign-in does; the link
+      // would otherwise overwrite the new password once its wait is over.
+      it('is spent when the owner changes their own password', async () => {
+        const admin = await makeStaff('changes-own-password');
+        await resetSuperAdminPasskeys(ds, admin.email, null, () => undefined);
+        const token = await staffLink(admin);
+
+        await new UsersController(
+          new UsersService(ds.getRepository(UserEntity)),
+          { record: async () => undefined } as never,
+          { passwordChangedByOwner: () => undefined } as never,
+          resets,
+        ).changePassword(admin.id, { currentPassword: PASSWORD, newPassword: 'owner-new-password' } as never, {
+          headers: {},
+          socket: {},
+        } as never);
+
+        expect(await usedAtOf(admin.id)).not.toBeNull();
+        await expect(recovery.resetPassword(token, 'attacker-password-1')).rejects.toThrow(BadRequestException);
+      });
+
       // The link went to whoever staff spoke to, never through the mailbox.
       it('does not mark the address verified when the reset used a link staff issued', async () => {
         const admin = await makeStaff('unverified-mailbox');

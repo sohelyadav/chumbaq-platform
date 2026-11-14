@@ -15,6 +15,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AuthEventsService } from '../auth-events/auth-events.service';
 import { SecurityNoticesService } from '../platform-email/security-notices.service';
 import { getClientIp } from '../../common/client-ip';
+import { FactorResetsService } from '../factor-resets/factor-resets.service';
 
 @Controller('users')
 @UseGuards(JwtAuthGuard)
@@ -23,6 +24,7 @@ export class UsersController {
     private readonly usersService: UsersService,
     private readonly events: AuthEventsService,
     private readonly notices: SecurityNoticesService,
+    private readonly factorResets: FactorResetsService,
   ) {}
 
   @Patch('me/password')
@@ -46,15 +48,19 @@ export class UsersController {
 
     const newPasswordHash = await bcrypt.hash(dto.newPassword, 12);
     await this.usersService.changeOwnPassword(userId, newPasswordHash);
+    const context = { ipAddress: getClientIp(req), userAgent: req.headers['user-agent'] };
     await this.events.record({
       type: 'password.changed',
       userId,
       email: user.email,
-      ipAddress: getClientIp(req),
-      userAgent: req.headers['user-agent'],
+      ...context,
     });
     this.notices.passwordChangedByOwner(user);
+    // The owner, in a full session, just proved the password: a reset link support
+    // issued in their name is now going to someone else, and would later overwrite
+    // this new password. Spent as a sign-in spends it.
+    const staffLinkPending = await this.factorResets.voidStaffLinksOnSignIn(user, 'password', context);
 
-    return { message: 'Password updated successfully' };
+    return { message: 'Password updated successfully', ...(staffLinkPending ? { staffLinkPending } : {}) };
   }
 }
