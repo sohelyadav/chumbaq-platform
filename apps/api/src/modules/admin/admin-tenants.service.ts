@@ -11,6 +11,7 @@ import type {
   AdminAuditAction,
   AdminTenantDetail,
   AdminTenantProject,
+  AdminTenantSort,
   AdminTenantSummary,
 } from '@chumbaq/shared';
 import {
@@ -23,7 +24,9 @@ import { effectiveProjectLimit } from '../projects/projects.service';
 import { UserEntity } from '../users/entities/user.entity';
 import { AdminAuditService } from './admin-audit.service';
 import { toAuditLog } from './admin-audit-logs.service';
-import { ListAdminTenantsDto } from './dto/admin-tenants.dto';
+import { AdminTenantsFilterDto, ListAdminTenantsDto } from './dto/admin-tenants.dto';
+import { QUIET_AFTER_DAYS, TenantUsageAggregate, tenantUsageCte } from './admin-usage.service';
+import { readUsageCoverage } from '../usage/usage-rollup.service';
 import { AdminAuditLogEntity } from './entities/admin-audit-log.entity';
 
 export interface AdminActor {
@@ -51,6 +54,91 @@ const TENANT_COLUMNS = [
   'user.createdAt',
 ];
 
+/** A tenant's own columns, as the list query and the entity both give them. */
+interface TenantRow {
+  id: string;
+  email: string;
+  name: string;
+  isSuperAdmin: boolean;
+  suspendedAt: Date | null;
+  suspendedReason: string | null;
+  createdAt: Date;
+}
+
+/** A list row: the tenant, its usage (null when it has none) and the filtered total. */
+interface TenantListRow extends TenantRow {
+  mau: string | null;
+  messages: string | null;
+  lastUsageDay: string | null;
+  total: string;
+}
+
+/** Signed up within this many days counts as new. */
+const NEW_TENANT_DAYS = 30;
+
+/**
+ * The SQL for each sort, chosen from this fixed map and never from the input.
+ * Usage columns are null for a tenant with no usage, which sorts last either way.
+ */
+const SORT_COLUMNS: Record<AdminTenantSort, string> = {
+  created_at: 'u.created_at',
+  mau_this_month: 'usage.mau_this_month',
+  messages_sent_30d: 'usage.messages_sent_30d',
+  last_usage_day: 'usage.last_usage_day',
+};
+
+/**
+ * The tenants matching `filters`, sorted, with their usage as of `through`
+ * (the last counted day, or null before any): one statement and its
+ * parameters, `$1` being `through`. The caller appends any LIMIT.
+ */
+export function filteredTenantsSql(
+  filters: AdminTenantsFilterDto,
+  through: string | null,
+): { sql: string; params: unknown[] } {
+  const params: unknown[] = [through];
+  const where: string[] = [];
+  if (filters.search) {
+    params.push(`%${escapeLikePattern(filters.search)}%`);
+    const n = params.length;
+    where.push(`(u.email ILIKE $${n} ESCAPE '\\' OR u.name ILIKE $${n} ESCAPE '\\')`);
+  }
+  if (filters.status === 'active') where.push('u.suspended_at IS NULL');
+  if (filters.status === 'suspended') where.push('u.suspended_at IS NOT NULL');
+  // `created_at` is a plain timestamp in the session's zone; compared with an
+  // instant it is read in that same zone, so this is the right 30 days.
+  if (filters.activity === 'new') where.push(`u.created_at >= now() - INTERVAL '${NEW_TENANT_DAYS} days'`);
+  if (filters.activity === 'quiet') where.push(`usage.last_usage_day <= $1::date - ${QUIET_AFTER_DAYS}`);
+  if (filters.activity === 'never_used') where.push('usage.last_usage_day IS NULL');
+
+  const direction = filters.order === 'asc' ? 'ASC' : 'DESC';
+  const sql = `
+    WITH usage AS (${tenantUsageCte('$1::date')})
+    SELECT u.id, u.email, u.name,
+           u.is_super_admin AS "isSuperAdmin",
+           u.suspended_at AS "suspendedAt",
+           u.suspended_reason AS "suspendedReason",
+           u.created_at AS "createdAt",
+           usage.mau_this_month::text AS mau,
+           usage.messages_sent_30d::text AS messages,
+           to_char(usage.last_usage_day, 'YYYY-MM-DD') AS "lastUsageDay",
+           count(*) OVER ()::text AS total
+      FROM users u
+      LEFT JOIN usage ON usage.owner_id = u.id
+     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+     ORDER BY ${SORT_COLUMNS[filters.sort] ?? SORT_COLUMNS.created_at} ${direction} NULLS LAST,
+              u.created_at DESC, u.id DESC`;
+  return { sql, params };
+}
+
+function usageOfRow(row: Pick<TenantListRow, 'mau' | 'messages' | 'lastUsageDay'>): TenantUsageAggregate {
+  return {
+    mauThisMonth: Number(row.mau ?? 0),
+    messagesSent30d: Number(row.messages ?? 0),
+    lastUsageDay: row.lastUsageDay,
+  };
+}
+
 /** `\` first, or it would re-escape the backslashes added for `%` and `_`. */
 function escapeLikePattern(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
@@ -75,39 +163,37 @@ export class AdminTenantsService {
     @Optional() private readonly config?: ConfigService,
   ) {}
 
+  /**
+   * One statement for the page and its total, so sorting and filtering by
+   * usage happen in the database; never selects the password hash.
+   */
   async list(query: ListAdminTenantsDto): Promise<{
     data: AdminTenantSummary[];
-    meta: { total: number; page: number; limit: number; totalPages: number };
+    meta: { total: number; page: number; limit: number; totalPages: number; countedThrough: string | null };
   }> {
-    const qb = this.userRepository
-      .createQueryBuilder('user')
-      .select(TENANT_COLUMNS)
-      // The id breaks ties, so a row cannot repeat or vanish across pages.
-      .orderBy('user.createdAt', 'DESC')
-      .addOrderBy('user.id', 'DESC')
-      .skip(query.skip)
-      .take(query.limit);
-
-    if (query.search) {
-      qb.andWhere(`(user.email ILIKE :search ESCAPE '\\' OR user.name ILIKE :search ESCAPE '\\')`, {
-        search: `%${escapeLikePattern(query.search)}%`,
-      });
+    const manager = this.userRepository.manager;
+    const coverage = await readUsageCoverage(manager);
+    const countedThrough = coverage?.countedThrough ?? null;
+    const { sql, params } = filteredTenantsSql(query, countedThrough);
+    const rows: TenantListRow[] = await manager.query(
+      `${sql} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, query.limit, query.skip],
+    );
+    let total = rows.length > 0 ? Number(rows[0].total) : 0;
+    if (rows.length === 0 && query.skip > 0) {
+      // Past the last page no row carries the total.
+      const [{ count }] = await manager.query(`SELECT count(*)::int AS count FROM (${sql}) matched`, params);
+      total = count;
     }
-    if (query.status === 'active') {
-      qb.andWhere('user.suspendedAt IS NULL');
-    } else if (query.status === 'suspended') {
-      qb.andWhere('user.suspendedAt IS NOT NULL');
-    }
-
-    const [users, total] = await qb.getManyAndCount();
 
     return {
-      data: await this.summarise(users),
+      data: await this.summarise(rows, new Map(rows.map((row) => [row.id, usageOfRow(row)]))),
       meta: {
         total,
         page: query.page,
         limit: query.limit,
         totalPages: Math.ceil(total / query.limit),
+        countedThrough,
       },
     };
   }
@@ -142,7 +228,9 @@ export class AdminTenantsService {
       throw new NotFoundException('Tenant not found');
     }
 
-    const [[summary], projects, recentAudit, seatsUsed] = await Promise.all([
+    const coverage = await readUsageCoverage(this.userRepository.manager);
+    const [usage, [summary], projects, recentAudit, seatsUsed, lastSignInAt] = await Promise.all([
+      this.usageOf(id, coverage?.countedThrough ?? null),
       this.summarise([user]),
       this.projectsOf(id),
       // Views are left out: a busy tenant's would push its suspensions off this
@@ -153,10 +241,12 @@ export class AdminTenantsService {
         take: RECENT_AUDIT_LIMIT,
       }),
       this.seats.count(id, this.userRepository.manager),
+      this.lastSignIn(id),
     ]);
 
     return {
       ...summary,
+      ...usage,
       projectLimit: user.projectLimit,
       effectiveProjectLimit: effectiveProjectLimit(user.projectLimit, this.config),
       seatLimit: user.seatLimit,
@@ -164,7 +254,8 @@ export class AdminTenantsService {
       seatsUsed,
       projects,
       recentAudit: recentAudit.map(toAuditLog),
-      lastSignInAt: null,
+      lastSignInAt,
+      // Every account is on the one plan until there are others.
       plan: 'free',
     };
   }
@@ -381,8 +472,32 @@ export class AdminTenantsService {
     );
   }
 
+  /** One tenant's usage figures: 0, 0 and null when it has none. */
+  private async usageOf(ownerId: string, through: string | null): Promise<TenantUsageAggregate> {
+    const [row]: TenantListRow[] = await this.userRepository.manager.query(
+      `SELECT mau_this_month::text AS mau, messages_sent_30d::text AS messages,
+              to_char(last_usage_day, 'YYYY-MM-DD') AS "lastUsageDay"
+         FROM (${tenantUsageCte('$1::date')}) usage
+        WHERE owner_id = $2`,
+      [through, ownerId],
+    );
+    return row ? usageOfRow(row) : { mauThisMonth: 0, messagesSent30d: 0, lastUsageDay: null };
+  }
+
+  /** The latest successful sign-in still in the sign-in history. */
+  private async lastSignIn(userId: string): Promise<string | null> {
+    const [row]: { at: Date | null }[] = await this.userRepository.manager.query(
+      `SELECT max(created_at) AS at FROM auth_events WHERE user_id = $1 AND type = 'login.succeeded'`,
+      [userId],
+    );
+    return row?.at ? new Date(row.at).toISOString() : null;
+  }
+
   /** Issues the same number of queries for one tenant as for a full page. */
-  private async summarise(users: UserEntity[]): Promise<AdminTenantSummary[]> {
+  private async summarise(
+    users: TenantRow[],
+    usage: Map<string, TenantUsageAggregate> = new Map(),
+  ): Promise<AdminTenantSummary[]> {
     if (users.length === 0) return [];
 
     const ownerIds = users.map((user) => user.id);
@@ -408,9 +523,9 @@ export class AdminTenantsService {
       identityCount: identities.get(user.id) ?? 0,
       clicksLast30d: clicks.get(user.id) ?? 0,
       lastActivityAt: lastClicks.get(user.id)?.toISOString() ?? null,
-      mauThisMonth: 0,
-      messagesSent30d: 0,
-      lastUsageDay: null,
+      mauThisMonth: usage.get(user.id)?.mauThisMonth ?? 0,
+      messagesSent30d: usage.get(user.id)?.messagesSent30d ?? 0,
+      lastUsageDay: usage.get(user.id)?.lastUsageDay ?? null,
     }));
   }
 

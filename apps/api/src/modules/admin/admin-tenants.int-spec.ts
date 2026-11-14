@@ -132,6 +132,10 @@ describe('AdminTenantsService (integration)', () => {
     await ds.query(`DELETE FROM admin_audit_logs WHERE target_label LIKE $1 OR actor_email LIKE $1`, [
       `%${DOMAIN}`,
     ]);
+    // usage_daily has no foreign keys, so its rows would outlive their owners.
+    await ds.query(`DELETE FROM usage_daily WHERE owner_id IN (SELECT id FROM users WHERE email LIKE $1)`, [
+      `%${DOMAIN}`,
+    ]);
     await ds.query(`DELETE FROM users WHERE email LIKE $1`, [`%${DOMAIN}`]);
   };
 
@@ -214,7 +218,7 @@ describe('AdminTenantsService (integration)', () => {
       expect(first.data.map((row) => row.email)).toEqual([`newest${DOMAIN}`, `middle${DOMAIN}`]);
       // Then the staff fixture, 400 days old, shares the second page.
       expect(second.data.map((row) => row.email)).toEqual([`oldest${DOMAIN}`, `staff${DOMAIN}`]);
-      expect(first.meta).toEqual({ total: 4, page: 1, limit: 2, totalPages: 2 });
+      expect(first.meta).toMatchObject({ total: 4, page: 1, limit: 2, totalPages: 2 });
     });
   });
 
@@ -300,6 +304,173 @@ describe('AdminTenantsService (integration)', () => {
       expect(data[0].suspendedAt).toMatch(iso);
       expect(data[0].lastActivityAt).toMatch(iso);
       expect(data[0].status).toBe('suspended');
+    });
+  });
+
+  describe('list usage: sort, activity filter and columns', () => {
+    let savedState: { started_on: string; first_day: string; last_closed_day: string }[];
+    let heavy: string;
+    let light: string;
+    let quiet: string;
+    let fresh: string;
+    let never: string;
+
+    const usage = async (ownerId: string, day: string, metric: string, value: number) => {
+      const [{ id }] = await ds.query(`SELECT id FROM projects WHERE owner_id = $1 LIMIT 1`, [ownerId]);
+      await ds.query(
+        `INSERT INTO usage_daily (project_id, owner_id, day, metric, value) VALUES ($1, $2, $3, $4, $5)`,
+        [id, ownerId, day, metric, value],
+      );
+    };
+
+    const withUsage = async (localPart: string, over: Parameters<typeof tenant>[1] = {}) => {
+      const id = await tenant(localPart, { createdDaysAgo: 60, ...over });
+      await project(id);
+      return id;
+    };
+
+    beforeEach(async () => {
+      // The roll-up state is one row; keep whatever was there and put it back after.
+      savedState = await ds.query(
+        `SELECT to_char(started_on, 'YYYY-MM-DD') AS started_on, to_char(first_day, 'YYYY-MM-DD') AS first_day,
+                to_char(last_closed_day, 'YYYY-MM-DD') AS last_closed_day FROM usage_rollup_state`,
+      );
+      await ds.query(
+        `INSERT INTO usage_rollup_state (id, started_on, first_day, last_closed_day)
+         VALUES (1, '2026-11-14', '2026-08-16', '2026-11-13')
+         ON CONFLICT (id) DO UPDATE SET started_on = '2026-11-14', first_day = '2026-08-16',
+                                         last_closed_day = '2026-11-13'`,
+      );
+      heavy = await withUsage('heavy');
+      await usage(heavy, '2026-11-13', 'push_sent', 50);
+      await usage(heavy, '2026-11-13', 'mau_month_to_date', 5);
+      light = await withUsage('light');
+      await usage(light, '2026-11-01', 'email_sent', 10);
+      // Outside the 30 days, so not in the messages column.
+      await usage(light, '2026-10-01', 'sms_sent', 900);
+      // 20 days before the last counted day.
+      quiet = await withUsage('quiet');
+      await usage(quiet, '2026-10-24', 'events', 3);
+      fresh = await tenant('fresh', { createdDaysAgo: 5 });
+      never = await tenant('never', { createdDaysAgo: 60 });
+    });
+
+    afterEach(async () => {
+      await ds.query(`DELETE FROM usage_rollup_state`);
+      for (const row of savedState) {
+        await ds.query(
+          `INSERT INTO usage_rollup_state (id, started_on, first_day, last_closed_day) VALUES (1, $1, $2, $3)`,
+          [row.started_on, row.first_day, row.last_closed_day],
+        );
+      }
+    });
+
+    const STAFF = `staff${DOMAIN}`;
+    const at = (...parts: string[]) => parts.map((part) => `${part}${DOMAIN}`);
+
+    it('gives each tenant its usage, and 0, 0 and null with none', async () => {
+      const { data, meta } = await service.list(listQuery({ limit: 100 }));
+      const row = (id: string) => data.find((t) => t.id === id)!;
+
+      expect(row(heavy)).toMatchObject({ mauThisMonth: 5, messagesSent30d: 50, lastUsageDay: '2026-11-13' });
+      expect(row(light)).toMatchObject({ mauThisMonth: 0, messagesSent30d: 10, lastUsageDay: '2026-11-01' });
+      expect(row(never)).toMatchObject({ mauThisMonth: 0, messagesSent30d: 0, lastUsageDay: null });
+      expect(meta.countedThrough).toBe('2026-11-13');
+    });
+
+    it('sorts by messages sent, the never-used last', async () => {
+      expect(await emails({ sort: 'messages_sent_30d', order: 'desc', limit: 100 })).toEqual([
+        ...at('heavy', 'light', 'quiet', 'fresh', 'never'),
+        STAFF,
+      ]);
+    });
+
+    it('sorts by monthly active devices', async () => {
+      const sorted = await emails({ sort: 'mau_this_month', order: 'desc', limit: 100 });
+      expect(sorted[0]).toBe(`heavy${DOMAIN}`);
+    });
+
+    it('puts the never-used last in both directions of last usage', async () => {
+      expect(await emails({ sort: 'last_usage_day', order: 'asc', limit: 100 })).toEqual([
+        ...at('quiet', 'light', 'heavy', 'fresh', 'never'),
+        STAFF,
+      ]);
+      expect(await emails({ sort: 'last_usage_day', order: 'desc', limit: 100 })).toEqual([
+        ...at('heavy', 'light', 'quiet', 'fresh', 'never'),
+        STAFF,
+      ]);
+    });
+
+    it('sorts by sign-up oldest first when asked', async () => {
+      const sorted = await emails({ sort: 'created_at', order: 'asc', limit: 100 });
+      expect(sorted[0]).toBe(STAFF);
+      expect(sorted[sorted.length - 1]).toBe(`fresh${DOMAIN}`);
+    });
+
+    it('filters by activity', async () => {
+      expect(await emails({ activity: 'never_used' })).toEqual([...at('fresh', 'never'), STAFF]);
+      expect(await emails({ activity: 'quiet' })).toEqual(at('quiet'));
+      expect(await emails({ activity: 'new' })).toEqual(at('fresh'));
+    });
+
+    it('counts a tenant 14 days quiet as quiet, and 13 days as not', async () => {
+      const boundary = await withUsage('boundary');
+      await usage(boundary, '2026-10-30', 'events', 1);
+      const recent = await withUsage('recent');
+      await usage(recent, '2026-10-31', 'events', 1);
+      expect(await emails({ activity: 'quiet' })).toEqual(at('boundary', 'quiet'));
+    });
+
+    it('combines the activity filter with status, and pages the filtered total', async () => {
+      const gone = await withUsage('quiet-gone', { suspended: true });
+      await usage(gone, '2026-10-20', 'events', 1);
+      expect(await emails({ status: 'suspended', activity: 'quiet' })).toEqual(at('quiet-gone'));
+
+      const page = await service.list(listQuery({ activity: 'never_used', limit: 2, page: 2 }));
+      expect(page.data.map((t) => t.email)).toEqual([STAFF]);
+      expect(page.meta).toMatchObject({ total: 3, page: 2, limit: 2, totalPages: 2 });
+    });
+
+    it('still knows the total on a page past the end', async () => {
+      const page = await service.list(listQuery({ activity: 'never_used', limit: 2, page: 9 }));
+      expect(page.data).toEqual([]);
+      expect(page.meta).toMatchObject({ total: 3, totalPages: 2 });
+    });
+
+    it('matches a search of LIKE wildcards and backslash literally', async () => {
+      await tenant('qa%_\\b');
+      await tenant('qaxyzb');
+      expect(await emails({ search: '%_\\' })).toEqual([`qa%_\\b${DOMAIN}`]);
+    });
+
+    it('shows usage on the detail too, with the last successful sign-in and the plan', async () => {
+      await ds.query(
+        `INSERT INTO auth_events (user_id, email, type, created_at) VALUES
+           ($1, $2, 'login.succeeded', '2026-11-01T10:00:00Z'),
+           ($1, $2, 'login.succeeded', '2026-11-05T10:00:00Z'),
+           ($1, $2, 'login.failed', '2026-11-09T10:00:00Z')`,
+        [heavy, `heavy${DOMAIN}`],
+      );
+      try {
+        const detail = await service.findOne(heavy);
+        expect(detail).toMatchObject({
+          mauThisMonth: 5,
+          messagesSent30d: 50,
+          lastUsageDay: '2026-11-13',
+          lastSignInAt: '2026-11-05T10:00:00.000Z',
+          plan: 'free',
+        });
+        expect((await service.findOne(never)).lastSignInAt).toBeNull();
+      } finally {
+        await ds.query(`DELETE FROM auth_events WHERE user_id = $1`, [heavy]);
+      }
+    });
+
+    it('gives nothing counted before the roll-up has run', async () => {
+      await ds.query(`DELETE FROM usage_rollup_state`);
+      const { data, meta } = await service.list(listQuery({ limit: 100 }));
+      expect(meta.countedThrough).toBeNull();
+      expect(data.find((t) => t.id === heavy)).toMatchObject({ mauThisMonth: 0, messagesSent30d: 0, lastUsageDay: null });
     });
   });
 

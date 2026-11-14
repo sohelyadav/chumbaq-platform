@@ -11,7 +11,13 @@ import {
   Min,
   ValidateIf,
 } from 'class-validator';
-import type { AdminTenantStatus, FactorResetVerificationMethod } from '@chumbaq/shared';
+import type {
+  AdminSortOrder,
+  AdminTenantActivity,
+  AdminTenantSort,
+  AdminTenantStatus,
+  FactorResetVerificationMethod,
+} from '@chumbaq/shared';
 import { PaginationDto } from '../../../common/dto/pagination.dto';
 import {
   FACTOR_RESET_VERIFICATION_METHODS,
@@ -25,6 +31,21 @@ import {
 
 export const ADMIN_TENANT_STATUSES: AdminTenantStatus[] = ['active', 'suspended'];
 
+// Records rather than arrays: shared exports only the types, and this way a value
+// added there fails compilation here instead of being refused with a 400.
+const TENANT_ACTIVITIES: Record<AdminTenantActivity, true> = { new: true, quiet: true, never_used: true };
+const TENANT_SORTS: Record<AdminTenantSort, true> = {
+  created_at: true,
+  mau_this_month: true,
+  messages_sent_30d: true,
+  last_usage_day: true,
+};
+const SORT_ORDERS: Record<AdminSortOrder, true> = { asc: true, desc: true };
+
+export const ADMIN_TENANT_ACTIVITIES = Object.keys(TENANT_ACTIVITIES) as AdminTenantActivity[];
+export const ADMIN_TENANT_SORTS = Object.keys(TENANT_SORTS) as AdminTenantSort[];
+export const ADMIN_SORT_ORDERS = Object.keys(SORT_ORDERS) as AdminSortOrder[];
+
 /**
  * Reads the raw input, because `enableImplicitConversion` has already turned an
  * object into the string "[object Object]" by the time `value` gets here, and
@@ -35,18 +56,41 @@ function trimRawString({ key, obj }: TransformFnParams): unknown {
   return typeof raw === 'string' ? raw.trim() : raw;
 }
 
-export class ListAdminTenantsDto extends PaginationDto {
-  @IsOptional()
-  @Transform(trimRawString)
-  @IsString()
-  @MaxLength(255)
-  @Matches(/^[^\0]*$/, { message: '$property must not contain null characters' })
-  search?: string;
+// The constructor signature TypeScript requires of a mixin's base.
+type Constructor = new (...args: any[]) => object;
 
-  @IsOptional()
-  @IsIn(ADMIN_TENANT_STATUSES)
-  status?: AdminTenantStatus;
+/** The filters and sort, shared by the paged list and the export so the two cannot drift. */
+function withTenantFilters<TBase extends Constructor>(Base: TBase) {
+  class TenantFilters extends Base {
+    @IsOptional()
+    @Transform(trimRawString)
+    @IsString()
+    @MaxLength(255)
+    @Matches(/^[^\0]*$/, { message: '$property must not contain null characters' })
+    search?: string;
+
+    @IsOptional()
+    @IsIn(ADMIN_TENANT_STATUSES)
+    status?: AdminTenantStatus;
+
+    /** Overlapping usage filters: signed up lately, gone quiet, never used. */
+    @IsOptional()
+    @IsIn(ADMIN_TENANT_ACTIVITIES)
+    activity?: AdminTenantActivity;
+
+    @IsIn(ADMIN_TENANT_SORTS)
+    sort: AdminTenantSort = 'created_at';
+
+    @IsIn(ADMIN_SORT_ORDERS)
+    order: AdminSortOrder = 'desc';
+  }
+  return TenantFilters;
 }
+
+export class ListAdminTenantsDto extends withTenantFilters(PaginationDto) {}
+
+/** The export: the list's filters and sort, unpaged. */
+export class AdminTenantsFilterDto extends withTenantFilters(class {}) {}
 
 export class AdminTenantReasonDto {
   @Transform(trimRawString)

@@ -1,6 +1,11 @@
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { VALIDATION_PIPE_OPTIONS } from '../../../common/validation-pipe.options';
-import { AdminFactorResetRequestDto, AdminTenantReasonDto, ListAdminTenantsDto } from './admin-tenants.dto';
+import {
+  AdminFactorResetRequestDto,
+  AdminTenantReasonDto,
+  AdminTenantsFilterDto,
+  ListAdminTenantsDto,
+} from './admin-tenants.dto';
 
 describe('admin tenant DTOs, through the real validation pipe', () => {
   const pipe = new ValidationPipe(VALIDATION_PIPE_OPTIONS);
@@ -106,6 +111,48 @@ describe('admin tenant DTOs, through the real validation pipe', () => {
 
     it('refuses a repeated search parameter, which Express parses to an array', async () => {
       await expect(listQuery({ search: ['a', 'b'] })).rejects.toThrow(BadRequestException);
+    });
+
+    it('sorts newest sign-ups first by default, with no activity filter', async () => {
+      const dto = await listQuery({});
+      expect(dto.sort).toBe('created_at');
+      expect(dto.order).toBe('desc');
+      expect(dto.activity).toBeUndefined();
+    });
+
+    it('accepts every sort, order and activity filter', async () => {
+      for (const sort of ['created_at', 'mau_this_month', 'messages_sent_30d', 'last_usage_day']) {
+        expect((await listQuery({ sort })).sort).toBe(sort);
+      }
+      expect((await listQuery({ order: 'asc' })).order).toBe('asc');
+      for (const activity of ['new', 'quiet', 'never_used']) {
+        expect((await listQuery({ activity })).activity).toBe(activity);
+      }
+    });
+
+    it.each([
+      ['a column that is not a sort', { sort: 'email' }],
+      ['raw SQL as the sort', { sort: 'created_at; DROP TABLE users' }],
+      ['an unknown order', { order: 'up' }],
+      ['an unknown activity', { activity: 'dormant' }],
+      ['a repeated sort', { sort: ['created_at', 'mau_this_month'] }],
+    ])('refuses %s', async (_, query) => {
+      await expect(listQuery(query)).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe('AdminTenantsFilterDto (the export)', () => {
+    const exportQuery = (value: unknown) =>
+      pipe.transform(value, { type: 'query', metatype: AdminTenantsFilterDto });
+
+    it('takes the list filters and sort', async () => {
+      const dto = await exportQuery({ search: ' a ', status: 'suspended', activity: 'quiet', sort: 'last_usage_day', order: 'asc' });
+      expect(dto).toMatchObject({ search: 'a', status: 'suspended', activity: 'quiet', sort: 'last_usage_day', order: 'asc' });
+    });
+
+    it('refuses pagination, since an export is not paged', async () => {
+      await expect(exportQuery({ page: '2' })).rejects.toThrow(BadRequestException);
+      await expect(exportQuery({ limit: '10' })).rejects.toThrow(BadRequestException);
     });
   });
 });
