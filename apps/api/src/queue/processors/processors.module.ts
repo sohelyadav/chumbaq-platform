@@ -39,6 +39,7 @@ import { FactorResetsModule } from '../../modules/factor-resets/factor-resets.mo
 import { IncidentsModule } from '../../modules/incidents/incidents.module';
 import { UsageModule } from '../../modules/usage/usage.module';
 import { BillingCoreModule } from '../../modules/billing/billing-core.module';
+import { EmailConfirmationScheduler } from '../scheduler/email-confirmation.scheduler';
 
 /**
  * Worker-only module. Importing this registers BullMQ consumers, so it must be
@@ -98,6 +99,7 @@ import { BillingCoreModule } from '../../modules/billing/billing-core.module';
     ClockCheckScheduler,
     UsageRollupScheduler,
     BillingScheduler,
+    EmailConfirmationScheduler,
   ],
 })
 export class ProcessorsModule {}

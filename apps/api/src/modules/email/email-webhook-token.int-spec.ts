@@ -46,7 +46,7 @@ describe('Rotating the email webhook token (integration)', () => {
       {} as never,
       {} as never,
     );
-    webhooks = new EmailPublicController(settings, {} as never, {} as never, { ingest: async () => 0 } as never, {} as never);
+    webhooks = new EmailPublicController(settings, {} as never, {} as never, { ingest: async () => 0 } as never, {} as never, {} as never);
   });
 
   beforeEach(async () => {

@@ -43,6 +43,7 @@ import {
   verifySvix,
 } from './email-webhooks';
 import { PerProjectLru, webhookCacheKey } from '../webhooks/per-project-lru';
+import { EmailConfirmationsService } from './email-confirmations.service';
 
 /*
  * SES webhook guarantee. Junk is refused without being counted and a message
@@ -282,7 +283,59 @@ export class EmailPublicController {
     private readonly suppressions: SuppressionsService,
     private readonly events: EmailEventsService,
     private readonly ses: SesProvider,
+    private readonly confirmations: EmailConfirmationsService,
   ) {}
+
+  /**
+   * The double opt-in link: shows a button and confirms nothing, since mail scanners
+   * fetch every link in a message; the POST it makes confirms (`EmailConfirmationsService`).
+   */
+  @Get('confirm')
+  showConfirm(
+    @Query('p') projectId: string,
+    @Query('e') encoded: string,
+    @Query('s') signature: string,
+    @Res() res: Response,
+  ): void {
+    const address = this.confirmations.verify(projectId, encoded, signature);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Security-Policy', FORM_PAGE_POLICY);
+    if (!address) {
+      res
+        .status(400)
+        .type('html')
+        .send(page('Link not valid', '<h1>This link is not valid</h1><p>It may have been copied incompletely.</p>'));
+      return;
+    }
+    const action = `?${new URLSearchParams({ p: projectId, e: encoded, s: signature })}`;
+    res.type('html').send(
+      page(
+        'Confirm',
+        `<h1>Confirm your email</h1><p>Receive this sender's email at <strong>${escapeHtml(address)}</strong>.</p>
+<form method="post" action="${escapeHtml(action)}"><button type="submit">Yes, send me emails</button></form>`,
+      ),
+    );
+  }
+
+  @Post('confirm')
+  @HttpCode(200)
+  async doConfirm(
+    @Query('p') projectId: string,
+    @Query('e') encoded: string,
+    @Query('s') signature: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const address = this.confirmations.verify(projectId, encoded, signature);
+    if (!address) {
+      res.status(400).type('text').send('This confirmation link is not valid.');
+      return;
+    }
+    await this.confirmations.confirm(projectId, address);
+    res.setHeader('Content-Security-Policy', STATIC_PAGE_POLICY);
+    res.type('html').send(
+      page('Confirmed', `<h1>Thank you</h1><p><strong>${escapeHtml(address)}</strong> will receive this sender's email.</p>`),
+    );
+  }
 
   /**
    * Shows a confirmation, and does not unsubscribe.

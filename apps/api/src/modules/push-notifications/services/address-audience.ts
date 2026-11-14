@@ -27,6 +27,11 @@ export interface AddressColumns {
   address: 'email' | 'phone_e164';
   /** Nullable consent flag: `email_opt_in`, `sms_opt_in`, `whatsapp_opt_in`. */
   consent: 'email_opt_in' | 'sms_opt_in' | 'whatsapp_opt_in';
+  /**
+   * When required opt-in must also be confirmed by the address holder (double opt-in,
+   * email only): the column holding when they confirmed.
+   */
+  confirmed?: 'email_confirmed_at';
 }
 
 /**
@@ -128,10 +133,12 @@ export abstract class AddressAudience {
     const ids = scope.deviceIdentityIds;
     if (ids !== null && ids.length === 0) return null;
 
-    const { channel, address, consent: optIn } = this.columns;
+    const { channel, address, consent: optIn, confirmed } = this.columns;
+    // Required opt-in counts only once the address holder confirmed it, where the
+    // channel has confirmation: anyone with the app's key can report an opt-in.
     const consent = (alias: string) =>
       scope.requireOptIn
-        ? `${alias}.${optIn} = true`
+        ? `${alias}.${optIn} = true${confirmed ? ` AND ${alias}.${confirmed} IS NOT NULL` : ''}`
         : `${alias}.${optIn} IS DISTINCT FROM false`;
     const inScope = (alias: string) =>
       ids === null ? '' : `AND ${alias}.id = ANY(:ids::uuid[])`;
@@ -149,6 +156,17 @@ export abstract class AddressAudience {
             AND s.address = i.${address}
         )`,
         { channel },
+      )
+      // A refusal holds for the address: no row that says yes (whoever reported it)
+      // outweighs one that says no. Confirming from the mailed link, which only the
+      // address holder can do, sets every row holding the address to yes.
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1 FROM device_identities n
+          WHERE n.project_id = i.project_id
+            AND n.${address} = i.${address}
+            AND n.${optIn} = false
+        )`,
       )
       // One message per address. The better row must itself be eligible and in
       // scope: an opted-out or out-of-audience twin with a lower id would

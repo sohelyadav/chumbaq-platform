@@ -19,6 +19,8 @@ import { EmailCampaignsService } from './email-campaigns.service';
 import { EmailDeliveryService } from './email-delivery.service';
 import { EmailEventsService } from './email-events.service';
 import { EmailUnsubscribeService } from './email-unsubscribe.service';
+import { EmailConfirmationsService } from './email-confirmations.service';
+import { ConsentModule } from '../consent/consent.module';
 import { EmailController } from './email.controller';
 import { EmailPublicController } from './email-public.controller';
 import { ProjectActivityModule } from '../project-activity/project-activity.module';
@@ -44,6 +46,7 @@ import { ProjectActivityModule } from '../project-activity/project-activity.modu
     PushNotificationsModule,
     ProjectActivityModule,
     ProjectSuspensionModule,
+    ConsentModule,
   ],
   controllers: [EmailController, EmailPublicController],
   providers: [
@@ -57,8 +60,10 @@ import { ProjectActivityModule } from '../project-activity/project-activity.modu
     EmailDeliveryService,
     EmailEventsService,
     EmailUnsubscribeService,
+    EmailConfirmationsService,
   ],
   exports: [
+    EmailConfirmationsService,
     EmailAudienceService,
     EmailCampaignsService,
     EmailDeliveryService,

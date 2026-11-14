@@ -223,6 +223,19 @@ export class DeviceIdentityEntity {
   @Column({ type: 'boolean', nullable: true, name: 'email_opt_in' })
   emailOptIn: boolean;
 
+  /**
+   * When whoever holds the address confirmed, from the link mailed to it, that they want
+   * this project's email (double opt-in). While a project requires opt-in, an email
+   * opt-in counts only once confirmed: anyone holding the app's key can report one for
+   * any address. Reset whenever the row's address changes.
+   */
+  @Column({ type: 'timestamptz', nullable: true, name: 'email_confirmed_at' })
+  emailConfirmedAt: Date | null;
+
+  /** When the confirmation was last mailed (one per address a week while pending). */
+  @Column({ type: 'timestamptz', nullable: true, name: 'email_confirm_sent_at' })
+  emailConfirmSentAt: Date | null;
+
   @Column({ type: 'boolean', nullable: true, name: 'sms_opt_in' })
   smsOptIn: boolean;
 

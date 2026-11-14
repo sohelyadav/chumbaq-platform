@@ -17,6 +17,7 @@ export class EmailAudienceService extends AddressAudience {
     channel: 'email',
     address: 'email',
     consent: 'email_opt_in',
+    confirmed: 'email_confirmed_at',
   } as const;
 
   constructor(

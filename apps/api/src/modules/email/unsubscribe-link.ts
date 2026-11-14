@@ -2,6 +2,8 @@ import { createHmac, timingSafeEqual } from 'crypto';
 
 /** HKDF purpose for the unsubscribe signing key. Changing it voids every link. */
 export const UNSUBSCRIBE_KEY_PURPOSE = 'chumbaq/email-unsubscribe/v1';
+/** HKDF purpose for the double opt-in confirmation key; a key of its own, so neither link works as the other. */
+export const CONFIRM_KEY_PURPOSE = 'chumbaq/email-confirm/v1';
 
 /**
  * Signs and checks unsubscribe links.
@@ -15,6 +17,8 @@ export class UnsubscribeLinks {
   constructor(
     private readonly key: Buffer,
     private readonly apiBaseUrl: string,
+    /** The route the link opens; the confirmation link uses the same scheme. */
+    private readonly path = '/api/email/unsubscribe',
   ) {}
 
   url(projectId: string, address: string): string {
@@ -23,7 +27,7 @@ export class UnsubscribeLinks {
       e: Buffer.from(address, 'utf8').toString('base64url'),
       s: this.sign(projectId, address),
     });
-    return `${this.apiBaseUrl.replace(/\/+$/, '')}/api/email/unsubscribe?${params}`;
+    return `${this.apiBaseUrl.replace(/\/+$/, '')}${this.path}?${params}`;
   }
 
   /** The address a link was signed for, or null when it was not signed by us. */

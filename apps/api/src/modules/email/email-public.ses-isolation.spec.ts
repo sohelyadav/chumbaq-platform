@@ -118,6 +118,7 @@ describe('SES webhook: one project cannot degrade another', () => {
       {} as never,
       events as never,
       ses as never,
+      {} as never,
     );
 
   beforeEach(() => {
@@ -673,6 +674,7 @@ describe('SES webhook: one project cannot degrade another', () => {
         {} as never,
         events as never,
         new QuickSts(),
+        {} as never,
       );
       fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
         if (String(url).endsWith('.pem')) return new Response(publicPem);

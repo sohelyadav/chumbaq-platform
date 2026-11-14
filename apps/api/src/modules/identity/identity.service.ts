@@ -745,6 +745,8 @@ export class IdentityService {
     }
     const cleared: Partial<Record<keyof DeviceIdentityEntity, null>> = {
       email: null,
+      emailConfirmedAt: null,
+      emailConfirmSentAt: null,
       phone: null,
       phoneE164: null,
       firstName: null,
@@ -761,7 +763,12 @@ export class IdentityService {
 
   private updateProfileFields(identity: DeviceIdentityEntity, dto: IdentifyDto): void {
     const email = this.reportedEmail(dto);
-    if (email) identity.email = email;
+    if (email && email !== identity.email) {
+      identity.email = email;
+      // A confirmation was for the old address: the new one must be confirmed itself.
+      identity.emailConfirmedAt = null;
+      identity.emailConfirmSentAt = null;
+    }
     const phoneE164 = this.reportedPhone(dto);
     if (phoneE164) identity.phoneE164 = phoneE164;
     if (dto.firstName) identity.firstName = dto.firstName;

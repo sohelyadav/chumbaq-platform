@@ -92,6 +92,7 @@ describe('EmailPublicController', () => {
       suppressions as never,
       events as never,
       ses as never,
+      {} as never,
     );
     ses.accountId.mockResolvedValue('123456789012');
     fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (url) =>
@@ -512,6 +513,7 @@ describe('EmailPublicController', () => {
           suppressions as never,
           events as never,
           ses as never,
+          {} as never,
         );
         fetchMock.mockImplementation(async () => new Response(padded(SNS_CERT_MAX_BYTES + 1)));
         await expect(post(snsMessage())).rejects.toBeInstanceOf(UnauthorizedException);

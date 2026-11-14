@@ -33,11 +33,15 @@ describe('EmailAudienceService (integration)', () => {
     email: string | null,
     optIn: boolean | null,
     timezone: string | null = null,
+    // Double opt-in: an opted-in person here has confirmed from the mailed link,
+    // unless a test says otherwise.
+    confirmed = optIn === true,
   ) => {
     await seedPerson(ds, { id });
     await ds.query(
-      `UPDATE device_identities SET email = $2, email_opt_in = $3, timezone = $4 WHERE id = $1`,
-      [id, email, optIn, timezone],
+      `UPDATE device_identities SET email = $2, email_opt_in = $3, timezone = $4,
+              email_confirmed_at = CASE WHEN $5::boolean THEN now() END WHERE id = $1`,
+      [id, email, optIn, timezone, confirmed],
     );
   };
 
@@ -141,14 +145,27 @@ describe('EmailAudienceService (integration)', () => {
     ]);
   });
 
-  it('does not let an opted-out twin suppress the one that opted in', async () => {
-    // A has the lower id but no consent. If the dedupe ignored consent, A
-    // would be "better", be filtered out itself, and the address would get
-    // nothing at all.
+  // A refusal holds for the address: a row that says yes (anyone with the app's key can
+  // report one) does not outweigh one that says no.
+  it('does not email an address any row holding it opted out of', async () => {
     await person(A, 'priya@example.com', false);
     await person(B, 'priya@example.com', true);
 
+    expect(await service.listRecipientIds(scope())).toEqual([]);
+  });
+
+  // Double opt-in: a reported opt-in counts only once the address holder confirmed it.
+  it('does not email an opt-in nobody confirmed from the mailbox', async () => {
+    await person(A, 'claimed@example.com', true, null, false);
+    await person(B, 'confirmed@example.com', true);
+
     expect(await service.listRecipientIds(scope())).toEqual([B]);
+  });
+
+  it('needs no confirmation when the project does not require opt-in', async () => {
+    await person(A, 'unconfirmed@example.com', true, null, false);
+
+    expect(await service.listRecipientIds(scope({ requireOptIn: false }))).toEqual([A]);
   });
 
   it('does not let a twin outside the audience suppress the one inside it', async () => {

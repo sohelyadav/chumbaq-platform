@@ -119,4 +119,19 @@ describe('A different user signing in on a device (integration)', () => {
     const carol = await identity.identify({ projectId: INT_PROJECT_ID, deviceFingerprint: anon, platform: 'ios', externalUserId: 'carol' });
     expect(carol).toMatchObject({ email: 'carol@example.com', emailOptIn: true });
   });
+
+  it('drops the confirmation when a row\'s address changes', async () => {
+    const fp = fingerprint();
+    const alice = await signInAlice(fp);
+    await ds.query(`UPDATE device_identities SET email_confirmed_at = now() WHERE id = $1`, [alice.id]);
+
+    const moved = await identity.identify({
+      projectId: INT_PROJECT_ID,
+      deviceFingerprint: fp,
+      platform: 'ios',
+      externalUserId: 'alice',
+      email: 'alice.new@example.com',
+    });
+    expect(moved).toMatchObject({ email: 'alice.new@example.com', emailConfirmedAt: null });
+  });
 });
