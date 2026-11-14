@@ -1,15 +1,18 @@
 import { randomBytes, randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
+import { parkOtherOutboxRows } from '../../test-support/billing-outbox';
 import { closeIntDb, openIntDb } from '../../test-support/int-db';
 import { FakeBillingProvider } from '../../test-support/fake-billing-provider';
 import { razorpayEvent, unix } from '../../test-support/razorpay-fixtures';
 import { SeatsService } from '../project-access/seats.service';
 import { AccountLimitsService } from './account-limits.service';
-import { BillingCheckoutService } from './billing-checkout.service';
+import { BillingCheckoutService, CHANGE_AUTHORISE_BY_MS } from './billing-checkout.service';
+import { BillingOutboxService } from './billing-outbox.service';
 import { BillingOverviewService } from './billing-overview.service';
 import { BillingStateService } from './billing-state.service';
 import type { BillingDetailsDto } from './dto/billing.dto';
+import { CHECKOUT_EXPIRY_MS } from './providers/billing-provider';
 
 const KEY_ID = 'rzp_test_AbC123xyz';
 
@@ -24,6 +27,7 @@ describe('BillingCheckoutService (integration)', () => {
   let state: BillingStateService;
   let overview: BillingOverviewService;
   let checkout: BillingCheckoutService;
+  let outbox: BillingOutboxService;
   const hex = (bytes = 6) => randomBytes(bytes).toString('hex');
   const DAY = 24 * 3600_000;
 
@@ -42,7 +46,14 @@ describe('BillingCheckoutService (integration)', () => {
     state = new BillingStateService(config);
     overview = new BillingOverviewService(ds, fake, limits, new SeatsService(ds, limits));
     checkout = new BillingCheckoutService(ds, fake, overview);
+    outbox = new BillingOutboxService(ds, fake);
   });
+
+  /** The worker's outbox run, on this account's rows only. */
+  async function runOutbox(userId: string): Promise<void> {
+    await parkOtherOutboxRows(ds, [userId]);
+    await outbox.runOnce();
+  }
 
   afterAll(async () => {
     await closeIntDb(ds);
@@ -261,6 +272,37 @@ describe('BillingCheckoutService (integration)', () => {
     });
   });
 
+  describe('subscribe while halted', () => {
+    it('keeps the halted subscription and its grace through an abandoned Checkout, and cancels it once the new one starts', async () => {
+      const w = await subscribed();
+      const graceUntil = new Date(Date.now() + 10 * DAY);
+      // As the halted webhook leaves it.
+      await ds.query(`UPDATE billing_subscriptions SET status = 'halted', grace_until = $2 WHERE id = $1`, [w.currentId, graceUntil]);
+      const halted = await sub(w.currentId);
+      const again = await checkout.subscribe(w.user, { plan: w.planA, interval: 'monthly' });
+
+      // The customer closes Checkout; the worker runs.
+      await runOutbox(w.user.userId);
+      expect(await sub(w.currentId)).toMatchObject({ status: 'halted', cancel_requested_at: null, cancel_sent_at: null });
+      expect(fake.callsOf('cancelSubscription').filter(([id]) => id === halted.provider_subscription_id)).toEqual([]);
+      const view = await overview.overview(w.user.userId);
+      expect(view.state).toBe('halted');
+      expect(view.effectivePlan).toMatchObject({ code: w.planA, source: 'subscription' });
+
+      // Paid after all: the new one replaces it, and the halted one is cancelled at once.
+      await activate(again.subscriptionId, w.rzp[`${w.planA}:monthly`]);
+      const replaced = await sub(w.currentId);
+      const fresh = await subByProvider(again.subscriptionId);
+      expect(replaced).toMatchObject({ superseded_by: fresh.id, cancel_at_cycle_end: false });
+      expect(replaced.cancel_requested_at).not.toBeNull();
+      expect((await account(w.user.userId)).current_subscription_id).toBe(fresh.id);
+      await runOutbox(w.user.userId);
+      expect(fake.callsOf('cancelSubscription').filter(([id]) => id === halted.provider_subscription_id)).toEqual([
+        [halted.provider_subscription_id, false],
+      ]);
+    });
+  });
+
   describe('change', () => {
     it('needs a live subscription, a different plan, and no change already scheduled', async () => {
       const fresh = await world();
@@ -301,6 +343,20 @@ describe('BillingCheckoutService (integration)', () => {
         message: 'Your renewal is too close to change plans. Try again after it.',
       });
     });
+
+    it('makes the change expire before the renewal, so it cannot be authorised after the current one renews', async () => {
+      const w = await subscribed();
+      const current = await sub(w.currentId);
+      const expiryOf = () => (fake.callsOf('createSubscription').slice(-1)[0] as [{ expireBy: Date }])[0].expireBy.getTime();
+
+      const near = new Date(current.current_end.getTime() - 2 * 3600_000);
+      await checkout.change(w.user, { plan: w.planB, interval: 'monthly' }, near);
+      expect(expiryOf()).toBe(current.current_end.getTime() - CHANGE_AUTHORISE_BY_MS);
+
+      const far = new Date();
+      await checkout.change(w.user, { plan: w.planB, interval: 'yearly' }, far);
+      expect(expiryOf()).toBe(far.getTime() + CHECKOUT_EXPIRY_MS);
+    });
   });
 
   describe('cancel and keep my plan', () => {
@@ -335,6 +391,64 @@ describe('BillingCheckoutService (integration)', () => {
       const next = await subByProvider(changed.subscriptionId);
       expect(next).toMatchObject({ cancel_at_cycle_end: false, cancel_sent_at: null });
       expect(next.cancel_requested_at).not.toBeNull();
+    });
+
+    it('cancels a scheduled change after the worker has already set the current to end', async () => {
+      const w = await subscribed();
+      const current = await sub(w.currentId);
+      const changed = await checkout.change(w.user, { plan: w.planB, interval: 'monthly' });
+      await authenticate(changed.subscriptionId, w.rzp[`${w.planB}:monthly`], current.current_end);
+      // Within a minute the worker sends the current's cycle-end cancel.
+      await runOutbox(w.user.userId);
+      expect(await sub(w.currentId)).toMatchObject({ cancel_at_period_end: true, cancel_requested_by: null });
+      const before = fake.callsOf('cancelSubscription').length;
+
+      const result = await checkout.cancel(w.user.userId);
+      expect(result.state).toBe('cancelling');
+      expect(result.next).toBeNull();
+      // The current is already ending: no second call for it.
+      expect(fake.callsOf('cancelSubscription').length).toBe(before);
+      const next = await subByProvider(changed.subscriptionId);
+      expect(next).toMatchObject({ cancel_at_cycle_end: false, cancel_sent_at: null, cancel_requested_by: w.user.userId });
+      expect(next.cancel_requested_at).not.toBeNull();
+      expect((await account(w.user.userId)).next_subscription_id).toBeNull();
+
+      await runOutbox(w.user.userId);
+      expect(fake.callsOf('cancelSubscription').slice(before)).toEqual([[changed.subscriptionId, false]]);
+      expect((await overview.overview(w.user.userId)).state).toBe('cancelling');
+    });
+
+    it('cancels a kept plan the same way', async () => {
+      const w = await subscribed();
+      const current = await sub(w.currentId);
+      await checkout.cancel(w.user.userId);
+      const kept = await checkout.change(w.user, { plan: w.planA, interval: 'monthly' });
+      await authenticate(kept.subscriptionId, w.rzp[`${w.planA}:monthly`], current.current_end);
+      expect((await overview.overview(w.user.userId)).state).toBe('change_scheduled');
+
+      expect((await checkout.cancel(w.user.userId)).state).toBe('cancelling');
+      const next = await subByProvider(kept.subscriptionId);
+      expect(next).toMatchObject({ cancel_at_cycle_end: false });
+      expect(next.cancel_requested_at).not.toBeNull();
+    });
+
+    it('refuses when the subscription changed while Razorpay answered, and leaves the new one alone', async () => {
+      const w = await subscribed();
+      const changed = await checkout.change(w.user, { plan: w.planB, interval: 'monthly' });
+      const original = fake.cancelSubscription.bind(fake);
+      const spy = jest.spyOn(fake, 'cancelSubscription').mockImplementationOnce(async (id, atCycleEnd) => {
+        // The change starts charging while the cancel is on its way.
+        await activate(changed.subscriptionId, w.rzp[`${w.planB}:monthly`]);
+        return original(id, atCycleEnd);
+      });
+      expect(await refusal(checkout.cancel(w.user.userId))).toEqual({
+        status: 409,
+        message: 'Your subscription changed meanwhile. Try again.',
+      });
+      spy.mockRestore();
+      const promoted = await subByProvider(changed.subscriptionId);
+      expect((await account(w.user.userId)).current_subscription_id).toBe(promoted.id);
+      expect(promoted).toMatchObject({ cancel_at_period_end: false, cancel_requested_at: null });
     });
 
     it('says Razorpay could not be reached, and changes nothing', async () => {

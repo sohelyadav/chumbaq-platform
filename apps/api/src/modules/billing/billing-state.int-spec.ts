@@ -110,14 +110,18 @@ describe('BillingStateService (integration)', () => {
   };
 
   // Events, from the documented payloads.
-  const authenticated = (s: string, planId: string, eventAt: Date, startAt: Date | null) =>
+  /**
+   * Razorpay always sends `start_at` and `charge_at` on an authorised subscription: the
+   * start we asked for, or about the authorisation time when we asked for none.
+   */
+  const authenticated = (s: string, planId: string, eventAt: Date, startAt: Date) =>
     razorpayEvent('subscription.authenticated', {
       created_at: unix(eventAt),
       'payload.subscription.entity.id': s,
       'payload.subscription.entity.plan_id': planId,
       'payload.subscription.entity.customer_id': customer(s),
-      'payload.subscription.entity.start_at': startAt ? unix(startAt) : null,
-      'payload.subscription.entity.charge_at': startAt ? unix(startAt) : null,
+      'payload.subscription.entity.start_at': unix(startAt),
+      'payload.subscription.entity.charge_at': unix(startAt),
     });
 
   const withPeriod = (
@@ -166,7 +170,7 @@ describe('BillingStateService (integration)', () => {
     const w = await world();
     const sub = await checkout(w, w.planA, w.priceA);
     const period: [Date, Date] = [at(-5 * DAY), at(25 * DAY)];
-    await apply(authenticated(sub.providerId, w.priceA.rzp, at(-5 * DAY - 60_000), null));
+    await apply(authenticated(sub.providerId, w.priceA.rzp, at(-5 * DAY - 60_000), at(-5 * DAY - 60_000)));
     await apply(activated(sub.providerId, w.priceA.rzp, at(-5 * DAY), period));
     return { w, sub, period };
   }
@@ -175,11 +179,13 @@ describe('BillingStateService (integration)', () => {
     const w = await world();
     const sub = await checkout(w, w.planA, w.priceA);
 
-    const auth = await apply(authenticated(sub.providerId, w.priceA.rzp, at(-60_000), null));
+    const auth = await apply(authenticated(sub.providerId, w.priceA.rzp, at(-60_000), at(-60_000)));
     expect(auth).toEqual({ outcome: 'applied', detail: null, notices: [] });
-    expect((await subscription(sub.id)).status).toBe('authenticated');
-    // Authorised is only a mandate: nothing is granted until it activates.
+    // The provider's start is not ours: a first subscription has no scheduled start.
+    expect(await subscription(sub.id)).toMatchObject({ status: 'authenticated', start_at: null });
+    // Authorised is only a mandate: nothing is granted until it activates, even if the first charge then fails.
     expect((await planOf(w.userId)).plan).toBe('free');
+    expect((await planOf(w.userId, at(12 * 3600_000))).plan).toBe('free');
     expect((await account(w.userId)).current_subscription_id).toBeNull();
 
     const period: [Date, Date] = [at(0), at(30 * DAY)];
@@ -278,6 +284,24 @@ describe('BillingStateService (integration)', () => {
     expect(await planOf(w.userId, at(26 * DAY))).toEqual({ plan: w.planB, state: 'active' });
   });
 
+  it('a successor authorised after the current renewed past its start is cancelled, not scheduled', async () => {
+    const { w, sub: old, period } = await activeOnA();
+    const next = await checkout(w, w.planB, w.priceB, period[1]);
+    // The current renews at its period end before the successor's authorisation lands.
+    const renewal: [Date, Date] = [period[1], at(55 * DAY)];
+    await apply(charged(old.providerId, w.priceA.rzp, at(25 * DAY), renewal), at(25 * DAY));
+
+    const result = await apply(authenticated(next.providerId, w.priceB.rzp, at(25 * DAY + 60_000), period[1]), at(25 * DAY + 60_000));
+    expect(result).toMatchObject({ outcome: 'applied', detail: 'successor after renewal' });
+    const cancelled = await subscription(next.id);
+    expect(cancelled).toMatchObject({ cancel_at_cycle_end: false, cancel_sent_at: null });
+    expect(cancelled.cancel_requested_at).not.toBeNull();
+    // The renewed current keeps going: no cancel for it, and it alone counts.
+    expect((await subscription(old.id)).cancel_requested_at).toBeNull();
+    expect((await account(w.userId)).next_subscription_id).toBeNull();
+    expect(await planOf(w.userId, at(26 * DAY))).toEqual({ plan: w.planA, state: 'active' });
+  });
+
   it('a downgrade successor is scheduled, not granted, until it activates', async () => {
     const w = await world();
     const sub = await checkout(w, w.planB, w.priceB);
@@ -310,7 +334,7 @@ describe('BillingStateService (integration)', () => {
   });
 
   it('ignores what is not ours: an unknown subscription, an unknown plan, an unmatched failed payment', async () => {
-    expect(await apply(authenticated(`sub_${hex(7)}`, `plan_${hex(7)}`, NOW, null))).toEqual({
+    expect(await apply(authenticated(`sub_${hex(7)}`, `plan_${hex(7)}`, NOW, NOW))).toEqual({
       outcome: 'ignored',
       detail: 'unknown subscription',
       notices: [],
@@ -318,7 +342,7 @@ describe('BillingStateService (integration)', () => {
 
     const w = await world();
     const sub = await checkout(w, w.planA, w.priceA);
-    expect(await apply(authenticated(sub.providerId, `plan_${hex(7)}`, NOW, null))).toEqual({
+    expect(await apply(authenticated(sub.providerId, `plan_${hex(7)}`, NOW, NOW))).toEqual({
       outcome: 'ignored',
       detail: 'unknown plan',
       notices: [],

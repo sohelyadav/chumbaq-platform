@@ -7,6 +7,7 @@ import {
   BILLING_PROVIDER,
   BillingEvent,
   BillingProvider,
+  CHECKOUT_EXPIRY_MS,
   ProviderInvoice,
   ProviderSubscription,
 } from './providers/billing-provider';
@@ -14,6 +15,8 @@ import {
 export const RECONCILE_BATCH = 50;
 /** A period this long past its end with no renewal or end seen means a webhook was missed. */
 export const RECONCILE_STALE_MS = 6 * 3600_000;
+/** A Checkout never authorised is looked up this long after it was made: past its expiry at the provider. */
+export const RECONCILE_CHECKOUT_AFTER_MS = CHECKOUT_EXPIRY_MS + 3600_000;
 /** How far back a payment's missing invoice is still looked for. */
 export const RECONCILE_INVOICE_DAYS = 60;
 
@@ -24,8 +27,10 @@ const seconds = (d: Date | null): number | null => (d ? Math.floor(d.getTime() /
  * gives up). Hourly, at most `RECONCILE_BATCH` of each:
  *
  * - subscriptions that should have renewed or started by now (active or pending past
- *   their period end, or authorised past their start) are fetched and applied as a
- *   synthetic `subscription.reconciled` event, stamped now;
+ *   their period end, or authorised past their start), and an account's next
+ *   subscription still `created` past its Checkout's expiry (the provider sends no
+ *   webhook when it expires, so the account would show a pending Checkout for ever),
+ *   are fetched and applied as a synthetic `subscription.reconciled` event, stamped now;
  * - payments whose invoice is missing, or has no link yet, get their subscription's
  *   invoices listed and applied as synthetic `invoice.paid` events.
  *
@@ -53,13 +58,26 @@ export class BillingReconcileService {
     const stale: Array<{ provider_subscription_id: string }> = await this.dataSource.query(
       `SELECT provider_subscription_id FROM billing_subscriptions
         WHERE (status IN ('active', 'pending') AND current_end < $1)
-           OR (status = 'authenticated' AND start_at < $1)
+           OR (status = 'authenticated' AND COALESCE(start_at, created_at) < $1)
         ORDER BY last_event_at NULLS FIRST
         LIMIT $2`,
       [new Date(now.getTime() - RECONCILE_STALE_MS), RECONCILE_BATCH],
     );
+    // Checkouts an account still points at that were never authorised: the provider
+    // sends no webhook when one expires. In a batch of their own, so they never
+    // crowd out the subscriptions above.
+    const abandoned: Array<{ provider_subscription_id: string }> = await this.dataSource.query(
+      `SELECT s.provider_subscription_id
+         FROM billing_accounts a
+         JOIN billing_subscriptions s ON s.id = a.next_subscription_id
+        WHERE s.status = 'created' AND s.created_at < $1
+        ORDER BY s.created_at
+        LIMIT $2`,
+      [new Date(now.getTime() - RECONCILE_CHECKOUT_AFTER_MS), RECONCILE_BATCH],
+    );
+    const ids = new Set([...stale, ...abandoned].map((row) => row.provider_subscription_id));
     let applied = 0;
-    for (const { provider_subscription_id: id } of stale) {
+    for (const id of ids) {
       try {
         const subscription = await this.provider.fetchSubscription(id);
         const event: BillingEvent = {

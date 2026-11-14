@@ -141,6 +141,10 @@ export class BillingSubscriptionEntity {
   @Column({ type: 'varchar', length: 320, name: 'cancel_error', nullable: true })
   cancelError: string | null;
 
+  /** After a failed send, the earliest time the worker tries again. */
+  @Column({ type: 'timestamptz', name: 'cancel_retry_at', nullable: true })
+  cancelRetryAt: Date | null;
+
   @Column({ type: 'uuid', name: 'created_by', nullable: true })
   createdBy: string | null;
 

@@ -2,15 +2,16 @@ import { randomBytes, randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 import { closeIntDb, openIntDb } from '../../test-support/int-db';
+import { parkOtherOutboxRows } from '../../test-support/billing-outbox';
 import { FakeBillingProvider } from '../../test-support/fake-billing-provider';
 import type { PlatformEmail, PlatformEmailService } from '../platform-email/platform-email.service';
 import { AccountLimitsService } from './account-limits.service';
 import { BillingEmailsService } from './billing-emails.service';
 import { BillingLedgerService } from './billing-ledger.service';
-import { BillingOutboxService, OUTBOX_MAX_ATTEMPTS } from './billing-outbox.service';
+import { BillingOutboxService, OUTBOX_MAX_BACKOFF_MS } from './billing-outbox.service';
 import { BillingReconcileService } from './billing-reconcile.service';
 import { BillingStateService } from './billing-state.service';
-import { effectivePlan } from './effective-plan';
+import { accountState, effectivePlan } from './effective-plan';
 import { MauNoticesService } from './mau-notices.service';
 import { BillingProviderError, ProviderSubscription } from './providers/billing-provider';
 
@@ -23,8 +24,8 @@ const KEY_ID = 'rzp_test_AbC123xyz';
  * The outbox and reconciliation read the whole table, and the integration database
  * keeps rows from earlier runs of other specs, whose subscriptions this fake has never
  * heard of. So before each of those cases, leftover rows are put out of the jobs'
- * reach (their outbox attempts used up, stale ones ended, missing invoices filled):
- * only rows this spec made are worked on.
+ * reach (their outbox retries parked, stale ones and old checkouts ended, missing
+ * invoices filled): only rows this spec made are worked on.
  */
 describe('billing worker jobs (integration)', () => {
   let ds: DataSource;
@@ -143,12 +144,7 @@ describe('billing worker jobs (integration)', () => {
 
   describe('outbox', () => {
     beforeEach(async () => {
-      await ds.query(
-        `UPDATE billing_subscriptions SET cancel_attempts = $1
-          WHERE cancel_requested_at IS NOT NULL AND cancel_sent_at IS NULL AND cancel_attempts < $1
-            AND NOT (user_id = ANY($2::uuid[]))`,
-        [OUTBOX_MAX_ATTEMPTS, [...mine]],
-      );
+      await parkOtherOutboxRows(ds, mine);
     });
 
     it('two runs at once send each cancel once, at cycle end or now as asked', async () => {
@@ -181,26 +177,50 @@ describe('billing worker jobs (integration)', () => {
       expect((await sub(ended.id)).cancel_sent_at).not.toBeNull();
     });
 
-    it('keeps a provider error and retries next run, up to the attempt limit', async () => {
+    it('keeps a 400 that does not say the subscription already ended, and retries it', async () => {
+      const u = await user();
+      const live = await subscription(u, await plan(), { status: 'active', currentEnd: new Date(Date.now() + 9 * DAY), cancelRequested: true, atCycleEnd: true });
+      // A refusal whose wording mentions "cancelled" is not an ended subscription: it is still live and charging.
+      fake.failNext(
+        'cancelSubscription',
+        new BillingProviderError(400, 'BAD_REQUEST_ERROR', 'Subscription cannot be cancelled while a payment is in progress'),
+      );
+      const now = new Date();
+      expect(await outbox.runOnce(now)).toBe(0);
+      const kept = await sub(live.id);
+      expect(kept).toMatchObject({ cancel_sent_at: null, cancel_at_period_end: false, cancel_attempts: 1 });
+      expect(kept.cancel_error).toContain('400 BAD_REQUEST_ERROR Subscription cannot be cancelled');
+      expect(await outbox.runOnce(new Date(now.getTime() + 2 * 60_000))).toBe(1);
+      expect(await sub(live.id)).toMatchObject({ cancel_at_period_end: true, cancel_error: null });
+    });
+
+    it('backs off after a failure and never gives up on a cancel', async () => {
       const u = await user();
       const p = await plan();
       const flaky = await subscription(u, p, { status: 'created', cancelRequested: true });
+      const now = new Date();
       fake.failNext('cancelSubscription', new BillingProviderError(500, 'SERVER_ERROR', 'Something went wrong'));
-      expect(await outbox.runOnce()).toBe(0);
+      expect(await outbox.runOnce(now)).toBe(0);
       expect(await sub(flaky.id)).toMatchObject({ cancel_sent_at: null, cancel_attempts: 1 });
       expect((await sub(flaky.id)).cancel_error).toContain('500 SERVER_ERROR Something went wrong');
-      expect(await outbox.runOnce()).toBe(1);
+      expect((await sub(flaky.id)).cancel_retry_at.getTime()).toBe(now.getTime() + 60_000);
+      const calls = fake.callsOf('cancelSubscription').length;
+      expect(await outbox.runOnce(new Date(now.getTime() + 30_000))).toBe(0);
+      expect(fake.callsOf('cancelSubscription').length).toBe(calls);
+      expect(await outbox.runOnce(new Date(now.getTime() + 60_000))).toBe(1);
       expect(await sub(flaky.id)).toMatchObject({ cancel_error: null, cancel_attempts: 2 });
 
-      const doomed = await subscription(u, p, { status: 'created', cancelRequested: true });
-      await ds.query(`UPDATE billing_subscriptions SET cancel_attempts = $2 WHERE id = $1`, [doomed.id, OUTBOX_MAX_ATTEMPTS - 1]);
+      // Hours of failures: still retried, at most an hour apart.
+      const stubborn = await subscription(u, p, { status: 'created', cancelRequested: true });
+      await ds.query(`UPDATE billing_subscriptions SET cancel_attempts = 40 WHERE id = $1`, [stubborn.id]);
       fake.failNext('cancelSubscription', new TypeError('fetch failed'));
-      expect(await outbox.runOnce()).toBe(0);
-      expect(await sub(doomed.id)).toMatchObject({ cancel_attempts: OUTBOX_MAX_ATTEMPTS, cancel_sent_at: null });
-      expect((await sub(doomed.id)).cancel_error).toContain('unreachable');
-      const calls = fake.callsOf('cancelSubscription').length;
-      expect(await outbox.runOnce()).toBe(0);
-      expect(fake.callsOf('cancelSubscription').length).toBe(calls);
+      expect(await outbox.runOnce(now)).toBe(0);
+      const failing = await sub(stubborn.id);
+      expect(failing).toMatchObject({ cancel_attempts: 41, cancel_sent_at: null });
+      expect(failing.cancel_error).toContain('unreachable');
+      expect(failing.cancel_retry_at.getTime()).toBe(now.getTime() + OUTBOX_MAX_BACKOFF_MS);
+      expect(await outbox.runOnce(new Date(now.getTime() + OUTBOX_MAX_BACKOFF_MS))).toBe(1);
+      expect((await sub(stubborn.id)).cancel_sent_at).not.toBeNull();
     });
   });
 
@@ -209,7 +229,8 @@ describe('billing worker jobs (integration)', () => {
       await ds.query(
         `UPDATE billing_subscriptions SET status = 'expired'
           WHERE ((status IN ('active', 'pending') AND current_end < now() - interval '6 hours')
-             OR (status = 'authenticated' AND start_at < now() - interval '6 hours'))
+             OR (status = 'authenticated' AND COALESCE(start_at, created_at) < now() - interval '6 hours')
+             OR (status = 'created' AND created_at < now() - interval '24 hours'))
             AND NOT (user_id = ANY($1::uuid[]))`,
         [[...mine]],
       );
@@ -245,6 +266,28 @@ describe('billing worker jobs (integration)', () => {
       );
       expect(event).toMatchObject({ type: 'subscription.reconciled', outcome: 'applied' });
       expect(event.payload).toMatchObject({ source: 'reconcile', subscription: { id: stale.providerId, status: 'cancelled' } });
+    });
+
+    it('clears an abandoned Checkout once the provider says it expired', async () => {
+      const u = await user();
+      const p = await plan();
+      const abandoned = await subscription(u, p, { status: 'created' }, { status: 'expired', paidCount: 0 });
+      await ds.query(`UPDATE billing_subscriptions SET created_at = now() - interval '26 hours' WHERE id = $1`, [abandoned.id]);
+      await ds.query(`INSERT INTO billing_accounts (user_id, next_subscription_id) VALUES ($1, $2)`, [u, abandoned.id]);
+      // Another account's Checkout, opened a moment ago, is left alone.
+      const other = await user();
+      const fresh = await subscription(other, p, { status: 'created' }, { status: 'expired', paidCount: 0 });
+      await ds.query(`INSERT INTO billing_accounts (user_id, next_subscription_id) VALUES ($1, $2)`, [other, fresh.id]);
+      const rank = await limits.planRanks(ds.manager);
+      expect(accountState(await limits.billingState(ds.manager, u), new Date(), rank)).toBe('checkout');
+
+      expect(await reconcile.runOnce()).toBeGreaterThanOrEqual(1);
+      expect((await sub(abandoned.id)).status).toBe('expired');
+      const [account] = await ds.query(`SELECT next_subscription_id FROM billing_accounts WHERE user_id = $1`, [u]);
+      expect(account.next_subscription_id).toBeNull();
+      expect(accountState(await limits.billingState(ds.manager, u), new Date(), rank)).toBe('free');
+      expect((await sub(fresh.id)).status).toBe('created');
+      expect(fake.callsOf('fetchSubscription').map(([id]) => id)).not.toContain(fresh.providerId);
     });
 
     it('fills in an invoice a payment points at but no webhook delivered', async () => {

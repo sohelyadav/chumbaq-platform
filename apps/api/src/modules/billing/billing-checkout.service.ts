@@ -38,6 +38,7 @@ export const BILLING_MESSAGES = {
   noActiveToChange: 'There is no active subscription to change.',
   noActiveToCancel: 'There is no active subscription to cancel.',
   changeScheduled: 'A plan change is already scheduled.',
+  changedMeanwhile: 'Your subscription changed meanwhile. Try again.',
   samePlan: 'You are already on this plan.',
   renewalTooClose: 'Your renewal is too close to change plans. Try again after it.',
   providerRefused: 'Razorpay could not start the payment. Try again later.',
@@ -50,6 +51,14 @@ const PROVIDER_LABEL = 'Razorpay';
 
 /** No plan change this close to a renewal: the successor would start after a renewal it should replace. */
 export const CHANGE_RENEWAL_MARGIN_MS = 10 * 60_000;
+/**
+ * A change's Checkout expires this long before the renewal, so it cannot be
+ * authorised once the current subscription is about to renew (and charge for a
+ * period the successor would charge for too), and the worker has time to send the
+ * current one's cycle-end cancel. Less than `CHANGE_RENEWAL_MARGIN_MS`, so a change
+ * that is allowed leaves at least the difference to pay.
+ */
+export const CHANGE_AUTHORISE_BY_MS = 5 * 60_000;
 
 type Customer = { userId: string; email: string; name: string };
 
@@ -136,9 +145,7 @@ export class BillingCheckoutService {
         await this.requestCancel(manager, id, false, user.userId, now);
         return error as HttpException;
       }
-      if (locked.current?.status === 'halted') {
-        await this.requestCancel(manager, locked.current.id, false, user.userId, now);
-      }
+      // A halted current keeps its grace until the new one starts (`BillingStateService`).
       await this.pointNext(manager, user.userId, locked.next, id, customerId, now);
       return null;
     });
@@ -158,7 +165,7 @@ export class BillingCheckoutService {
         planId: purchase.price.razorpayPlanId,
         totalCount: SUBSCRIPTION_TOTAL_COUNT[dto.interval],
         startAt,
-        expireBy: new Date(now.getTime() + CHECKOUT_EXPIRY_MS),
+        expireBy: new Date(Math.min(now.getTime() + CHECKOUT_EXPIRY_MS, startAt.getTime() - CHANGE_AUTHORISE_BY_MS)),
         accountRef: user.userId,
       }),
     );
@@ -182,6 +189,12 @@ export class BillingCheckoutService {
     return this.checkoutOf(created, customerId, user, startAt);
   }
 
+  /**
+   * Cancels at the end of the period, and drops a change or "keep my plan" waiting to
+   * start, whether or not the current one is already ending (once a change is
+   * authorised the worker sets the current to end, and the successor is then the only
+   * thing left that would charge).
+   */
   async cancel(userId: string, now: Date = new Date()): Promise<BillingOverview> {
     const { current } = await this.read(this.dataSource.manager, userId);
     if (!current || (current.status !== 'active' && current.status !== 'pending')) {
@@ -191,8 +204,11 @@ export class BillingCheckoutService {
       await this.call(BILLING_MESSAGES.providerRefusedCancel, () =>
         this.provider.cancelSubscription(current.providerSubscriptionId, true),
       );
-      await this.dataSource.transaction(async (manager) => {
-        const locked = await this.read(manager, userId, true);
+    }
+    const refusal = await this.dataSource.transaction(async (manager) => {
+      const locked = await this.read(manager, userId, true);
+      if (locked.current?.id !== current.id) return new ConflictException(BILLING_MESSAGES.changedMeanwhile);
+      if (!current.cancelAtPeriodEnd) {
         await manager.update(
           BillingSubscriptionEntity,
           { id: current.id },
@@ -204,12 +220,15 @@ export class BillingCheckoutService {
             cancelSentAt: now,
           },
         );
-        // A change waiting to start goes with it.
-        if (locked.next && (locked.next.status === 'authenticated' || locked.next.status === 'created')) {
-          await this.requestCancel(manager, locked.next.id, false, userId, now);
-        }
-      });
-    }
+      }
+      // A change waiting to start goes with it, and stops counting at once.
+      if (locked.next && (locked.next.status === 'authenticated' || locked.next.status === 'created')) {
+        await this.requestCancel(manager, locked.next.id, false, userId, now);
+        await manager.update(BillingAccountEntity, { userId }, { nextSubscriptionId: null });
+      }
+      return null;
+    });
+    if (refusal) throw refusal;
     return this.overviews.overview(userId, now);
   }
 

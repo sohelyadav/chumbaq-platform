@@ -110,7 +110,9 @@ export class BillingStateService {
       patch.chargeAt = incoming.chargeAt;
     }
     if (incoming.paidCount > sub.paidCount) patch.paidCount = incoming.paidCount;
-    if (!sub.startAt && incoming.startAt) patch.startAt = incoming.startAt;
+    // `start_at` is only ever the start we scheduled at checkout. The provider puts one
+    // on every subscription (about the authorisation time when none was asked for), and
+    // taking it would make a first subscription's mandate count as a scheduled successor.
     if (!sub.endedAt && incoming.endedAt) patch.endedAt = incoming.endedAt;
 
     const wasStatus = sub.status;
@@ -147,22 +149,28 @@ export class BillingStateService {
 
     const notices: BillingNotice[] =
       enteredHalted && updated.graceUntil ? [{ kind: 'halted', userId: account.userId, graceUntil: updated.graceUntil }] : [];
-    if (role === 'next') await this.advanceNext(manager, account, updated, now);
-    return applied(null, notices);
+    const detail = role === 'next' ? await this.advanceNext(manager, account, updated, now) : null;
+    return applied(detail, notices);
   }
 
   /**
-   * The account's next subscription moved. Authorised with a start date while a live
-   * current renews on its own: the current is queued to cancel at the end of its
-   * cycle. Started charging: it becomes the current, and the old one is superseded.
-   * Ended without starting (an abandoned Checkout expiring): the pointer is cleared.
+   * The account's next subscription moved.
+   * - Authorised with a scheduled start while a live current renews on its own: the
+   *   current is queued to cancel at the end of its cycle. If the current has already
+   *   renewed past that start (the authorisation came too late), the successor would
+   *   charge for a period already paid: it is cancelled at once and dropped instead.
+   * - Started charging: it becomes the current, and the old one is superseded and
+   *   cancelled: at the end of its cycle when it is active, at once when it is halted
+   *   or pending (its plan is replaced now, and its own retries must stop). Until
+   *   then a halted current keeps its grace, so an abandoned Checkout costs nothing.
+   * - Ended without starting (an abandoned Checkout expiring): the pointer is cleared.
    */
   private async advanceNext(
     manager: EntityManager,
     account: BillingAccountEntity,
     next: BillingSubscriptionEntity,
     now: Date,
-  ): Promise<void> {
+  ): Promise<string | null> {
     const current = account.currentSubscriptionId
       ? await manager.findOne(BillingSubscriptionEntity, {
           where: { id: account.currentSubscriptionId },
@@ -171,16 +179,25 @@ export class BillingStateService {
       : null;
 
     if (next.status === 'authenticated') {
-      if (next.startAt && current && isLive(toSubscriptionState(current), now) && !current.cancelAtPeriodEnd) {
-        await this.requestCancelAtCycleEnd(manager, current.id, now);
+      if (next.startAt && current?.currentEnd && current.currentEnd.getTime() > next.startAt.getTime()) {
+        await this.requestCancel(manager, next.id, false, now);
+        await manager.update(BillingAccountEntity, { userId: account.userId }, { nextSubscriptionId: null });
+        return 'successor after renewal';
       }
-      return;
+      if (next.startAt && current && isLive(toSubscriptionState(current), now) && !current.cancelAtPeriodEnd) {
+        await this.requestCancel(manager, current.id, true, now);
+      }
+      return null;
     }
 
     if (STARTED.has(next.status)) {
       if (current && current.id !== next.id) {
         await manager.update(BillingSubscriptionEntity, { id: current.id }, { supersededBy: next.id });
-        if (isLive(toSubscriptionState(current), now)) await this.requestCancelAtCycleEnd(manager, current.id, now);
+        if (current.status === 'halted' || current.status === 'pending') {
+          await this.requestCancel(manager, current.id, false, now);
+        } else if (isLive(toSubscriptionState(current), now)) {
+          await this.requestCancel(manager, current.id, true, now);
+        }
       }
       await manager.update(BillingSubscriptionEntity, { id: next.id }, { wasCurrent: true });
       await manager.update(
@@ -188,20 +205,21 @@ export class BillingStateService {
         { userId: account.userId },
         { currentSubscriptionId: next.id, nextSubscriptionId: null },
       );
-      return;
+      return null;
     }
 
     if (isTerminalStatus(next.status)) {
       await manager.update(BillingAccountEntity, { userId: account.userId }, { nextSubscriptionId: null });
     }
+    return null;
   }
 
   /** Queues a cancel for the worker, unless one is already queued. */
-  private async requestCancelAtCycleEnd(manager: EntityManager, subscriptionId: string, now: Date): Promise<void> {
+  private async requestCancel(manager: EntityManager, subscriptionId: string, atCycleEnd: boolean, now: Date): Promise<void> {
     await manager
       .createQueryBuilder()
       .update(BillingSubscriptionEntity)
-      .set({ cancelRequestedAt: now, cancelAtCycleEnd: true, cancelRequestedBy: null })
+      .set({ cancelRequestedAt: now, cancelAtCycleEnd: atCycleEnd, cancelRequestedBy: null })
       .where('id = :id AND cancel_requested_at IS NULL', { id: subscriptionId })
       .execute();
   }
