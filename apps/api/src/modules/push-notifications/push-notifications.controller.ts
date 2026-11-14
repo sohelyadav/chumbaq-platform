@@ -1,4 +1,5 @@
 import {
+  ForbiddenException,
   Controller,
   Post,
   Get,
@@ -10,6 +11,7 @@ import {
   NotFoundException,
   Req,
 } from '@nestjs/common';
+import { ProjectSuspensionService, TEST_SEND_SUSPENDED } from '../projects/project-suspension.service';
 import type { Request } from 'express';
 import { PushNotificationsService } from './push-notifications.service';
 import {
@@ -46,6 +48,7 @@ export class PushNotificationsController {
     private readonly channelRegistry: ChannelProviderRegistry,
     private readonly channelCredentials: ChannelCredentialsService,
     private readonly identityService: IdentityService,
+    private readonly suspension: ProjectSuspensionService,
   ) {}
 
   @Get('experiment/:projectId/:campaignId')
@@ -89,6 +92,9 @@ export class PushNotificationsController {
   async testSend(
     @Body() dto: TestSendPushDto,
   ) {
+    if (await this.suspension.isSuspended(dto.projectId)) {
+      throw new ForbiddenException(TEST_SEND_SUSPENDED);
+    }
     return this.pushNotificationsService.testSend(dto);
   }
 

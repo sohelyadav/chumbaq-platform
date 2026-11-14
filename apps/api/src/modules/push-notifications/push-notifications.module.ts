@@ -8,6 +8,7 @@ import { PushTemplateEntity } from './entities/push-template.entity';
 import { PushChannelCredentialEntity } from './entities/push-channel-credential.entity';
 import { ChannelSuppressionEntity } from './entities/channel-suppression.entity';
 import { SuppressionsService } from './suppressions.service';
+import { ProjectSuspensionModule } from '../projects/project-suspension.module';
 import { PushNotificationsService } from './push-notifications.service';
 import { PushNotificationsController } from './push-notifications.controller';
 import { PushEventsController } from './push-events.controller';
@@ -39,6 +40,7 @@ import { QUEUE_PUSH_CAMPAIGN } from '../../queue/queue.constants';
     BullModule.registerQueue({ name: QUEUE_PUSH_CAMPAIGN }),
     PushTokensModule,
     IdentityModule,
+    ProjectSuspensionModule,
     SegmentsModule,
     ApiKeysModule,
     TouchpointsModule,

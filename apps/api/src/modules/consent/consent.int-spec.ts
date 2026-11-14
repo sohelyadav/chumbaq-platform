@@ -550,6 +550,29 @@ describe('Consent history and do-not-track (integration)', () => {
       ).toBe(true);
     });
 
+    it('records a redelivered or repeated opt-out once, but every change', async () => {
+      const stop = () =>
+        suppressions.suppress(
+          INT_PROJECT_ID, 'sms', Array.from({ length: 3 }, () => ({ address: '+919800000001', reason: 'unsubscribed' as const })), 'twilio',
+        );
+      await stop();
+      await stop();
+      await suppressions.remove(INT_PROJECT_ID, 'sms', '+919800000001', { onlyReason: 'unsubscribed' });
+      await stop();
+
+      expect((await history(PHONE)).map((r: { granted: boolean }) => r.granted)).toEqual([false, true, false]);
+    });
+
+    it('refuses a test send to a suppressed or opted-out address, and to nobody else', async () => {
+      expect(await suppressions.testSendRefusal(INT_PROJECT_ID, 'email', 'nobody@example.com')).toBeNull();
+      await suppressions.suppress(INT_PROJECT_ID, 'email', [{ address: 'asha@example.com', reason: 'unsubscribed' }], 'link');
+      expect(await suppressions.testSendRefusal(INT_PROJECT_ID, 'email', ' ASHA@example.com ')).toMatch(/suppression list/);
+
+      await ds.query(`UPDATE device_identities SET sms_opt_in = false WHERE id = $1`, [PHONE]);
+      expect(await suppressions.testSendRefusal(INT_PROJECT_ID, 'sms', '+919800000001')).toMatch(/opted out/);
+      expect(await suppressions.testSendRefusal(INT_PROJECT_ID, 'whatsapp', '+919800000001')).toBeNull();
+    });
+
     it('records a STOP from an unsigned webhook as unverified', async () => {
       await suppressions.suppress(
         INT_PROJECT_ID, 'whatsapp', [{ address: '+919800000001', reason: 'unsubscribed' }], 'gupshup', { verified: false },

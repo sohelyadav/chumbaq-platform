@@ -1,4 +1,5 @@
 import {
+  ForbiddenException,
   BadRequestException,
   Body,
   Controller,
@@ -21,6 +22,7 @@ import { ProjectAccessContext } from '../project-access/project-access.decorator
 import type { ProjectAccess } from '../project-access/project-access.service';
 import { redactSecrets } from '../project-access/redact-secrets';
 import { PaginationDto } from '../../common/dto/pagination.dto';
+import { ProjectSuspensionService, TEST_SEND_SUSPENDED } from '../projects/project-suspension.service';
 import { SuppressionsService } from '../push-notifications/suppressions.service';
 import { normalisePhone } from '../push-notifications/message-channel';
 import { WhatsAppSettingsService } from './whatsapp-settings.service';
@@ -42,6 +44,7 @@ export class WhatsAppController {
     private readonly settings: WhatsAppSettingsService,
     private readonly campaigns: WhatsAppCampaignsService,
     private readonly suppressions: SuppressionsService,
+    private readonly suspension: ProjectSuspensionService,
   ) {}
 
   @Get('settings/:projectId')
@@ -115,6 +118,11 @@ export class WhatsAppController {
   @Post('test-send')
   @RequireProjectPermission('messaging.write', { body: 'projectId' })
   async testSend(@Body() dto: TestSendWhatsAppDto) {
+    if (await this.suspension.isSuspended(dto.projectId)) {
+      throw new ForbiddenException(TEST_SEND_SUSPENDED);
+    }
+    const refusal = await this.suppressions.testSendRefusal(dto.projectId, 'whatsapp', dto.to);
+    if (refusal) return { delivered: false, error: refusal };
     return this.campaigns.testSend(dto);
   }
 

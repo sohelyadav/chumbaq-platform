@@ -30,6 +30,9 @@ export const CAMPAIGN_MISSED_DURING_SUSPENSION =
  * Registered through ProjectSuspensionModule rather than ProjectsModule, so the
  * worker, whose module tree is deliberately narrow, takes on no controller.
  */
+/** A test send from a project whose billing account is suspended. */
+export const TEST_SEND_SUSPENDED = "This project's account is suspended.";
+
 @Injectable()
 export class ProjectSuspensionService {
   constructor(

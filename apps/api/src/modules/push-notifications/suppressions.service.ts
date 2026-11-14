@@ -103,6 +103,7 @@ export class SuppressionsService {
       }));
     if (rows.length === 0) return;
 
+    const seen = new Set<string>();
     const recorded = rows
       .map((row) => ({
         address: row.address,
@@ -111,7 +112,14 @@ export class SuppressionsService {
       .filter(
         (row): row is { address: string; consentSource: ConsentSource } =>
           !!row.consentSource && channel !== 'push',
-      );
+      )
+      // One entry per address and source: a webhook body may name an address many times.
+      .filter((row) => {
+        const key = `${row.consentSource}\u0000${row.address}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
 
     // One transaction: a suppression never lands without its history, nor
     // the reverse. A failure rolls both back, so a retry (providers retry a
@@ -162,6 +170,27 @@ export class SuppressionsService {
         );
       }
     });
+  }
+
+  /**
+   * Why a test send to this address must not go out, or null. A test send is the
+   * marketer checking their own inbox or phone, but nothing proves the address is
+   * theirs, so the project's suppression list and an explicit opt-out hold here as
+   * they do for campaigns (the push test send does the same for an opted-out device).
+   */
+  async testSendRefusal(projectId: string, channel: AddressedConsentChannel, address: string): Promise<string | null> {
+    const normalised = normaliseAddress(channel, address);
+    if (!normalised) return null;
+    const suppressed = await this.repository.exists({ where: { projectId, channel, address: normalised } });
+    if (suppressed) return 'This address is on the project’s suppression list.';
+    // Allow-listed, never caller text: the columns are chosen from the channel.
+    const column = channel === 'email' ? 'email' : 'phone_e164';
+    const optIn = channel === 'email' ? 'email_opt_in' : channel === 'sms' ? 'sms_opt_in' : 'whatsapp_opt_in';
+    const optedOut: unknown[] = await this.repository.manager.query(
+      `SELECT 1 FROM device_identities WHERE project_id = $1 AND ${column} = $2 AND ${optIn} = false LIMIT 1`,
+      [projectId, normalised],
+    );
+    return optedOut.length > 0 ? 'This person has opted out of these messages.' : null;
   }
 
   /** Locks the device rows holding any of these addresses, in id order (see `suppress`). */

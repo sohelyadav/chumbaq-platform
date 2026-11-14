@@ -69,7 +69,7 @@ describe('SmsController settings read', () => {
     readyToSend: true,
   });
   const settings = { status: jest.fn(async () => status()) };
-  const controller = new SmsController(settings as never, {} as never, {} as never);
+  const controller = new SmsController(settings as never, {} as never, {} as never, {} as never);
 
   it('hides the inbound URL and the Twilio account SID from a member', async () => {
     const result = await controller.getSettings(PROJECT, access('member'));

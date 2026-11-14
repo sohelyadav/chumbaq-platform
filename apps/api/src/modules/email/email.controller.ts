@@ -1,4 +1,5 @@
 import {
+  ForbiddenException,
   Body,
   Controller,
   Delete,
@@ -22,6 +23,7 @@ import { redactSecrets } from '../project-access/redact-secrets';
 import { PaginationDto } from '../../common/dto/pagination.dto';
 import { EmailSettingsService } from './email-settings.service';
 import { EmailCampaignsService } from './email-campaigns.service';
+import { ProjectSuspensionService, TEST_SEND_SUSPENDED } from '../projects/project-suspension.service';
 import { SuppressionsService } from '../push-notifications/suppressions.service';
 import {
   AddSuppressionDto,
@@ -46,6 +48,7 @@ export class EmailController {
     private readonly settings: EmailSettingsService,
     private readonly campaigns: EmailCampaignsService,
     private readonly suppressions: SuppressionsService,
+    private readonly suspension: ProjectSuspensionService,
   ) {}
 
   @Get('settings/:projectId')
@@ -125,6 +128,11 @@ export class EmailController {
   @Post('test-send')
   @RequireProjectPermission('messaging.write', { body: 'projectId' })
   async testSend(@Body() dto: TestSendEmailDto) {
+    if (await this.suspension.isSuspended(dto.projectId)) {
+      throw new ForbiddenException(TEST_SEND_SUSPENDED);
+    }
+    const refusal = await this.suppressions.testSendRefusal(dto.projectId, 'email', dto.to);
+    if (refusal) return { delivered: false, error: refusal };
     return this.campaigns.testSend(dto);
   }
 

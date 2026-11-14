@@ -72,11 +72,23 @@ export class ConsentEventsService {
   ): Promise<number> {
     // Allow-listed, never caller text: the column is chosen from the channel.
     const column = channel === 'email' ? 'email' : 'phone_e164';
+    // Not for a holder whose latest entry for the channel already says the same thing
+    // from the same source: providers redeliver, webhook bodies repeat an address, and
+    // a repeat would add a row per holder each time while saying nothing new.
     const rows: unknown[] = await (manager ?? this.repository.manager).query(
       `INSERT INTO consent_events (project_id, device_identity_id, channel, granted, source)
-       SELECT i.project_id, i.id, $3, $4, $5
+       SELECT i.project_id, i.id, $3::varchar, $4::boolean, $5::varchar
        FROM device_identities i
        WHERE i.project_id = $1 AND i.${column} = $2
+         AND NOT EXISTS (
+           SELECT 1 FROM (
+             SELECT ce.granted, ce.source FROM consent_events ce
+             WHERE ce.project_id = i.project_id AND ce.device_identity_id = i.id AND ce.channel = $3::varchar
+             ORDER BY ce.occurred_at DESC, ce.id DESC
+             LIMIT 1
+           ) latest
+           WHERE latest.granted = $4::boolean AND latest.source = $5::varchar
+         )
        ORDER BY i.id
        RETURNING id`,
       [projectId, address, channel, granted, source],

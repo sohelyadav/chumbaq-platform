@@ -87,6 +87,7 @@ describe('PushNotificationsController — channels', () => {
     channelRegistry as never,
     channelCredentials as never,
     identityService as never,
+    { isSuspended: async () => false } as never,
   );
 
   const dto = (over: Record<string, unknown> = {}) =>

@@ -75,7 +75,7 @@ describe('EmailController settings read', () => {
     readyToSend: true,
   });
   const settings = { status: jest.fn(async () => status()) };
-  const controller = new EmailController(settings as never, {} as never, {} as never);
+  const controller = new EmailController(settings as never, {} as never, {} as never, {} as never);
 
   it('hides the webhook URLs, which carry the token, from a member', async () => {
     const result = await controller.getSettings(PROJECT, access('member'));
@@ -96,5 +96,39 @@ describe('EmailController settings read', () => {
   it('still hides them from view-as of the owner', async () => {
     const result = await controller.getSettings(PROJECT, access('owner', true));
     expect(JSON.stringify(result)).not.toContain(TOKEN);
+  });
+
+  describe('test send', () => {
+    const dto = { projectId: 'p1', to: 'Someone@Example.com', subject: 's', html: '<p>h</p>' } as never;
+    const build = (suspended: boolean, refusal: string | null) => {
+      const campaigns = { testSend: jest.fn(async () => ({ delivered: true })) };
+      const suppressions = { testSendRefusal: jest.fn(async () => refusal) };
+      const suspension = { isSuspended: jest.fn(async () => suspended) };
+      return {
+        campaigns,
+        controller: new EmailController({} as never, campaigns as never, suppressions as never, suspension as never),
+      };
+    };
+
+    it('is refused for a suspended account', async () => {
+      const { controller, campaigns } = build(true, null);
+      await expect(controller.testSend(dto)).rejects.toThrow("This project's account is suspended.");
+      expect(campaigns.testSend).not.toHaveBeenCalled();
+    });
+
+    it('does not go to a suppressed or opted-out address', async () => {
+      const { controller, campaigns } = build(false, 'This address is on the project’s suppression list.');
+      await expect(controller.testSend(dto)).resolves.toEqual({
+        delivered: false,
+        error: 'This address is on the project’s suppression list.',
+      });
+      expect(campaigns.testSend).not.toHaveBeenCalled();
+    });
+
+    it('goes out otherwise', async () => {
+      const { controller, campaigns } = build(false, null);
+      await expect(controller.testSend(dto)).resolves.toEqual({ delivered: true });
+      expect(campaigns.testSend).toHaveBeenCalled();
+    });
   });
 });
