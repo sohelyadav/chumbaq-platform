@@ -979,10 +979,10 @@ async function seed() {
   console.log(`  Touchpoints:         500`);
   console.log(`  Attribution Results: ${attrBatch.length}`);
   console.log('═══════════════════════════════════════════════════');
-  console.log('  Login: admin@chumbaq.com / admin123');
-  console.log('  Login: dev@chumbaq.com / dev123');
-  console.log('  Login: marketing@chumbaq.com / marketing123');
-  console.log('  Login: product@chumbaq.com / product123');
+  console.log('  Login: admin@example.com / admin123');
+  console.log('  Login: dev@example.com / dev123');
+  console.log('  Login: marketing@example.com / marketing123');
+  console.log('  Login: product@example.com / product123');
   console.log('═══════════════════════════════════════════════════\n');
 
   await ds.destroy();
