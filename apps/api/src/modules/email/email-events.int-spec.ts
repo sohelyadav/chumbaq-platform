@@ -48,6 +48,7 @@ describe('Ingesting the same SES message twice (integration)', () => {
         ds.getRepository(ChannelSuppressionEntity),
         new ConsentEventsService(ds.getRepository(ConsentEventEntity)),
         { record: async () => undefined } as never,
+        { hashUnheld: async () => new Set<string>() } as never,
       ),
     );
   });

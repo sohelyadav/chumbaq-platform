@@ -67,6 +67,16 @@ export class ErasedSuppressionsService {
     if (keys.length === 0) return { kept: 0, clearRowsDeleted: 0 };
     await this.lock(manager, projectId, keys);
 
+    // Every address erased, suppressed or not: see ErasedAddressEntity and hashUnheld.
+    for (const key of keys) {
+      await manager.query(
+        `INSERT INTO erased_addresses (project_id, channel, address_hash)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (project_id, channel, address_hash) DO NOTHING`,
+        [projectId, key.channel, key.hash],
+      );
+    }
+
     const deleted: Array<{ channel: MessageChannel; address: string; reason: string }> = rowsOf(
       await manager.query(
         `DELETE FROM channel_suppressions s
@@ -147,6 +157,67 @@ export class ErasedSuppressionsService {
       restored++;
     }
     return restored;
+  }
+
+  /**
+   * Takes the suppressions, among these, for addresses an erasure removed from the
+   * project and that no device holds again, and stores them as hashes instead of the
+   * address in clear (a late bounce, a STOP to an old text, an old unsubscribe link).
+   * Honoured all the same: `restore` turns the hash back into a clear row if the address
+   * is ever stored again, which is the only way it could be sent to. Returns the
+   * addresses it took. In the caller's transaction, under the same per-address locks as
+   * the erasure and `restore`.
+   */
+  async hashUnheld(
+    manager: EntityManager,
+    projectId: string,
+    channel: MessageChannel,
+    entries: Array<{ address: string; reason: string }>,
+  ): Promise<Set<string>> {
+    const taken = new Set<string>();
+    const isEmail = EMAIL_CHANNELS.includes(channel);
+    if (!isEmail && !PHONE_CHANNELS.includes(channel)) return taken;
+    const addresses = [...new Set(entries.map((entry) => entry.address))];
+    const keys = this.keysFor(projectId, isEmail ? addresses : [], isEmail ? [] : addresses).filter(
+      (key) => key.channel === channel,
+    );
+    if (keys.length === 0) return taken;
+    await this.lock(manager, projectId, keys);
+
+    const erased = new Set<string>(
+      rowsOf<{ address_hash: string }>(
+        await manager.query(
+          `SELECT address_hash FROM erased_addresses
+            WHERE project_id = $1 AND channel = $2 AND address_hash = ANY($3::varchar[])`,
+          [projectId, channel, keys.map((key) => key.hash)],
+        ),
+      ).map((row) => row.address_hash),
+    );
+    if (erased.size === 0) return taken;
+
+    // Allow-listed, never caller text: the column is chosen from the channel.
+    const column = isEmail ? 'email' : 'phone_e164';
+    const held = new Set<string>(
+      rowsOf<{ address: string }>(
+        await manager.query(
+          `SELECT ${column} AS address FROM device_identities WHERE project_id = $1 AND ${column} = ANY($2::text[])`,
+          [projectId, addresses],
+        ),
+      ).map((row) => row.address),
+    );
+
+    for (const entry of entries) {
+      const key = keys.find((k) => k.address === entry.address);
+      if (!key || !erased.has(key.hash) || held.has(entry.address) || taken.has(entry.address)) continue;
+      await manager.query(
+        `INSERT INTO erased_suppressions (project_id, channel, address_hash, reason)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (project_id, channel, address_hash) DO NOTHING`,
+        [projectId, channel, key.hash, entry.reason],
+      );
+      taken.add(entry.address);
+    }
+    return taken;
   }
 
   private keysFor(projectId: string, emails: string[], phones: string[]): AddressKey[] {

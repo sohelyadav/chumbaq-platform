@@ -9,6 +9,7 @@ import { PushChannelCredentialEntity } from './entities/push-channel-credential.
 import { ChannelSuppressionEntity } from './entities/channel-suppression.entity';
 import { SuppressionsService } from './suppressions.service';
 import { ProjectSuspensionModule } from '../projects/project-suspension.module';
+import { ErasedSuppressionsModule } from '../privacy/erased-suppressions.module';
 import { PushNotificationsService } from './push-notifications.service';
 import { PushNotificationsController } from './push-notifications.controller';
 import { PushEventsController } from './push-events.controller';
@@ -41,6 +42,7 @@ import { QUEUE_PUSH_CAMPAIGN } from '../../queue/queue.constants';
     PushTokensModule,
     IdentityModule,
     ProjectSuspensionModule,
+    ErasedSuppressionsModule,
     SegmentsModule,
     ApiKeysModule,
     TouchpointsModule,

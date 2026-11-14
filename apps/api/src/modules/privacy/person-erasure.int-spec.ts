@@ -22,6 +22,8 @@ import {
 } from '../../test-support/int-db';
 import { PrivacyRequestLogEntity } from './entities/privacy-request-log.entity';
 import { ErasedSuppressionsService } from './erased-suppressions.service';
+import { SuppressionsService } from '../push-notifications/suppressions.service';
+import { ChannelSuppressionEntity } from '../push-notifications/entities/channel-suppression.entity';
 import { EXPORT_ROW_CAP_PER_SECTION, PersonExportService, WITHHELD_IDENTIFIER } from './person-export.service';
 import { PersonErasureService } from './person-erasure.service';
 import { MAX_DEVICES_PER_PERSON, NOT_ERASED, SIGNED_IN_DEVICE_MESSAGE } from './person-scope';
@@ -449,6 +451,31 @@ describe('PersonErasureService and PersonExportService (integration)', () => {
     expect(await count('erased_suppressions WHERE project_id = $1', [A])).toBe(0);
     // Re-identifying an erased user is allowed (lead's default).
     expect(await count('device_identities WHERE project_id = $1 AND device_fingerprint = $2', [A, 'fp-new'])).toBe(1);
+  });
+
+  // A late bounce, a STOP to an old text, an old unsubscribe link: honoured, never stored
+  // in clear again once the person is erased.
+  it('keeps a suppression arriving after the erasure as a hash, and only for an erased address', async () => {
+    await erasure.erase(A, { type: 'externalUserId', value: 'user-42' }, ACTOR, CTX);
+    await q(`DELETE FROM erased_suppressions WHERE project_id = $1`, [A]);
+    const late = new SuppressionsService(
+      ds.getRepository(ChannelSuppressionEntity),
+      new ConsentEventsService(ds.getRepository(ConsentEventEntity)),
+      { record: async () => undefined } as never,
+      suppressions,
+    );
+
+    await late.suppress(A, 'email', [{ address: ALICE_EMAIL, reason: 'complained' }], 'ses');
+    await late.suppress(A, 'email', [{ address: 'never-here@example.com', reason: 'bounced' }], 'ses');
+
+    expect(await count('channel_suppressions WHERE project_id = $1 AND address = $2', [A, ALICE_EMAIL])).toBe(0);
+    expect(await count(`erased_suppressions WHERE project_id = $1 AND channel = 'email'`, [A])).toBe(1);
+    // An address nobody erased stays visible to the tenant, as before.
+    expect(await count('channel_suppressions WHERE project_id = $1 AND address = $2', [A, 'never-here@example.com'])).toBe(1);
+
+    // Still honoured: the address comes back suppressed when it is seen again.
+    await identity.identify({ projectId: A, deviceFingerprint: 'fp-late', platform: 'ios', email: ALICE_EMAIL } as never);
+    expect(await count('channel_suppressions WHERE project_id = $1 AND address = $2', [A, ALICE_EMAIL])).toBe(1);
   });
 
   it('keeps the clear suppression while another identity in the project still holds the address', async () => {

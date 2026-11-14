@@ -14,6 +14,7 @@ import { ConsentSource } from '../consent/entities/consent-event.entity';
 import { ProjectActivityService } from '../project-activity/project-activity.service';
 import { recordBy, type ActivityRequester } from '../project-activity/messaging-activity';
 import { maskAddress } from '../project-activity/mask-address';
+import { ErasedSuppressionsService } from '../privacy/erased-suppressions.service';
 
 /**
  * A team member's suppression change in the activity log: the channel and the
@@ -71,6 +72,7 @@ export class SuppressionsService {
     private readonly repository: Repository<ChannelSuppressionEntity>,
     private readonly consentEvents: ConsentEventsService,
     private readonly activity: ProjectActivityService,
+    private readonly erased: ErasedSuppressionsService,
   ) {}
 
   /**
@@ -141,14 +143,25 @@ export class SuppressionsService {
         );
       }
 
-      const inserted = await manager
-        .createQueryBuilder()
-        .insert()
-        .into(ChannelSuppressionEntity)
-        .values(rows)
-        .orIgnore()
-        .returning(['address'])
-        .execute();
+      // An erased person's address that nobody holds again is kept as a hash, not put
+      // back in clear: see ErasedSuppressionsService.hashUnheld. A team member's own
+      // entry stays in clear, since they typed it and need to see it.
+      const hashed =
+        channel === 'push' || source === 'dashboard'
+          ? new Set<string>()
+          : await this.erased.hashUnheld(manager, projectId, channel, rows);
+      const clear = rows.filter((row) => !hashed.has(row.address));
+
+      const inserted = clear.length
+        ? await manager
+            .createQueryBuilder()
+            .insert()
+            .into(ChannelSuppressionEntity)
+            .values(clear)
+            .orIgnore()
+            .returning(['address'])
+            .execute()
+        : { raw: [] };
 
       if (requester) {
         for (const { address } of (inserted.raw ?? []) as Array<{ address: string }>) {

@@ -50,7 +50,7 @@ describe('Consent history and do-not-track (integration)', () => {
     ds = await openIntDb();
     tracking = new TrackingConsentService(ds.getRepository(DeviceIdentityEntity));
     consentEvents = new ConsentEventsService(ds.getRepository(ConsentEventEntity));
-    suppressions = new SuppressionsService(ds.getRepository(ChannelSuppressionEntity), consentEvents, { record: async () => undefined } as never);
+    suppressions = new SuppressionsService(ds.getRepository(ChannelSuppressionEntity), consentEvents, { record: async () => undefined } as never, { hashUnheld: async () => new Set<string>() } as never);
     identity = new IdentityService(
       ds.getRepository(DeviceIdentityEntity),
       ds.getRepository(IdentityAliasEntity),

@@ -6,6 +6,7 @@ import { PushNotificationLogEntity } from '../push-notifications/entities/push-n
 import { DeviceIdentityEntity } from '../identity/entities/device-identity.entity';
 import { EmailEvent } from './email-webhooks';
 import { SuppressionsService } from '../push-notifications/suppressions.service';
+import { liveIdentityIds } from '../push-notifications/live-identities';
 
 /**
  * Records provider delivery events.
@@ -108,7 +109,9 @@ export class EmailEventsService {
         metadata: event.detail ? { detail: event.detail.slice(0, 500) } : null,
       }));
 
-    if (rows.length === 0) return 0;
+    const live = await liveIdentityIds(this.eventRepository.manager, projectId, rows.map((row) => row.deviceIdentityId));
+    const kept = rows.filter((row) => live.has(row.deviceIdentityId));
+    if (kept.length === 0) return 0;
 
     // One row per (campaign, person, type), as for push: providers retry
     // webhooks, and an open pixel fires on every view.
@@ -116,11 +119,11 @@ export class EmailEventsService {
       .createQueryBuilder()
       .insert()
       .into(PushNotificationEventEntity)
-      .values(rows as never)
+      .values(kept as never)
       .orIgnore()
       .execute();
 
-    return rows.length;
+    return kept.length;
   }
 
   /**

@@ -6,7 +6,10 @@ const at = new Date('2026-11-01T00:00:00Z');
 
 describe('SmsEventsService', () => {
   const insert = { into: jest.fn(), values: jest.fn(), orIgnore: jest.fn(), execute: jest.fn() };
-  const eventRepository = { createQueryBuilder: jest.fn(() => ({ insert: () => insert })) };
+  const eventRepository = {
+    createQueryBuilder: jest.fn(() => ({ insert: () => insert })),
+  manager: { query: jest.fn(async (_sql: string, [, ids]: [string, string[]]) => ids.map((id) => ({ id }))) },
+  };
   const logRepository = { exists: jest.fn() };
   const suppressions = { suppress: jest.fn(), remove: jest.fn() };
   let service: SmsEventsService;

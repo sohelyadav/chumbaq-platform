@@ -5,6 +5,7 @@ import { PushNotificationEventEntity } from '../push-notifications/entities/push
 import { PushNotificationLogEntity } from '../push-notifications/entities/push-notification-log.entity';
 import { SuppressionsService } from '../push-notifications/suppressions.service';
 import { SmsEvent } from './twilio-webhooks';
+import { liveIdentityIds } from '../push-notifications/live-identities';
 
 /**
  * Records SMS delivery reports and opt-out replies.
@@ -50,6 +51,8 @@ export class SmsEventsService {
       where: { id: event.campaignId, projectId, channel: 'sms' },
     });
     if (!owned) return 0;
+    const live = await liveIdentityIds(this.eventRepository.manager, projectId, [event.identityId]);
+    if (!live.has(event.identityId)) return 0;
 
     await this.eventRepository
       .createQueryBuilder()

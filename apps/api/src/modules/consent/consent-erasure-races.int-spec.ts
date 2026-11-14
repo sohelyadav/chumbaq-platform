@@ -60,7 +60,7 @@ describe('Consent writes racing an erasure (integration)', () => {
   beforeAll(async () => {
     ds = await openIntDb();
     consentEvents = new ConsentEventsService(ds.getRepository(ConsentEventEntity));
-    suppressions = new SuppressionsService(ds.getRepository(ChannelSuppressionEntity), consentEvents, { record: async () => undefined } as never);
+    suppressions = new SuppressionsService(ds.getRepository(ChannelSuppressionEntity), consentEvents, { record: async () => undefined } as never, { hashUnheld: async () => new Set<string>() } as never);
     objections = new PersonObjectionsService(
       ds.getRepository(TrackingObjectionEntity),
       ds.getRepository(DeviceIdentityEntity),

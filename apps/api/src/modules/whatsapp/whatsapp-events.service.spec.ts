@@ -22,6 +22,7 @@ describe('WhatsAppEventsService', () => {
   const eventRepository = {
     createQueryBuilder: jest.fn(() => ({ insert: () => insert })),
     query: jest.fn(),
+  manager: { query: jest.fn(async (_sql: string, [, ids]: [string, string[]]) => ids.map((id) => ({ id }))) },
   };
   const logRepository = { find: jest.fn() };
   const identityRepository = { find: jest.fn() };

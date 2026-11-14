@@ -6,6 +6,7 @@ import { PushNotificationLogEntity } from '../push-notifications/entities/push-n
 import { SuppressionsService } from '../push-notifications/suppressions.service';
 import { DeviceIdentityEntity } from '../identity/entities/device-identity.entity';
 import { WhatsAppEvent } from './providers/whatsapp-provider';
+import { liveIdentityIds } from '../push-notifications/live-identities';
 
 /**
  * Opt-out and opt-in keywords. WhatsApp has no carrier-level STOP the way
@@ -142,16 +143,18 @@ export class WhatsAppEventsService {
           ? { detail: String(event.detail ?? event.errorCode).slice(0, 500) }
           : null,
       }));
-    if (rows.length === 0) return 0;
+    const live = await liveIdentityIds(this.eventRepository.manager, projectId, rows.map((row) => row.deviceIdentityId));
+    const kept = rows.filter((row) => live.has(row.deviceIdentityId));
+    if (kept.length === 0) return 0;
 
     await this.eventRepository
       .createQueryBuilder()
       .insert()
       .into(PushNotificationEventEntity)
-      .values(rows as never)
+      .values(kept as never)
       .orIgnore()
       .execute();
-    return rows.length;
+    return kept.length;
   }
 
   /**

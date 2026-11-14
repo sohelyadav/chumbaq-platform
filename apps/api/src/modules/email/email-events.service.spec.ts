@@ -54,7 +54,14 @@ describe('EmailEventsService', () => {
         : [],
     );
     service = new EmailEventsService(
-      { createQueryBuilder: () => qb } as never,
+      {
+        createQueryBuilder: () => qb,
+        // Behaves like the table: the asked-for ids that exist in this project.
+        manager: {
+          query: async (_sql: string, [projectId, ids]: [string, string[]]) =>
+            identities.filter((row) => row.projectId === projectId && ids.includes(row.id)).map(({ id }) => ({ id })),
+        },
+      } as never,
       logRepository as never,
       identityRepository as never,
       {
@@ -76,6 +83,16 @@ describe('EmailEventsService', () => {
         platform: 'email',
       }),
     ]);
+  });
+
+  // A report arriving after its person was erased names an identity that is gone, and
+  // its provider detail can quote the address.
+  it('drops a report for a person who no longer exists', async () => {
+    const recorded = await service.ingest(PROJECT, 'ses', [
+      event({ type: 'bounced', permanent: false, identityId: '99999999-9999-4999-8999-999999999999', detail: '550 erased@example.com' }),
+    ]);
+    expect(recorded).toBe(0);
+    expect(inserted).toEqual([]);
   });
 
   it('refuses to write to a campaign of another project', async () => {
