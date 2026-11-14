@@ -162,7 +162,7 @@ export class AdminUsageService {
     };
   }
 
-  /** D13 figures per billing owner; owners with no usage are absent. */
+  /** Figures per billing owner; owners with no usage are absent. */
   async tenantAggregates(
     coverage: UsageCoverage | null,
     ownerIds: string[] | null,
