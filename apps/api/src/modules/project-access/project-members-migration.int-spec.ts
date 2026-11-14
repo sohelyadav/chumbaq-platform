@@ -9,6 +9,7 @@ import { closeIntDb, openIntDb } from '../../test-support/int-db';
 import { AddProjectMembers1794440000000 } from '../../migrations/1794440000000-AddProjectMembers';
 import { ProjectEntity } from '../projects/entities/project.entity';
 import { ProjectsService } from '../projects/projects.service';
+import { AccountLimitsService } from '../billing/account-limits.service';
 
 /**
  * The schema behind team roles, which only Postgres can show holding: the role CHECK,
@@ -192,9 +193,9 @@ describe('project_members and project_invitations (integration)', () => {
     const owner = await user();
     const service = new ProjectsService(
       ds.getRepository(ProjectEntity),
-      new ConfigService({ projects: { maxPerAccount: 10 } }),
+      new AccountLimitsService(new ConfigService({ projects: { maxPerAccount: 10 } })),
       new ProjectAccessService(null as never, null as never, null as never, null as never),
-      new SeatsService(ds, new ConfigService({})),
+      new SeatsService(ds, new AccountLimitsService(new ConfigService({}))),
       new ProjectActivityService(ds.getRepository(ProjectActivityEntity), new ConfigService({})),
     );
     const created = await service.create(owner, { name: 'via service', domain: 'example.com' } as never);

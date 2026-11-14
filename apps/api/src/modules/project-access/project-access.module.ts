@@ -18,6 +18,7 @@ import { InvitationsController } from './invitations.controller';
 import { InvitationAcceptController } from './invitation-accept.controller';
 import { PlatformEmailModule } from '../platform-email/platform-email.module';
 import { ProjectActivityModule } from '../project-activity/project-activity.module';
+import { BillingCoreModule } from '../billing/billing-core.module';
 
 /**
  * Global, so any feature module's controller can use `@RequireProjectPermission`
@@ -39,6 +40,8 @@ import { ProjectActivityModule } from '../project-activity/project-activity.modu
     ]),
     PlatformEmailModule,
     ProjectActivityModule,
+    // Project and seat limits (AccountLimitsService).
+    BillingCoreModule,
   ],
   controllers: [ProjectMembersController, InvitationsController, InvitationAcceptController],
   providers: [

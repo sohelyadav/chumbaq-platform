@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 import { closeIntDb, openIntDb } from '../../test-support/int-db';
 import { SEAT_LIMIT_MESSAGE, SeatsService } from './seats.service';
+import { AccountLimitsService } from '../billing/account-limits.service';
 
 const DOMAIN = '@seats-int.test';
 
@@ -57,7 +58,7 @@ describe('Seats (integration)', () => {
 
   beforeAll(async () => {
     ds = await openIntDb();
-    seats = new SeatsService(ds, new ConfigService({ projects: { maxSeatsPerAccount: null } }));
+    seats = new SeatsService(ds, new AccountLimitsService(new ConfigService({ projects: { maxSeatsPerAccount: null } })));
   });
   afterAll(async () => {
     await cleanUp();
@@ -205,7 +206,7 @@ describe('Seats (integration)', () => {
     });
 
     it('uses the environment limit when the account has no override', async () => {
-      const capped = new SeatsService(ds, new ConfigService({ projects: { maxSeatsPerAccount: 1 } }));
+      const capped = new SeatsService(ds, new AccountLimitsService(new ConfigService({ projects: { maxSeatsPerAccount: 1 } })));
       const owner = await user('o');
       await project(owner);
       await expect(

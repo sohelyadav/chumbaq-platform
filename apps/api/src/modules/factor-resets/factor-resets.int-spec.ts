@@ -31,6 +31,7 @@ import { UsersService } from '../users/users.service';
 import { cancelAllRequestedBy, lockResetTargetsOf } from './cancel-requested-by';
 import { FactorResetEntity } from './entities/factor-reset.entity';
 import { FactorResetActor, FactorResetsService } from './factor-resets.service';
+import { AccountLimitsService } from '../billing/account-limits.service';
 
 const DOMAIN = '@factor-reset-int.test';
 const PASSWORD = 'correct-horse-battery';
@@ -946,7 +947,7 @@ describe('FactorResetsService (integration)', () => {
         ds.getRepository(UserEntity),
         audit,
         new AdminAuditService(audit),
-        fakeNotices, new SeatsService(ds)
+        fakeNotices, new SeatsService(ds, new AccountLimitsService()), new AccountLimitsService()
       );
       notices.length = 0;
 
@@ -1694,7 +1695,7 @@ describe('FactorResetsService (integration)', () => {
             ds.getRepository(UserEntity),
             audit,
             new AdminAuditService(audit),
-            fakeNotices, new SeatsService(ds)
+            fakeNotices, new SeatsService(ds, new AccountLimitsService()), new AccountLimitsService()
           ).suspend(requester.id, 'Left the company, access withdrawn', {
             userId: staff.userId,
             email: staff.email,
@@ -2032,7 +2033,7 @@ describe('FactorResetsService (integration)', () => {
         ds.getRepository(UserEntity),
         audit,
         new AdminAuditService(audit),
-        fakeNotices, new SeatsService(ds)
+        fakeNotices, new SeatsService(ds, new AccountLimitsService()), new AccountLimitsService()
       ).suspend(user.id, 'Left the company, access withdrawn', {
         userId: staff.userId,
         email: staff.email,
@@ -2299,7 +2300,7 @@ describe('FactorResetsService (integration)', () => {
         revoke: () => setSuperAdmin(ds, requester.email, false, fakeNotices),
         passkeys: () => resetSuperAdminPasskeys(ds, requester.email, null, () => undefined, fakeNotices),
         suspend: () =>
-          new AdminTenantsService(ds.getRepository(UserEntity), audit, new AdminAuditService(audit), fakeNotices, new SeatsService(ds))
+          new AdminTenantsService(ds.getRepository(UserEntity), audit, new AdminAuditService(audit), fakeNotices, new SeatsService(ds, new AccountLimitsService()), new AccountLimitsService())
             .suspend(requester.id, 'Left the company, access withdrawn', {
               userId: staff.userId,
               email: staff.email,

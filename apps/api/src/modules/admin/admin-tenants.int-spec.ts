@@ -9,6 +9,7 @@ import { SeatsService } from '../project-access/seats.service';
 import { AdminTenantsFilterDto, ListAdminTenantsDto } from './dto/admin-tenants.dto';
 import { TENANT_CSV_HEADER } from './tenants-csv';
 import { AdminAuditLogEntity } from './entities/admin-audit-log.entity';
+import { AccountLimitsService } from '../billing/account-limits.service';
 
 // Every fixture carries this domain and every list query is scoped by it, so
 // these tests neither see nor disturb rows owned by other int specs.
@@ -147,7 +148,7 @@ describe('AdminTenantsService (integration)', () => {
       ds.getRepository(UserEntity),
       auditRepository,
       new AdminAuditService(auditRepository),
-      { factorResetCancelled: () => undefined } as never, new SeatsService(ds)
+      { factorResetCancelled: () => undefined } as never, new SeatsService(ds, new AccountLimitsService()), new AccountLimitsService()
     );
   });
 

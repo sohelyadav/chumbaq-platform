@@ -8,6 +8,7 @@ import { UserEntity } from '../users/entities/user.entity';
 import { AdminAuditService } from './admin-audit.service';
 import { AdminActor, AdminTenantsService } from './admin-tenants.service';
 import { AdminAuditLogEntity } from './entities/admin-audit-log.entity';
+import { AccountLimitsService } from '../billing/account-limits.service';
 
 const DOMAIN = '@seat-limit-admin-int.test';
 const REASON = 'customer on the agency plan';
@@ -47,8 +48,8 @@ describe('Per-account seat limit set by staff (integration)', () => {
       auditRepository,
       new AdminAuditService(auditRepository),
       { factorResetCancelled: () => undefined } as never,
-      new SeatsService(ds, config),
-      config,
+      new SeatsService(ds, new AccountLimitsService(config)),
+      new AccountLimitsService(config),
     );
   });
   afterAll(async () => {
@@ -118,7 +119,7 @@ describe('Per-account seat limit set by staff (integration)', () => {
       ds.getRepository(UserEntity),
       ds.getRepository(AdminAuditLogEntity),
       { record: async () => { throw new Error('audit down'); } } as never,
-      { factorResetCancelled: () => undefined } as never, new SeatsService(ds)
+      { factorResetCancelled: () => undefined } as never, new SeatsService(ds, new AccountLimitsService()), new AccountLimitsService()
     );
 
     await expect(failing.setSeatLimit(id, 7, REASON, actor)).rejects.toThrow('audit down');

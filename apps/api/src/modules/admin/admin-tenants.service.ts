@@ -2,9 +2,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
-  Optional,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Not, Repository } from 'typeorm';
 import type {
@@ -20,7 +18,7 @@ import {
 } from '../factor-resets/cancel-requested-by';
 import { SecurityNoticesService } from '../platform-email/security-notices.service';
 import { SeatsService } from '../project-access/seats.service';
-import { effectiveProjectLimit } from '../projects/projects.service';
+import { AccountLimitsService } from '../billing/account-limits.service';
 import { UserEntity } from '../users/entities/user.entity';
 import { AdminAuditService } from './admin-audit.service';
 import { toAuditLog } from './admin-audit-logs.service';
@@ -172,9 +170,7 @@ export class AdminTenantsService {
     private readonly auditService: AdminAuditService,
     private readonly notices: SecurityNoticesService,
     private readonly seats: SeatsService,
-    // Optional so the many tests that build this by hand need not pass it; the
-    // limit shown then is the built-in default.
-    @Optional() private readonly config?: ConfigService,
+    private readonly limits: AccountLimitsService,
   ) {}
 
   /**
@@ -302,7 +298,7 @@ export class AdminTenantsService {
     }
 
     const coverage = await readUsageCoverage(this.userRepository.manager);
-    const [usage, [summary], projects, recentAudit, seatsUsed, lastSignInAt] = await Promise.all([
+    const [usage, [summary], projects, recentAudit, seatsUsed, lastSignInAt, limits] = await Promise.all([
       this.usageOf(id, coverage?.countedThrough ?? null),
       this.summarise([user]),
       this.projectsOf(id),
@@ -315,21 +311,22 @@ export class AdminTenantsService {
       }),
       this.seats.count(id, this.userRepository.manager),
       this.lastSignIn(id),
+      this.limits.limitsFor(this.userRepository.manager, id),
     ]);
 
     return {
       ...summary,
       ...usage,
       projectLimit: user.projectLimit,
-      effectiveProjectLimit: effectiveProjectLimit(user.projectLimit, this.config),
+      effectiveProjectLimit: limits.projectLimit,
       seatLimit: user.seatLimit,
-      effectiveSeatLimit: this.seats.limitFor(user.seatLimit),
+      effectiveSeatLimit: limits.seatLimit,
       seatsUsed,
       projects,
       recentAudit: recentAudit.map(toAuditLog),
       lastSignInAt,
-      // Every account is on the one plan until there are others.
-      plan: 'free',
+      // The effective plan's code; always free while billing is off.
+      plan: limits.plan.planCode,
     };
   }
 
@@ -366,7 +363,7 @@ export class AdminTenantsService {
           metadata: {
             before: before.projectLimit,
             after: projectLimit,
-            defaultLimit: effectiveProjectLimit(null, this.config),
+            defaultLimit: this.limits.envLimits().projectLimit,
           },
           ipAddress: actor.ipAddress || null,
         },
@@ -409,7 +406,7 @@ export class AdminTenantsService {
           metadata: {
             before: before.seatLimit,
             after: seatLimit,
-            defaultLimit: this.seats.limitFor(null),
+            defaultLimit: this.limits.envLimits().seatLimit,
           },
           ipAddress: actor.ipAddress || null,
         },

@@ -4,9 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-  Optional,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { DataSource, EntityManager } from 'typeorm';
 import type { ProjectActivityAction } from '@chumbaq/shared';
 import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
@@ -14,7 +12,7 @@ import { inLockOrder } from '../factor-resets/lock-users';
 import { ProjectEntity } from '../projects/entities/project.entity';
 import type { ActivityContext } from '../project-activity/activity-context';
 import { ProjectActivityService, memberTarget } from '../project-activity/project-activity.service';
-import { effectiveProjectLimit, projectLimitMessage } from '../projects/projects.service';
+import { AccountLimitsService, projectLimitMessage } from '../billing/account-limits.service';
 import { UserEntity } from '../users/entities/user.entity';
 import {
   MEMBER_NOT_FOUND,
@@ -45,7 +43,7 @@ export class BillingTransferService {
     private readonly dataSource: DataSource,
     private readonly seats: SeatsService,
     private readonly activity: ProjectActivityService,
-    @Optional() private readonly config?: ConfigService,
+    private readonly limits: AccountLimitsService,
   ) {}
 
   /** The entry for a billing step, in the step's transaction; the target is the offer's receiver. */
@@ -144,7 +142,7 @@ export class BillingTransferService {
           id,
           await manager.findOne(UserEntity, {
             where: { id },
-            select: { id: true, suspendedAt: true, projectLimit: true, seatLimit: true },
+            select: { id: true, suspendedAt: true },
             lock: { mode: 'for_no_key_update' },
           }),
         );
@@ -154,9 +152,9 @@ export class BillingTransferService {
       if (!current || !receiver) throw new BadRequestException(BILLING_OFFER_GONE);
       if (current.suspendedAt || receiver.suspendedAt) throw new ConflictException(BILLING_SUSPENDED);
 
-      const limit = effectiveProjectLimit(receiver.projectLimit, this.config);
+      const { projectLimit, billingEnabled } = await this.limits.limitsFor(manager, receiver.id);
       const owned = await manager.count(ProjectEntity, { where: { ownerId: receiver.id } });
-      if (owned + 1 > limit) throw new ForbiddenException(projectLimitMessage(limit));
+      if (owned + 1 > projectLimit) throw new ForbiddenException(projectLimitMessage(projectLimit, billingEnabled));
       await this.seats.assertRoomForTransfer(manager, receiver.id, projectId);
 
       await manager.update(

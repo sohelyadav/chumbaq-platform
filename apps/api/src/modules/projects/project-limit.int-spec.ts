@@ -9,7 +9,8 @@ import { ProjectActivityEntity } from '../project-activity/entities/project-acti
 import { addOwnerMember, closeIntDb, openIntDb } from '../../test-support/int-db';
 import { PaginationDto } from '../../common/dto/pagination.dto';
 import { ProjectEntity } from './entities/project.entity';
-import { projectLimitMessage, ProjectsService } from './projects.service';
+import { ProjectsService } from './projects.service';
+import { AccountLimitsService, projectLimitMessage } from '../billing/account-limits.service';
 
 /**
  * The limit is a count under a lock on the owner's row, which only Postgres can
@@ -61,9 +62,9 @@ describe('Projects per account (integration)', () => {
     ds = await openIntDb();
     service = new ProjectsService(
       ds.getRepository(ProjectEntity),
-      new ConfigService({ projects: { maxPerAccount: DEFAULT_LIMIT } }),
+      new AccountLimitsService(new ConfigService({ projects: { maxPerAccount: DEFAULT_LIMIT } })),
       new ProjectAccessService(null as never, null as never, null as never, null as never),
-      new SeatsService(ds, new ConfigService({})),
+      new SeatsService(ds, new AccountLimitsService(new ConfigService({}))),
       new ProjectActivityService(ds.getRepository(ProjectActivityEntity), new ConfigService({})),
     );
   });

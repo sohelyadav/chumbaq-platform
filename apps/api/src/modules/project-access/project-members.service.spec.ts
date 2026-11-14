@@ -16,6 +16,7 @@ import { LAST_OWNER, MEMBER_NOT_FOUND, MOVE_BILLING_FIRST, ProjectMembersService
 import { PROJECT_NOT_FOUND, ROLE_REFUSAL, type ProjectRole } from './project-permissions';
 import { SEAT_LIMIT_MESSAGE, SeatsService } from './seats.service';
 import type { ProjectActivityService } from '../project-activity/project-activity.service';
+import { AccountLimitsService } from '../billing/account-limits.service';
 
 /** Where the request came from; the entries themselves are proved in team-activity.int-spec.ts. */
 const CTX = { ipAddress: null, userAgent: null };
@@ -142,7 +143,7 @@ describe('ProjectMembersService and BillingTransferService', () => {
       ds,
       seats as unknown as SeatsService,
       activity as unknown as ProjectActivityService,
-      new ConfigService({ projects: { maxPerAccount: 10 } }),
+      new AccountLimitsService(new ConfigService({ projects: { maxPerAccount: 10 } })),
     );
   });
 

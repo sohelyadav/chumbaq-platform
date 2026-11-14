@@ -19,6 +19,7 @@ import {
 import { MOVE_BILLING_FIRST } from './project-members.service';
 import { ROLE_REFUSAL, type ProjectRole } from './project-permissions';
 import { SEAT_LIMIT_MESSAGE, SeatsService } from './seats.service';
+import { AccountLimitsService } from '../billing/account-limits.service';
 
 /**
  * The two-step billing transfer over HTTP against the real app and database: offer,
@@ -130,8 +131,8 @@ describe('Billing transfer (integration)', () => {
       audit,
       new AdminAuditService(audit),
       { factorResetCancelled: () => undefined } as never,
-      new SeatsService(ds, config),
-      config,
+      new SeatsService(ds, new AccountLimitsService(config)),
+      new AccountLimitsService(config),
     );
     expect((await tenants.findOne(r.id)).projects.map((pr) => pr.id)).toContain(p);
     expect((await tenants.findOne(x.id)).projects.map((pr) => pr.id)).not.toContain(p);

@@ -3,7 +3,6 @@ import {
   NotFoundException,
   ForbiddenException,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, In, Repository } from 'typeorm';
 import type { ProjectListMeta } from '@chumbaq/shared';
@@ -17,26 +16,9 @@ import type { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { SeatsService } from '../project-access/seats.service';
 import { ProjectAccessService } from '../project-access/project-access.service';
 import { permissionsOf, type ProjectPermission, type ProjectRole } from '../project-access/project-permissions';
-import { DEFAULT_MAX_PROJECTS_PER_ACCOUNT } from '../../config/projects.config';
+import { AccountLimitsService, projectLimitMessage } from '../billing/account-limits.service';
 import type { ActivityContext } from '../project-activity/activity-context';
 import { ProjectActivityService } from '../project-activity/project-activity.service';
-
-/** What the dashboard shows when an account is at its limit. */
-export function projectLimitMessage(limit: number): string {
-  return `You can have up to ${limit} projects. Delete one or contact support to raise the limit.`;
-}
-
-/** Staff's per-account override if set, else `MAX_PROJECTS_PER_ACCOUNT`. */
-export function effectiveProjectLimit(
-  override: number | null | undefined,
-  config: ConfigService | undefined,
-): number {
-  return (
-    override ??
-    config?.get<number>('projects.maxPerAccount') ??
-    DEFAULT_MAX_PROJECTS_PER_ACCOUNT
-  );
-}
 
 /**
  * The columns `PATCH /projects/:id` may write. Typed against the DTO so a new field
@@ -96,7 +78,7 @@ export class ProjectsService {
   constructor(
     @InjectRepository(ProjectEntity)
     private readonly projectRepository: Repository<ProjectEntity>,
-    private readonly config: ConfigService,
+    private readonly limits: AccountLimitsService,
     private readonly projectAccess: ProjectAccessService,
     private readonly seats: SeatsService,
     private readonly activity: ProjectActivityService,
@@ -110,7 +92,9 @@ export class ProjectsService {
   }
 
   /**
-   * Refused once the account owns its limit of projects. The owner's row is locked
+   * Refused once the account owns its limit of projects (`AccountLimitsService`: the
+   * staff override or the install default, or with billing on the effective plan's
+   * limit). The owner's row is locked
    * before counting, so creates arriving together take turns and cannot each see
    * room for one more. FOR NO KEY UPDATE, as everywhere else that locks a user row
    * (`lock-users.ts`): it still lets the new project's foreign key check through.
@@ -122,14 +106,14 @@ export class ProjectsService {
     return this.projectRepository.manager.transaction(async (manager) => {
       const owner = await manager.findOne(UserEntity, {
         where: { id: userId },
-        select: { id: true, projectLimit: true },
+        select: { id: true },
         lock: { mode: 'for_no_key_update' },
       });
       if (!owner) throw new NotFoundException('Account not found');
 
-      const limit = effectiveProjectLimit(owner.projectLimit, this.config);
+      const { projectLimit, billingEnabled } = await this.limits.limitsFor(manager, userId);
       const owned = await manager.count(ProjectEntity, { where: { ownerId: userId } });
-      if (owned >= limit) throw new ForbiddenException(projectLimitMessage(limit));
+      if (owned >= projectLimit) throw new ForbiddenException(projectLimitMessage(projectLimit, billingEnabled));
 
       const project = await manager.save(manager.create(ProjectEntity, { ...dto, ownerId: userId }));
       await manager.insert(ProjectMemberEntity, {
@@ -156,7 +140,7 @@ export class ProjectsService {
   ): Promise<{ data: ProjectWithAccess[]; meta: ProjectListMeta }> {
     const userId = user.userId;
     const visible = this.projectAccess.memberProjectsQuery(user);
-    const [[projects, total], owner, billedProjects, seatsUsed] = await Promise.all([
+    const [[projects, total], limits, billedProjects, seatsUsed] = await Promise.all([
       this.projectRepository
         .createQueryBuilder('p')
         .where(`p.id IN (${visible.sql})`, visible.params)
@@ -165,10 +149,7 @@ export class ProjectsService {
         .skip(pagination.skip)
         .take(pagination.limit)
         .getManyAndCount(),
-      this.projectRepository.manager.findOne(UserEntity, {
-        where: { id: userId },
-        select: { id: true, projectLimit: true, seatLimit: true },
-      }),
+      this.limits.limitsFor(this.projectRepository.manager, userId),
       this.projectRepository.count({ where: { ownerId: userId } }),
       this.seats.count(userId, this.projectRepository.manager),
     ]);
@@ -195,9 +176,9 @@ export class ProjectsService {
         page: pagination.page,
         limit: pagination.limit,
         totalPages: Math.ceil(total / pagination.limit),
-        projectLimit: effectiveProjectLimit(owner?.projectLimit, this.config),
+        projectLimit: limits.projectLimit,
         billedProjects,
-        seats: { used: seatsUsed, limit: this.seats.limitFor(owner?.seatLimit) },
+        seats: { used: seatsUsed, limit: limits.seatLimit },
       },
     };
   }

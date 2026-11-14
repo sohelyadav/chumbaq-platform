@@ -8,6 +8,7 @@ import { ProjectActivityEntity } from '../project-activity/entities/project-acti
 import { addOwnerMember, closeIntDb, openIntDb } from '../../test-support/int-db';
 import { ProjectEntity } from './entities/project.entity';
 import { ProjectsService } from './projects.service';
+import { AccountLimitsService } from '../billing/account-limits.service';
 
 /**
  * `PATCH /projects/:id` gets the row the access guard read, without a lock. A billing
@@ -57,9 +58,9 @@ describe('Project settings update against a stale row (integration)', () => {
     ds = await openIntDb();
     service = new ProjectsService(
       ds.getRepository(ProjectEntity),
-      new ConfigService({}),
+      new AccountLimitsService(new ConfigService({})),
       new ProjectAccessService(null as never, null as never, null as never, null as never),
-      new SeatsService(ds, new ConfigService({})),
+      new SeatsService(ds, new AccountLimitsService(new ConfigService({}))),
       new ProjectActivityService(ds.getRepository(ProjectActivityEntity), new ConfigService({})),
     );
   });

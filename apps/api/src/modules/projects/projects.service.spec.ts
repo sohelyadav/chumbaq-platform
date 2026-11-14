@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { ProjectsService } from './projects.service';
 import { SeatsService } from '../project-access/seats.service';
+import { AccountLimitsService } from '../billing/account-limits.service';
 import { ProjectEntity } from './entities/project.entity';
 import { PaginationDto } from '../../common/dto/pagination.dto';
 import { ProjectAccessService } from '../project-access/project-access.service';
@@ -47,12 +48,11 @@ describe('ProjectsService', () => {
     return p;
   };
 
-  const seats = { count: jest.fn(), limitFor: jest.fn() };
+  const seats = { count: jest.fn() };
 
   beforeEach(async () => {
     jest.clearAllMocks();
     seats.count.mockResolvedValue(3);
-    seats.limitFor.mockReturnValue(5);
     for (const step of ['where', 'orderBy', 'addOrderBy', 'skip', 'take'] as const) qb[step].mockReturnValue(qb);
     repo.manager.find.mockResolvedValue([]);
     repo.count.mockResolvedValue(0);
@@ -63,7 +63,11 @@ describe('ProjectsService', () => {
       providers: [
         ProjectsService,
         { provide: getRepositoryToken(ProjectEntity), useValue: repo },
-        { provide: ConfigService, useValue: new ConfigService({ projects: { maxPerAccount: 10 } }) },
+        // Billing off: the install's defaults and the staff override, read from the users row.
+        {
+          provide: AccountLimitsService,
+          useValue: new AccountLimitsService(new ConfigService({ projects: { maxPerAccount: 10, maxSeatsPerAccount: 5 } })),
+        },
         { provide: ProjectAccessService, useValue: projectAccess },
         { provide: SeatsService, useValue: seats },
         { provide: ProjectActivityService, useValue: activity },

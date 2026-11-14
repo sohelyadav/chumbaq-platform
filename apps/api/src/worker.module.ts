@@ -12,6 +12,7 @@ import redisConfig from './config/redis.config';
 import retentionConfig from './config/retention.config';
 import staffConfig from './config/staff.config';
 import billingConfig from './config/billing.config';
+import projectsConfig from './config/projects.config';
 
 @Module({
   imports: [
@@ -20,7 +21,9 @@ import billingConfig from './config/billing.config';
       envFilePath: '../../.env',
       // retentionConfig here only: the worker is what prunes, and it refuses to start
       // on a retention below the legal floor. staffConfig for how long staff sessions last.
-      load: [databaseConfig, jwtConfig, appConfig, redisConfig, retentionConfig, staffConfig, billingConfig],
+      // projectsConfig and billingConfig: AccountLimitsService (through ProjectAccessModule)
+      // reads the install's limit defaults and whether billing is on.
+      load: [databaseConfig, jwtConfig, appConfig, redisConfig, retentionConfig, staffConfig, projectsConfig, billingConfig],
     }),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],

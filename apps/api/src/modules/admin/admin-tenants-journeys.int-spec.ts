@@ -5,6 +5,7 @@ import { AdminAuditService } from './admin-audit.service';
 import { AdminAuditLogEntity } from './entities/admin-audit-log.entity';
 import { UserEntity } from '../users/entities/user.entity';
 import { closeIntDb, openIntDb } from '../../test-support/int-db';
+import { AccountLimitsService } from '../billing/account-limits.service';
 
 const DOMAIN = '@journeys-shift-int.test';
 const actor = { userId: null as unknown as string, email: `admin${DOMAIN}`, ipAddress: '' };
@@ -59,7 +60,7 @@ describe('Reactivation moves journey runs past the suspension (integration)', ()
       ds.getRepository(UserEntity),
       audit,
       new AdminAuditService(audit),
-      { factorResetCancelled: () => undefined } as never, new SeatsService(ds)
+      { factorResetCancelled: () => undefined } as never, new SeatsService(ds, new AccountLimitsService()), new AccountLimitsService()
     );
   });
   afterAll(async () => {

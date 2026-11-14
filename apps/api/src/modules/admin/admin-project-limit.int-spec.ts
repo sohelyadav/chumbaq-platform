@@ -13,6 +13,7 @@ import { UserEntity } from '../users/entities/user.entity';
 import { AdminAuditService } from './admin-audit.service';
 import { AdminActor, AdminTenantsService } from './admin-tenants.service';
 import { AdminAuditLogEntity } from './entities/admin-audit-log.entity';
+import { AccountLimitsService } from '../billing/account-limits.service';
 
 const DOMAIN = '@project-limit-admin-int.test';
 const REASON = 'customer on the agency plan';
@@ -64,10 +65,10 @@ describe('Per-account project limit set by staff (integration)', () => {
       auditRepository,
       new AdminAuditService(auditRepository),
       { factorResetCancelled: () => undefined } as never,
-      new SeatsService(ds, config),
-      config,
+      new SeatsService(ds, new AccountLimitsService(config)),
+      new AccountLimitsService(config),
     );
-    projects = new ProjectsService(ds.getRepository(ProjectEntity), config, new ProjectAccessService(null as never, null as never, null as never, null as never), new SeatsService(ds, config), new ProjectActivityService(ds.getRepository(ProjectActivityEntity), new ConfigService({})));
+    projects = new ProjectsService(ds.getRepository(ProjectEntity), new AccountLimitsService(config), new ProjectAccessService(null as never, null as never, null as never, null as never), new SeatsService(ds, new AccountLimitsService(config)), new ProjectActivityService(ds.getRepository(ProjectActivityEntity), new ConfigService({})));
   });
 
   afterAll(async () => {

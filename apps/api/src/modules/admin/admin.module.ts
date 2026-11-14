@@ -12,6 +12,7 @@ import { AuthCoreModule } from '../auth/auth-core.module';
 import { ImpersonationModule } from '../impersonation/impersonation.module';
 import { StaffAuthModule } from '../staff-auth/staff-auth.module';
 import { SeatsService } from '../project-access/seats.service';
+import { BillingCoreModule } from '../billing/billing-core.module';
 import { AdminAuditModule } from './admin-audit.module';
 import { AdminAuditLogsController } from './admin-audit-logs.controller';
 import { AdminAuditLogsService } from './admin-audit-logs.service';
@@ -59,6 +60,8 @@ import { IncidentsController } from '../incidents/incidents.controller';
     FactorResetsModule,
     SecurityAlertsModule,
     IncidentsModule,
+    // Effective limits and plan on the tenant page (AccountLimitsService).
+    BillingCoreModule,
   ],
   controllers: [
     // First: its `tenants/export` must be matched before `tenants/:id`, which would

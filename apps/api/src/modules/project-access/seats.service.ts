@@ -1,20 +1,8 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { DataSource, EntityManager } from 'typeorm';
-import { UserEntity } from '../users/entities/user.entity';
+import { AccountLimitsService } from '../billing/account-limits.service';
 
 export const SEAT_LIMIT_MESSAGE = 'Your plan has no free seats. Upgrade to invite teammates.';
-
-/**
- * Staff's per-account override if set, else `MAX_SEATS_PER_ACCOUNT`. Null means no
- * limit, which is also what self-hosted installs (variable unset) get.
- */
-export function effectiveSeatLimit(
-  override: number | null | undefined,
-  config?: ConfigService,
-): number | null {
-  return override ?? config?.get<number | null>('projects.maxSeatsPerAccount') ?? null;
-}
 
 /**
  * $1 the billing owner, $2 an extra project billed to them for the count (or null).
@@ -49,13 +37,8 @@ export interface SeatOptions {
 export class SeatsService {
   constructor(
     private readonly dataSource: DataSource,
-    private readonly config?: ConfigService,
+    private readonly limits: AccountLimitsService,
   ) {}
-
-  /** The seat limit for a billing account whose `users.seat_limit` is `override`. */
-  limitFor(override: number | null | undefined): number | null {
-    return effectiveSeatLimit(override, this.config);
-  }
 
   async count(
     billingOwnerId: string,
@@ -90,7 +73,7 @@ export class SeatsService {
     email: string,
     opts: { acceptingInvitationId?: string } = {},
   ): Promise<void> {
-    const limit = await this.limitOf(manager, billingOwnerId);
+    const limit = await this.seatLimitOf(manager, billingOwnerId);
     if (limit === null) return;
 
     const address = email.trim().toLowerCase();
@@ -127,17 +110,18 @@ export class SeatsService {
     newBillingOwnerId: string,
     projectId: string,
   ): Promise<void> {
-    const limit = await this.limitOf(manager, newBillingOwnerId);
+    const limit = await this.seatLimitOf(manager, newBillingOwnerId);
     if (limit === null) return;
     const used = await this.count(newBillingOwnerId, manager, { extraProjectId: projectId });
     if (used > limit) throw new ForbiddenException(SEAT_LIMIT_MESSAGE);
   }
 
-  private async limitOf(manager: EntityManager, billingOwnerId: string): Promise<number | null> {
-    const owner = await manager.findOne(UserEntity, {
-      where: { id: billingOwnerId },
-      select: { id: true, seatLimit: true },
-    });
-    return this.limitFor(owner?.seatLimit);
+  /**
+   * The account's seat limit (`AccountLimitsService`): the staff override or
+   * `MAX_SEATS_PER_ACCOUNT`, or with billing on its effective plan's. Null is no limit,
+   * which is also what self-hosted installs (variable unset) get.
+   */
+  async seatLimitOf(manager: EntityManager, billingOwnerId: string): Promise<number | null> {
+    return (await this.limits.limitsFor(manager, billingOwnerId)).seatLimit;
   }
 }

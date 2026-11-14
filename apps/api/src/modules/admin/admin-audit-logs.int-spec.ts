@@ -26,6 +26,7 @@ import { AdminTenantsService } from './admin-tenants.service';
 import { SeatsService } from '../project-access/seats.service';
 import { AUDIT_CSV_HEADER } from './audit-csv';
 import { AdminAuditLogEntity } from './entities/admin-audit-log.entity';
+import { AccountLimitsService } from '../billing/account-limits.service';
 
 /** The real one: staff tokens come from `issueStaffSessionForTest`, which signs with it. */
 const SECRET = process.env.JWT_SECRET as string;
@@ -142,7 +143,7 @@ describe('Admin audit log API (integration)', () => {
             ds.getRepository(UserEntity),
             auditRepository,
             auditService,
-            { factorResetCancelled: () => undefined } as never, new SeatsService(ds)
+            { factorResetCancelled: () => undefined } as never, new SeatsService(ds, new AccountLimitsService()), new AccountLimitsService()
           ),
         },
       ],
