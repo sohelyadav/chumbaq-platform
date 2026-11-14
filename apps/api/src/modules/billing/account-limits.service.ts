@@ -74,7 +74,7 @@ export class AccountLimitsService {
     // One after another: callers pass a transaction's manager, a single connection.
     const state = await this.billingState(manager, userId);
     const plans = await this.plans(manager);
-    const plan = effectivePlan(state, now, rankOf(plans));
+    const plan = effectivePlan(state, now);
     const row = plans.get(plan.planCode) ?? null;
     return {
       ...effectiveLimits({

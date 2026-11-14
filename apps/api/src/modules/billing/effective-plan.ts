@@ -13,19 +13,18 @@ import type {
  *
  * The rules, in order:
  * 1. An active comp (no end, or ending after now) gives its plan.
- * 2. An `authenticated` next subscription with a start gives its plan from a day
- *    before that start until a day after it, when the current subscription is not
- *    live, or when it is and the successor outranks the current plan (a downgrade
- *    or interval switch over a live current waits for it to activate).
- *    Authorising is only a mandate, with nothing charged, and a successor can be
- *    dropped (cancelled, or its mandate revoked) before it ever charges. Limits are
- *    checked only when something is added and nothing is taken away when they
- *    fall, so a successor that counted for months before its start would hand out
- *    a higher plan's projects and seats for good without a payment. So a
- *    successor counts only once it is about to charge, upgrade or not.
- * 3. A live current subscription gives its plan, until its period end when it is
+ * 2. A live current subscription gives its plan, until its period end when it is
  *    cancelling.
- * 4. Otherwise the free plan.
+ * 3. Otherwise the free plan.
+ *
+ * An `authenticated` next subscription (a change or "keep my plan" waiting to
+ * start) never counts, upgrade or not, whatever the current one is doing. It is
+ * only a mandate with nothing charged, and it can be dropped (cancelled, or its
+ * mandate revoked) before it ever charges. Limits are checked only when something
+ * is added and nothing is taken away when they fall, so a successor that counted
+ * for any time before its first charge would hand out a higher plan's projects and
+ * seats for good without a payment. It gives its plan once it has been charged:
+ * its activation makes it the current subscription.
  */
 
 export interface SubscriptionState {
@@ -52,11 +51,8 @@ export interface EffectivePlan {
 
 export const FREE_PLAN = 'free';
 
-/** How long past its start an authenticated successor still counts, waiting for its activation webhook. */
+/** How long past its start an authenticated successor is still shown as waiting for its activation webhook. */
 export const SUCCESSOR_START_SLACK_MS = 24 * 3600_000;
-
-/** How long before its start (its first charge) an authenticated successor counts. */
-export const SUCCESSOR_LEAD_MS = 24 * 3600_000;
 
 /** How long past its period end a cancelling subscription still counts, waiting for its cancelled webhook. */
 export const CANCEL_END_SLACK_MS = 24 * 3600_000;
@@ -85,24 +81,20 @@ function currentRank(state: AccountBillingState, now: Date, rank: (planCode: str
   return isLive(state.current, now) && state.current ? rank(state.current.planCode) : rank(FREE_PLAN);
 }
 
-function successorCounts(state: AccountBillingState, now: Date, rank: (planCode: string) => number): boolean {
+/**
+ * Whether an authorised successor outranks what the account has now. For display
+ * only (`upgrade_pending`): it grants nothing until it is charged.
+ */
+function upgradeScheduled(state: AccountBillingState, now: Date, rank: (planCode: string) => number): boolean {
   const next = state.next;
   if (!next || next.status !== 'authenticated' || !next.startAt) return false;
   if (now.getTime() >= next.startAt.getTime() + SUCCESSOR_START_SLACK_MS) return false;
-  if (next.startAt.getTime() > now.getTime() + SUCCESSOR_LEAD_MS) return false;
-  return !isLive(state.current, now) || rank(next.planCode) > currentRank(state, now, rank);
+  return rank(next.planCode) > currentRank(state, now, rank);
 }
 
-export function effectivePlan(
-  state: AccountBillingState,
-  now: Date,
-  rank: (planCode: string) => number,
-): EffectivePlan {
+export function effectivePlan(state: AccountBillingState, now: Date): EffectivePlan {
   if (compActive(state, now) && state.comp) {
     return { planCode: state.comp.planCode, source: 'comp', until: state.comp.until };
-  }
-  if (successorCounts(state, now, rank) && state.next) {
-    return { planCode: state.next.planCode, source: 'subscription', until: null };
   }
   if (isLive(state.current, now) && state.current) {
     const current = state.current;
@@ -122,9 +114,7 @@ export function accountState(
 ): BillingAccountState {
   if (compActive(state, now)) return 'comped';
   const next = state.next;
-  if (next && successorCounts(state, now, rank) && rank(next.planCode) > currentRank(state, now, rank)) {
-    return 'upgrade_pending';
-  }
+  if (upgradeScheduled(state, now, rank)) return 'upgrade_pending';
   if (next?.status === 'authenticated') return 'change_scheduled';
   const live = isLive(state.current, now);
   if (next?.status === 'created' && !live) return 'checkout';

@@ -42,7 +42,7 @@ function scheduleLine(o: BillingOverview): string | null {
   if (o.state === 'halted' && current?.graceUntil) {
     return `Your payment did not go through. Your plan's limits stay until ${day(current.graceUntil)}.`;
   }
-  if (next && next.startAt && (next.status === 'authenticated' || o.state === 'upgrade_pending')) {
+  if (next && next.startAt && next.status === 'authenticated') {
     return `Moves to ${next.planName} (${next.interval}) on ${day(next.startAt)}.`;
   }
   if (current?.currentPeriodEnd && current.cancelAtPeriodEnd) {
@@ -263,7 +263,10 @@ export default function BillingPage() {
           className={`rounded-md border px-4 py-3 text-sm ${payment.phase === 'received' ? 'border-primary' : 'bg-muted/40'}`}
         >
           {payment.phase === 'processing' && 'Processing payment...'}
-          {payment.phase === 'received' && 'Payment received. Your plan is updated.'}
+          {payment.phase === 'received' &&
+            (payment.op === 'change'
+              ? 'Change authorised. Its limits start once its first charge goes through.'
+              : 'Payment received. Your plan is updated.')}
           {payment.phase === 'still' && 'Still processing. This page will update when Razorpay confirms.'}
         </div>
       )}

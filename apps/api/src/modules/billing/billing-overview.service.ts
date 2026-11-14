@@ -60,7 +60,7 @@ export class BillingOverviewService {
     const byCode = new Map(plans.map((plan) => [plan.code, plan]));
     const rank = (code: string) => byCode.get(code)?.sortOrder ?? 0;
     const state = toBillingState(account, current, next);
-    const plan = effectivePlan(state, now, rank);
+    const plan = effectivePlan(state, now);
 
     return {
       state: accountState(state, now, rank),

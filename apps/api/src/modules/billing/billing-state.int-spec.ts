@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { closeIntDb, openIntDb } from '../../test-support/int-db';
 import { razorpayEvent, unix } from '../../test-support/razorpay-fixtures';
 import { AccountLimitsService } from './account-limits.service';
+import { BillingLedgerService } from './billing-ledger.service';
 import { BillingStateService } from './billing-state.service';
 import { accountState, effectivePlan } from './effective-plan';
 import type { BillingEvent } from './providers/billing-provider';
@@ -106,7 +107,7 @@ describe('BillingStateService (integration)', () => {
   const planOf = async (userId: string, now = NOW) => {
     const state = await limits.billingState(ds.manager, userId);
     const rank = await limits.planRanks(ds.manager);
-    return { plan: effectivePlan(state, now, rank).planCode, state: accountState(state, now, rank) };
+    return { plan: effectivePlan(state, now).planCode, state: accountState(state, now, rank) };
   };
 
   // Events, from the documented payloads.
@@ -264,21 +265,15 @@ describe('BillingStateService (integration)', () => {
     expect(await planOf(w.userId)).toEqual({ plan: 'free', state: 'free' });
   });
 
-  it('an upgrade successor counts from a day before its start, queues the old cancel, and replaces it on activation', async () => {
+  it('an upgrade successor grants nothing until it is charged, queues the old cancel, and replaces it on activation', async () => {
     const { w, sub: old, period } = await activeOnA();
     const next = await checkout(w, w.planB, w.priceB, period[1]);
 
     await apply(authenticated(next.providerId, w.priceB.rzp, at(-60_000), period[1]));
-    // A mandate only, nothing charged yet: the current plan until a day before the start.
-    expect(await planOf(w.userId)).toEqual({ plan: w.planA, state: 'change_scheduled' });
-    expect(await planOf(w.userId, new Date(period[1].getTime() - DAY - 60_000))).toEqual({
-      plan: w.planA,
-      state: 'change_scheduled',
-    });
-    expect(await planOf(w.userId, new Date(period[1].getTime() - DAY + 60_000))).toEqual({
-      plan: w.planB,
-      state: 'upgrade_pending',
-    });
+    // A mandate only, nothing charged yet: the current plan right up to its activation.
+    for (const when of [NOW, new Date(period[1].getTime() - DAY + 60_000), new Date(period[1].getTime() - 60_000), period[1]]) {
+      expect(await planOf(w.userId, when)).toEqual({ plan: w.planA, state: 'upgrade_pending' });
+    }
     const queued = await subscription(old.id);
     expect(queued.cancel_requested_at.getTime()).toBe(NOW.getTime());
     expect(queued).toMatchObject({ cancel_at_cycle_end: true, cancel_requested_by: null, cancel_sent_at: null });
@@ -452,5 +447,62 @@ describe('BillingStateService (integration)', () => {
       'payload.payment.entity.id': `pay_${hex(7)}`,
     });
     expect(await apply(unknownRefund)).toEqual({ outcome: 'ignored', detail: 'not ours', notices: [] });
+  });
+
+  /**
+   * Two copies of one event that both got past the insert while it was still pending
+   * (a webhook and its retry, or the webhook and reconciliation) wait on the event
+   * row's lock; the second must see the first's outcome under that lock and apply
+   * nothing. A lock held here makes both reach it before either applies.
+   */
+  it('applies an event once when two copies reach the row lock together', async () => {
+    const ledger = new BillingLedgerService(ds, service);
+    const { w, sub, period } = await activeOnA();
+    const event = withPeriod('subscription.halted', sub.providerId, w.priceA.rzp, at(-60_000), period);
+    const eventId = `evt_${hex(7)}`;
+    const [row] = await ds.query(
+      `INSERT INTO billing_events (provider, provider_event_id, type, event_created_at, payload, received_at)
+       VALUES ('razorpay', $1, $2, $3, '{}', $4) RETURNING id`,
+      [eventId, event.type, event.createdAt, NOW],
+    );
+
+    const holder = ds.createQueryRunner();
+    await holder.connect();
+    let calls: Promise<Awaited<ReturnType<BillingLedgerService['recordAndApply']>>[]>;
+    try {
+      await holder.startTransaction();
+      await holder.query(`SELECT id FROM billing_events WHERE id = $1 FOR UPDATE`, [row.id]);
+      const [{ pid }] = await holder.query(`SELECT pg_backend_pid() AS pid`);
+      calls = Promise.all([
+        ledger.recordAndApply(eventId, event, {}, NOW),
+        ledger.recordAndApply(eventId, event, {}, NOW),
+      ]);
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        // The first copy waits on the holder, the second behind the first.
+        const [{ waiting }] = await ds.query(
+          `SELECT count(*)::int AS waiting FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+              AND query LIKE 'SELECT outcome FROM billing_events WHERE id = $1 FOR UPDATE%'
+              AND cardinality(pg_blocking_pids(pid)) > 0
+              AND ($1 = ANY(pg_blocking_pids(pid)) OR EXISTS (
+                SELECT 1 FROM pg_stat_activity o WHERE o.pid = ANY(pg_blocking_pids(pg_stat_activity.pid))
+                  AND $1 = ANY(pg_blocking_pids(o.pid))))`,
+          [pid],
+        );
+        if (waiting >= 2) break;
+        if (Date.now() > deadline) throw new Error(`only ${waiting} copies reached the row lock`);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await holder.commitTransaction();
+    } finally {
+      await holder.release();
+    }
+
+    const results = await calls;
+    expect(results.map((r) => r.status).sort()).toEqual(['applied', 'replay']);
+    expect(results.flatMap((r) => r.notices)).toEqual([{ kind: 'halted', userId: w.userId, graceUntil: at(14 * DAY) }]);
+    const [settled] = await ds.query(`SELECT outcome, attempts FROM billing_events WHERE id = $1`, [row.id]);
+    expect(settled).toEqual({ outcome: 'applied', attempts: 1 });
   });
 });

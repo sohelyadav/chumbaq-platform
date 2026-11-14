@@ -21,8 +21,8 @@ export function showBillingNav(billingEnabled: boolean | undefined, impersonatin
 
 /**
  * What a plan card offers, for the interval shown:
- * - `current`: the plan the account is on (no button). While an upgrade is granted
- *   in the day before its first charge (`upgrade_pending`), that is the upgrade's plan.
+ * - `current`: the plan the account is on (no button). An authorised upgrade
+ *   (`upgrade_pending`) is not that plan until its first charge.
  * - `none`: the free plan while on another (moving to it is cancelling).
  * - `coming_soon`: a paid plan with no price for this interval.
  * - `choose`: a first subscription (also after a failed payment, or on a comp).
@@ -43,9 +43,8 @@ export function planAction(plan: BillingPlanOption, interval: BillingInterval, o
   if (plan.code === FREE_PLAN) return overview.effectivePlan.code === FREE_PLAN ? 'current' : 'none';
 
   const blocked = current?.status === 'pending' || next?.status === 'authenticated';
-  const shown = overview.state === 'upgrade_pending' && next ? next : activeCurrent;
-  const isCurrent = shown
-    ? shown.planCode === plan.code && shown.interval === interval
+  const isCurrent = activeCurrent
+    ? activeCurrent.planCode === plan.code && activeCurrent.interval === interval
     : overview.effectivePlan.code === plan.code && overview.effectivePlan.source === 'comp';
   if (isCurrent && !blocked && activeCurrent?.cancelAtPeriodEnd) return plan[interval] ? 'keep' : 'coming_soon';
   if (isCurrent) return 'current';

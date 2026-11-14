@@ -111,13 +111,13 @@ const keepAuthorised = overview({
 check('no "keep my plan" once it is authorised', planAction(small, 'monthly', keepAuthorised) === 'current');
 check('nor before the current is set to end', planAction(small, 'monthly', overview({ ...keepAuthorised, current: sub() })) === 'current');
 const upgrade = overview({
+  ...active,
   state: 'upgrade_pending',
-  effectivePlan: { code: 'big', name: 'Big', source: 'subscription', until: null },
   current: sub({ cancelAtPeriodEnd: true }),
   next: sub({ id: 'n', status: 'authenticated', planCode: 'big', planName: 'Big', startAt: '2026-12-01T00:00:00.000Z' }),
 });
-check('an upgrade granted early is the current card', planAction(big, 'monthly', upgrade) === 'current');
-check('the plan it replaces offers nothing', planAction(small, 'monthly', upgrade) === 'unavailable');
+check('an authorised upgrade is not the current card before its first charge', planAction(big, 'monthly', upgrade) === 'unavailable');
+check('the paid plan stays the current card', planAction(small, 'monthly', upgrade) === 'current');
 
 console.log('cancelOffer');
 check('cancel an active plan', cancelOffer(active) === 'cancel');
@@ -129,7 +129,7 @@ check('nothing once a halted plan has ended', cancelOffer(overview({ current: su
 check('drop an authorised change when the current already ends', cancelOffer(changeAuthorised) === 'drop_change');
 check('drop an authorised "keep my plan"', cancelOffer(keepAuthorised) === 'drop_change');
 check('drop an authorised change before the current is set to end', cancelOffer(overview({ ...changeAuthorised, current: sub() })) === 'drop_change');
-check('drop a granted upgrade', cancelOffer(upgrade) === 'drop_change');
+check('drop an authorised upgrade', cancelOffer(upgrade) === 'drop_change');
 check('an abandoned checkout is no change to drop', cancelOffer(overview({ ...cancelling, next: sub({ id: 'n', status: 'created' }) })) === 'none');
 
 console.log('paymentConfirmed');

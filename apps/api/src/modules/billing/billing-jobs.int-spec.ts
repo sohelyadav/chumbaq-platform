@@ -282,12 +282,11 @@ describe('billing worker jobs (integration)', () => {
         { status: 'cancelled', endedAt: new Date(Math.floor((Date.now() - DAY) / 1000) * 1000) },
       );
       await ds.query(`INSERT INTO billing_accounts (user_id, current_subscription_id) VALUES ($1, $2)`, [u, stale.id]);
-      const rank = await limits.planRanks(ds.manager);
-      expect(effectivePlan(await limits.billingState(ds.manager, u), new Date(), rank).planCode).toBe(p.code);
+      expect(effectivePlan(await limits.billingState(ds.manager, u), new Date()).planCode).toBe(p.code);
 
       expect(await reconcile.runOnce()).toBeGreaterThanOrEqual(1);
       expect((await sub(stale.id)).status).toBe('cancelled');
-      expect(effectivePlan(await limits.billingState(ds.manager, u), new Date(), rank).planCode).toBe('free');
+      expect(effectivePlan(await limits.billingState(ds.manager, u), new Date()).planCode).toBe('free');
       const [event] = await ds.query(
         `SELECT type, outcome, payload FROM billing_events WHERE provider_event_id LIKE $1`,
         [`reconcile_${stale.providerId}_%`],

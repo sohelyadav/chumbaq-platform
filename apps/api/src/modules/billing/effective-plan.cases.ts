@@ -62,19 +62,20 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     null,
     'comped',
   ],
-  // Rule 2: an authenticated successor.
-  // A successor is only a mandate until it charges, and can be dropped before then,
-  // so even an upgrade counts only from a day before its start.
+  // An authenticated successor never counts: it is only a mandate until it is
+  // charged, and can be dropped before then, so it grants nothing, upgrade or not,
+  // however close its start. It is shown as `upgrade_pending` when it outranks what
+  // the account has now, else `change_scheduled`.
   [
-    'authenticated upgrade successor starting in 10 days waits',
+    'authenticated upgrade successor starting in 10 days',
     state({ current: sub({ planCode: 'a' }), next: sub({ planCode: 'b', status: 'authenticated', startAt: at(10 * DAY) }) }),
     'a',
     'subscription',
     null,
-    'change_scheduled',
+    'upgrade_pending',
   ],
   [
-    'authenticated upgrade successor over a yearly current starting in 300 days waits',
+    'authenticated upgrade successor over a yearly current starting in 300 days',
     state({
       current: sub({ planCode: 'a', interval: 'yearly', currentEnd: at(300 * DAY) }),
       next: sub({ planCode: 'b', interval: 'yearly', status: 'authenticated', startAt: at(300 * DAY) }),
@@ -82,29 +83,40 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     'a',
     'subscription',
     null,
-    'change_scheduled',
+    'upgrade_pending',
   ],
   [
-    'authenticated upgrade successor starting in 23 hours (inside the lead)',
+    'authenticated upgrade successor starting in 23 hours',
     state({
       current: sub({ planCode: 'a', currentEnd: at(23 * HOUR) }),
       next: sub({ planCode: 'b', status: 'authenticated', startAt: at(23 * HOUR) }),
     }),
-    'b',
+    'a',
     'subscription',
     null,
     'upgrade_pending',
   ],
   [
-    'authenticated upgrade successor starting in 25 hours (just outside the lead)',
+    'authenticated upgrade successor starting in 1 minute',
     state({
-      current: sub({ planCode: 'a', currentEnd: at(25 * HOUR) }),
-      next: sub({ planCode: 'b', status: 'authenticated', startAt: at(25 * HOUR) }),
+      current: sub({ planCode: 'a', currentEnd: at(60_000) }),
+      next: sub({ planCode: 'b', status: 'authenticated', startAt: at(60_000) }),
     }),
     'a',
     'subscription',
     null,
-    'change_scheduled',
+    'upgrade_pending',
+  ],
+  [
+    'authenticated upgrade successor whose start passed 1 hour ago, waiting for its activation',
+    state({
+      current: sub({ planCode: 'a', currentEnd: at(-HOUR) }),
+      next: sub({ planCode: 'b', status: 'authenticated', startAt: at(-HOUR) }),
+    }),
+    'a',
+    'subscription',
+    null,
+    'upgrade_pending',
   ],
   [
     'authenticated downgrade successor',
@@ -115,7 +127,7 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     'change_scheduled',
   ],
   [
-    'authenticated successor on another plan of the same rank waits',
+    'authenticated successor on another plan of the same rank',
     state({ current: sub({ planCode: 'a' }), next: sub({ planCode: 'c', status: 'authenticated', startAt: at(10 * DAY) }) }),
     'a',
     'subscription',
@@ -158,7 +170,7 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     'change_scheduled',
   ],
   [
-    'upgrade over a cancelling current keeps the current until a day before its end',
+    'upgrade over a cancelling current keeps the current until its end',
     state({
       current: sub({ planCode: 'a', cancelAtPeriodEnd: true, currentEnd: at(10 * DAY) }),
       next: sub({ planCode: 'b', status: 'authenticated', startAt: at(10 * DAY) }),
@@ -166,17 +178,17 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     'a',
     'subscription',
     at(10 * DAY),
-    'change_scheduled',
+    'upgrade_pending',
   ],
   [
-    'upgrade over a cancelling current counts inside the lead, with no end',
+    'upgrade over a cancelling current ending in 12 hours still keeps the current until its end',
     state({
       current: sub({ planCode: 'a', cancelAtPeriodEnd: true, currentEnd: at(12 * HOUR) }),
       next: sub({ planCode: 'b', status: 'authenticated', startAt: at(12 * HOUR) }),
     }),
-    'b',
+    'a',
     'subscription',
-    null,
+    at(12 * HOUR),
     'upgrade_pending',
   ],
   [
@@ -185,8 +197,8 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
       current: sub({ planCode: 'b', status: 'cancelled' }),
       next: sub({ planCode: 'a', status: 'authenticated', startAt: at(HOUR) }),
     }),
-    'a',
-    'subscription',
+    'free',
+    'free',
     null,
     'upgrade_pending',
   ],
@@ -202,29 +214,27 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     'change_scheduled',
   ],
   [
-    'current cancelled, authenticated successor started 1 hour ago (inside the slack)',
+    'current cancelled, authenticated successor started 1 hour ago',
     state({
       current: sub({ planCode: 'b', status: 'cancelled' }),
       next: sub({ planCode: 'a', status: 'authenticated', startAt: at(-HOUR) }),
     }),
-    'a',
-    'subscription',
+    'free',
+    'free',
     null,
     'upgrade_pending',
   ],
   [
-    'current cancelled, successor on a plan ranked with free gives it, but is no upgrade',
+    'current cancelled, successor on a plan ranked with free is no upgrade',
     state({
       current: sub({ planCode: 'b', status: 'cancelled' }),
       next: sub({ planCode: 'z', status: 'authenticated', startAt: at(HOUR) }),
     }),
-    'z',
-    'subscription',
+    'free',
+    'free',
     null,
     'change_scheduled',
   ],
-  // With no live current subscription either, an authenticated successor counts
-  // only once it is about to charge, never for months on a mandate alone.
   [
     'current halted past grace, authenticated successor starting in 300 days',
     state({
@@ -234,7 +244,7 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     'free',
     'free',
     null,
-    'change_scheduled',
+    'upgrade_pending',
   ],
   [
     'no current, authenticated successor starting in 30 days',
@@ -242,7 +252,7 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     'free',
     'free',
     null,
-    'change_scheduled',
+    'upgrade_pending',
   ],
   [
     'current expired, authenticated successor starting in 2 days',
@@ -253,25 +263,25 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     'free',
     'free',
     null,
-    'change_scheduled',
+    'upgrade_pending',
   ],
   [
-    'no current, authenticated successor starting in 23 hours (inside the lead)',
+    'no current, authenticated successor starting in 23 hours',
     state({ next: sub({ planCode: 'b', status: 'authenticated', startAt: at(23 * HOUR) }) }),
-    'b',
-    'subscription',
+    'free',
+    'free',
     null,
     'upgrade_pending',
   ],
   [
-    'authenticated successor with no start does not count',
+    'authenticated successor with no start is no scheduled upgrade',
     state({ next: sub({ planCode: 'b', status: 'authenticated', startAt: null }) }),
     'free',
     'free',
     null,
     'change_scheduled',
   ],
-  // Rule 3: the live current subscription.
+  // Rule 2: the live current subscription.
   ['active', state({ current: sub() }), 'a', 'subscription', null, 'active'],
   [
     'active, cancelling at period end',
@@ -314,7 +324,7 @@ export const EFFECTIVE_PLAN_CASES: EffectivePlanCase[] = [
     null,
     'free',
   ],
-  // Rule 4 and checkout.
+  // Rule 3 and checkout.
   ['created next with no current', state({ next: sub({ status: 'created' }) }), 'free', 'free', null, 'checkout'],
   [
     'created next over a live current',

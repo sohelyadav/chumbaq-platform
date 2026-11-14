@@ -11,6 +11,7 @@ import { BillingCheckoutService, CHANGE_AUTHORISE_BY_MS } from './billing-checko
 import { BillingOutboxService } from './billing-outbox.service';
 import { BillingOverviewService } from './billing-overview.service';
 import { BillingStateService } from './billing-state.service';
+import { BILLING_STATE_JOINS, effectivePlanCodeSql } from './effective-plan-sql';
 import type { BillingDetailsDto } from './dto/billing.dto';
 import { BillingProviderError, CHECKOUT_EXPIRY_MS } from './providers/billing-provider';
 
@@ -28,6 +29,7 @@ describe('BillingCheckoutService (integration)', () => {
   let overview: BillingOverviewService;
   let checkout: BillingCheckoutService;
   let outbox: BillingOutboxService;
+  let limits: AccountLimitsService;
   const hex = (bytes = 6) => randomBytes(bytes).toString('hex');
   const DAY = 24 * 3600_000;
 
@@ -42,7 +44,7 @@ describe('BillingCheckoutService (integration)', () => {
             ? 10
             : undefined,
     } as unknown as ConfigService;
-    const limits = new AccountLimitsService(config);
+    limits = new AccountLimitsService(config);
     state = new BillingStateService(config);
     overview = new BillingOverviewService(ds, fake, limits, new SeatsService(ds, limits));
     checkout = new BillingCheckoutService(ds, fake, overview);
@@ -589,6 +591,56 @@ describe('BillingCheckoutService (integration)', () => {
         status: 409,
         message: 'There is no active subscription to cancel.',
       });
+    });
+  });
+
+  describe('an upgrade near the renewal', () => {
+    /**
+     * The abuse this guards against: authorise an upgrade just before the renewal,
+     * add projects and seats under its limits, then drop it (cancel, or revoke the
+     * mandate) before its first charge and keep them. An authorised successor must
+     * grant nothing until it is charged, in the TypeScript rule and the SQL mirror.
+     */
+    it('grants nothing above the paid plan while authorised, and nothing once it is dropped', async () => {
+      const w = await subscribed();
+      const userId = w.user.userId;
+      await ds.query(`UPDATE plans SET project_limit = 2 WHERE code = $1`, [w.planA]);
+      await ds.query(`UPDATE plans SET project_limit = 50 WHERE code = $1`, [w.planB]);
+      const end: Date = (await sub(w.currentId)).current_end;
+      const offset = (ms: number) => new Date(end.getTime() + ms);
+      const near = offset(-2 * 3600_000);
+
+      const granted: Array<{ when: string; projectLimit: number; plan: string; sql: string }> = [];
+      const sample = async () => {
+        for (const when of [near, offset(-3600_000), offset(-60_000), end, offset(3600_000), offset(23 * 3600_000)]) {
+          const l = await limits.limitsFor(ds.manager, userId, when);
+          const [row] = await ds.query(
+            `SELECT ${effectivePlanCodeSql('$1')} AS code FROM users u ${BILLING_STATE_JOINS} WHERE u.id = $2`,
+            [when, userId],
+          );
+          granted.push({ when: when.toISOString(), projectLimit: l.projectLimit, plan: l.plan.planCode, sql: row.code });
+        }
+      };
+      await sample();
+
+      const changed = await checkout.change(w.user, { plan: w.planB, interval: 'monthly' }, near);
+      await authenticate(changed.subscriptionId, w.rzp[`${w.planB}:monthly`], end);
+      expect(await subByProvider(changed.subscriptionId)).toMatchObject({ status: 'authenticated', plan_code: w.planB });
+      expect((await account(userId)).next_subscription_id).toBe((await subByProvider(changed.subscriptionId)).id);
+      expect((await limits.limitsFor(ds.manager, userId, near)).projectLimit).toBe(2);
+      await sample();
+
+      // The worker sets the current to end at its period end: still plan A up to then.
+      await runOutbox(userId);
+      expect(await sub(w.currentId)).toMatchObject({ cancel_at_period_end: true });
+      await sample();
+
+      // Dropped before its first charge.
+      expect((await checkout.cancel(userId, near)).state).toBe('cancelling');
+      expect((await account(userId)).next_subscription_id).toBeNull();
+      await sample();
+
+      expect(granted.filter((g) => g.projectLimit !== 2 || g.plan !== w.planA || g.sql !== w.planA)).toEqual([]);
     });
   });
 

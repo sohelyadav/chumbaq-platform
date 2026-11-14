@@ -343,7 +343,7 @@ describe('plan limits (integration)', () => {
       expect(await countOf(owner)).toBe(3);
     });
 
-    it('projects: an authorised upgrade that has not charged yet gives no room until a day before its start', async () => {
+    it('projects: an authorised upgrade gives no room until it is charged, however close its start', async () => {
       // Authorising is a mandate only, and the successor can be dropped before it
       // charges; anything made on its limits would then stay for good.
       const owner = await account();
@@ -365,7 +365,7 @@ describe('plan limits (integration)', () => {
       expect((await refusal(create(on, owner)) as Error).message).toBe(projectLimitMessage(3, true));
       expect(await countOf(owner)).toBe(3);
 
-      // Authorised again, and now about to charge: the upgrade's limit applies.
+      // Authorised again, and about to charge: still nothing until it does.
       await ds.query(
         `UPDATE billing_subscriptions SET start_at = now() + interval '12 hours' WHERE id = $1`,
         [next.id],
@@ -376,6 +376,18 @@ describe('plan limits (integration)', () => {
         [owner],
       );
       await ds.query(`UPDATE billing_accounts SET next_subscription_id = $2 WHERE user_id = $1`, [owner, next.id]);
+      expect((await refusal(create(on, owner)) as Error).message).toBe(projectLimitMessage(3, true));
+      expect(await countOf(owner)).toBe(3);
+
+      // Charged: its activation makes it the current subscription, and its limit applies.
+      await ds.query(
+        `UPDATE billing_subscriptions SET status = 'active', current_end = now() + interval '30 days' WHERE id = $1`,
+        [next.id],
+      );
+      await ds.query(
+        `UPDATE billing_accounts SET current_subscription_id = $2, next_subscription_id = NULL WHERE user_id = $1`,
+        [owner, next.id],
+      );
       await create(on, owner);
       expect(await countOf(owner)).toBe(4);
     });

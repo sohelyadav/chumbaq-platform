@@ -4,8 +4,6 @@ import {
   AccountBillingState,
   CANCEL_END_SLACK_MS,
   FREE_PLAN,
-  SUCCESSOR_LEAD_MS,
-  SUCCESSOR_START_SLACK_MS,
   SubscriptionState,
 } from './effective-plan';
 
@@ -29,8 +27,6 @@ export const BILLING_STATE_JOINS = `
   LEFT JOIN plans xp ON xp.code = ba.comp_plan_code
 `;
 
-const FREE_RANK_SQL = `COALESCE((SELECT fp.sort_order FROM plans fp WHERE fp.code = '${FREE_PLAN}'), 0)`;
-
 /** `isLive` for the subscription aliased `s`; false, never null, when there is none. */
 function isLiveSql(s: string, now: string): string {
   return `COALESCE(
@@ -50,19 +46,8 @@ function isLiveSql(s: string, now: string): string {
 export function effectivePlanCodeSql(now: string): string {
   const at = `(${now})::timestamptz`;
   const currentLive = isLiveSql('cur', at);
-  const currentRank = `(CASE WHEN ${currentLive} THEN cp.sort_order ELSE ${FREE_RANK_SQL} END)`;
-  const successorCounts = `(
-    nxt.status = 'authenticated'
-    AND nxt.start_at IS NOT NULL
-    AND ${at} < nxt.start_at + interval '${SUCCESSOR_START_SLACK_MS} milliseconds'
-    AND nxt.start_at <= ${at} + interval '${SUCCESSOR_LEAD_MS} milliseconds'
-    AND CASE
-      WHEN ${currentLive} THEN COALESCE(np.sort_order > ${currentRank}, false)
-      ELSE true
-    END)`;
   return `(CASE
     WHEN ba.comp_plan_code IS NOT NULL AND (ba.comp_until IS NULL OR ba.comp_until > ${at}) THEN ba.comp_plan_code
-    WHEN ${successorCounts} THEN nxt.plan_code
     WHEN ${currentLive} THEN cur.plan_code
     ELSE '${FREE_PLAN}'
   END)`;

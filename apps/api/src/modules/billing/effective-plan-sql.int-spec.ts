@@ -104,10 +104,6 @@ describe('effective plan in SQL (integration)', () => {
     );
     const sqlCode = new Map(rows.map((r) => [r.id, r.code]));
 
-    const ranks: Array<{ code: string; sort_order: number }> = await ds.query(`SELECT code, sort_order FROM plans`);
-    const rankOf = new Map(ranks.map((r) => [r.code, r.sort_order]));
-    const rank = (code: string) => rankOf.get(code) ?? 0;
-
     const accounts = ds.getRepository(BillingAccountEntity);
     const subscriptions = ds.getRepository(BillingSubscriptionEntity);
     const results: Array<{ label: string; sql: string | undefined; ts: string; expected: string }> = [];
@@ -117,7 +113,7 @@ describe('effective plan in SQL (integration)', () => {
         ? await subscriptions.findOneBy({ id: account.currentSubscriptionId })
         : null;
       const nxt = account?.nextSubscriptionId ? await subscriptions.findOneBy({ id: account.nextSubscriptionId }) : null;
-      const ts = effectivePlan(toBillingState(account, cur, nxt), now, rank).planCode;
+      const ts = effectivePlan(toBillingState(account, cur, nxt), now).planCode;
       results.push({ label: user.label, sql: sqlCode.get(user.id), ts, expected: user.expected });
     }
 

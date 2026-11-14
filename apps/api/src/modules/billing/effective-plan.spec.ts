@@ -28,7 +28,7 @@ describe('isLive', () => {
 describe('effectivePlan and accountState', () => {
 
   it.each(EFFECTIVE_PLAN_CASES)('%s', (_label, input, code, source, until, account) => {
-    expect(effectivePlan(input, now, rank)).toEqual({ planCode: code, source, until });
+    expect(effectivePlan(input, now)).toEqual({ planCode: code, source, until });
     expect(accountState(input, now, rank)).toBe(account);
   });
 });
