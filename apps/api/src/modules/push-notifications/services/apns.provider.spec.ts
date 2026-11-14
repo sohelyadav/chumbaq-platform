@@ -290,6 +290,28 @@ describe('ApnsProvider', () => {
   });
 
   describe('provider token', () => {
+    it('never hands one project\'s token to another project naming the same key and team ids', async () => {
+      const stub = stubHttp2({});
+      const other = crypto.generateKeyPairSync('ec', {
+        namedCurve: 'prime256v1',
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+      });
+      const lookalike: ApnsCredentials = { ...creds, privateKey: other.privateKey as string, bundleId: 'com.other.app' };
+
+      await provider.send(creds, ['victim-device'], message);
+      await provider.send(lookalike, ['other-device'], message);
+
+      const [first, second] = bearers(stub).map((b) => b.replace(/^bearer /, ''));
+      expect(second).not.toBe(first);
+      const verifies = (jwt: string, key: string) => {
+        const [h, c, sig] = jwt.split('.');
+        return crypto.verify('sha256', Buffer.from(`${h}.${c}`), { key, dsaEncoding: 'ieee-p1363' }, Buffer.from(sig, 'base64url'));
+      };
+      expect(verifies(second, other.publicKey as string)).toBe(true);
+      expect(verifies(second, publicKey as string)).toBe(false);
+    });
+
     it('authorizes with a bearer ES256 JWT carrying the key and team ids', async () => {
       const stub = stubHttp2({});
 

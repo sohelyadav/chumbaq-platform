@@ -790,8 +790,26 @@ export class ApnsProvider implements ChannelProvider {
     }
   }
 
+  /**
+   * Key id and team id are not enough: they are public or guessable, and nothing proves
+   * an uploaded .p8 is the key its key id names, so another project could store the same
+   * ids with a key of its own and be handed this one's signed token. The digest of the
+   * public half of the signing key makes a slot reachable only by the key that fills it.
+   */
   private cacheKey(credentials: ResolvedCredentials): string {
-    return `${credentials.keyId}|${credentials.teamId}`;
+    return `${credentials.keyId}|${credentials.teamId}|${this.keyDigest(credentials.signingKey)}`;
+  }
+
+  private readonly keyDigests = new WeakMap<crypto.KeyObject, string>();
+
+  private keyDigest(signingKey: crypto.KeyObject): string {
+    let digest = this.keyDigests.get(signingKey);
+    if (!digest) {
+      const spki = crypto.createPublicKey(signingKey).export({ type: 'spki', format: 'der' });
+      digest = crypto.createHash('sha256').update(spki).digest('base64url');
+      this.keyDigests.set(signingKey, digest);
+    }
+    return digest;
   }
 
   /**
@@ -810,7 +828,14 @@ export class ApnsProvider implements ChannelProvider {
     if (cached && cached.refreshAt > Date.now()) return cached.jwt;
 
     const jwt = this.signProviderToken(credentials);
-    this.tokenCache.set(key, { jwt, refreshAt: Date.now() + APNS_TOKEN_REFRESH_MS });
+    // Keys are per signing key now, so a replaced .p8 leaves its old slot behind:
+    // drop expired slots whenever a token is minted, which bounds the map to the keys
+    // used in the last fifty minutes.
+    const now = Date.now();
+    for (const [slot, entry] of this.tokenCache) {
+      if (entry.refreshAt <= now) this.tokenCache.delete(slot);
+    }
+    this.tokenCache.set(key, { jwt, refreshAt: now + APNS_TOKEN_REFRESH_MS });
     return jwt;
   }
 
