@@ -399,13 +399,23 @@ describe('Email verification and forgot password (integration)', () => {
     });
 
     it('escapes a name containing a script tag in the HTML part', async () => {
-      await register(`<script>alert("x")</script>`);
+      // No '/' in it: a word with one is dropped from names in mail (safeDisplayName).
+      await register(`<script>alert("x")`);
       await recovery.settled();
 
       expect(emails[0].html).not.toContain('<script');
-      expect(emails[0].html).toContain('&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;');
+      expect(emails[0].html).toContain('&lt;script&gt;alert(&quot;x&quot;)');
       // Plain text is not HTML, so entities there would just be noise.
-      expect(emails[0].text).toContain('<script>alert("x")</script>');
+      expect(emails[0].text).toContain('<script>alert("x")');
+    });
+
+    // The address it is mailed to may not be the registrant's.
+    it('leaves a link in the name out of the email', async () => {
+      await register('Win a prize at evil.example/claim');
+      await recovery.settled();
+
+      expect(emails[0].text).not.toContain('evil.example');
+      expect(emails[0].html).not.toContain('evil.example');
     });
 
     it.each([
