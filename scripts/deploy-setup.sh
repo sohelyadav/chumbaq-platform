@@ -723,7 +723,7 @@ sudo systemctl start postgresql
 echo "[2/8] Installing Node.js and PM2..."
 install_node
 if ! command -v pm2 > /dev/null; then
-  sudo npm install -g pm2
+  sudo npm install -g "pm2@${PM2_VERSION}"
 fi
 
 echo "[3/8] Getting the code..."

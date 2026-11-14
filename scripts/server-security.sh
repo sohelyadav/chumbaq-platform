@@ -14,6 +14,11 @@
 # =============================================================
 
 SERVER_SECURITY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Server tooling installed from the npm registry, pinned: run with root (pm2) or with
+# the app's secrets (pm2-logrotate, inside pm2), so it is a reviewed version, never
+# whatever the registry serves on the day. Change these deliberately.
+PM2_VERSION="7.1.2"
+PM2_LOGROTATE_VERSION="3.0.1"
 LOG_RETENTION_FLOOR_DAYS=180
 LOG_RETENTION_DEFAULT_DAYS=365
 DEFAULT_NTP_SERVERS="samay1.nic.in samay2.nic.in time.nplindia.org"
@@ -336,7 +341,7 @@ setup_log_retention() {
     echo "logrotate refused the new rules; see: sudo logrotate --debug /etc/logrotate.conf" >&2
     return 1
   fi
-  pm2 install pm2-logrotate > /dev/null
+  pm2 install "pm2-logrotate@${PM2_LOGROTATE_VERSION}" > /dev/null
   pm2 set pm2-logrotate:retain "$days" > /dev/null
   pm2 set pm2-logrotate:compress true > /dev/null
   pm2 set pm2-logrotate:rotateInterval '0 0 * * *' > /dev/null
