@@ -93,7 +93,7 @@ describe('Email addresses are case-insensitive (integration)', () => {
 
   it.each([
     ['login', LoginDto, { password: PASSWORD }],
-    ['register', RegisterDto, { password: PASSWORD, name: 'Ana' }],
+    ['register', RegisterDto, { name: 'Ana' }],
     ['forgot password', ForgotPasswordDto, {}],
   ])('the %s request arrives lower-cased and trimmed', async (_name, metatype, rest) => {
     const pipe = new ValidationPipe(VALIDATION_PIPE_OPTIONS);

@@ -1,7 +1,7 @@
 import Redis from 'ioredis';
 
 /**
- * Sign-in attempts are counted in Redis (`PreAuthService.countSignInAttempt`), which
+ * Sign-in attempts and sign-up mails are counted in Redis (`PreAuthService`), which
  * outlives each test, while the specs reset the old limit by deleting `auth_events`.
  * So every integration test starts with no attempts counted. A test of the limit itself
  * makes its attempts within one test, as before.
@@ -18,7 +18,7 @@ beforeEach(async () => {
     lazyConnect: true,
     maxRetriesPerRequest: 1,
   });
-  const keys = await redis.keys('chumbaq:signin-attempts:*');
+  const keys = [...(await redis.keys('chumbaq:signin-attempts:*')), ...(await redis.keys('chumbaq:signup-mail:*'))];
   if (keys.length) await redis.del(...keys);
 });
 

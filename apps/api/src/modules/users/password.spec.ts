@@ -6,7 +6,7 @@ import { VALIDATION_PIPE_OPTIONS } from '../../common/validation-pipe.options';
 import { LoginDto } from '../auth/dto/login.dto';
 import { ReauthDto } from '../auth/dto/reauth.dto';
 import { StaffLoginDto } from '../staff-auth/dto/staff-auth.dto';
-import { RegisterDto } from '../auth/dto/register.dto';
+import { CompleteSignupDto } from '../auth/dto/register.dto';
 import { ResetPasswordDto } from '../auth/dto/reset-password.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import {
@@ -34,7 +34,7 @@ async function messagesFor(metatype: ArgumentMetadata['metatype'], value: unknow
 
 // Each DTO that sets a password, with the rest of a body it would accept.
 const SETTERS = [
-  ['RegisterDto', RegisterDto, 'password', { email: 'a@b.co', name: 'A' }],
+  ['CompleteSignupDto', CompleteSignupDto, 'password', { token: 't' }],
   ['ResetPasswordDto', ResetPasswordDto, 'newPassword', { token: 't' }],
   ['ChangePasswordDto', ChangePasswordDto, 'newPassword', { currentPassword: 'old-password' }],
 ] as const;

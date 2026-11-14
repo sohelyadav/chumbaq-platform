@@ -118,6 +118,16 @@ export class PreAuthService implements OnModuleDestroy {
     return admitted === 1;
   }
 
+  /**
+   * At most `limit` per `windowSeconds` for this subject in this namespace (sign-up mail
+   * per address): true and counted while under it, false once it is reached.
+   */
+  async admitLimited(namespace: string, subject: string, limit: number, windowSeconds: number): Promise<boolean> {
+    const key = `chumbaq:${namespace}:${createHash('sha256').update(subject).digest('hex')}`;
+    const admitted = await this.redis.eval(ADMIT_SCRIPT, 1, key, String(windowSeconds), '1', '1', 'n', String(limit));
+    return admitted === 1;
+  }
+
   /** The counters an admitted attempt that turned out right gives back; never below zero. */
   async releaseSignInAttempt(address: string, fields: string[]): Promise<void> {
     await this.redis.eval(RELEASE_SCRIPT, 1, signInAttemptsKey(address), ...fields);

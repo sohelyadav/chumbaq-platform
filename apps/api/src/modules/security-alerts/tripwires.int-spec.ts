@@ -189,19 +189,11 @@ describe('tripwires (integration)', () => {
       expect((await alarms('tripwire.account')).map((r) => r.details.action)).toEqual(['password_reset']);
     });
 
-    it('a sign-up is refused as for a taken address, creates no user, and raises sign_up', async () => {
-      const taken = await customerCall('POST', '/auth/register', {
-        email: `staff${DOMAIN}`,
-        password: 'Str0ng-passphrase!',
-        name: 'X',
-      });
-      const trapped = await customerCall('POST', '/auth/register', {
-        email: trap,
-        password: 'Str0ng-passphrase!',
-        name: 'X',
-      });
-      expect(trapped).toEqual(taken);
-      expect(trapped.status).toBe(409);
+    it('a sign-up is answered as any address, creates no user, and raises sign_up', async () => {
+      const other = await customerCall('POST', '/auth/register', { email: `someone-new${DOMAIN}`, name: 'X' });
+      const trapped = await customerCall('POST', '/auth/register', { email: trap, name: 'X' });
+      expect(trapped).toEqual(other);
+      expect(trapped.status).toBe(202);
       expect(await ds.query(`SELECT 1 FROM users WHERE lower(email) = lower($1)`, [trap])).toEqual([]);
       expect((await alarms('tripwire.account')).map((r) => r.details.action)).toEqual(['sign_up']);
     });

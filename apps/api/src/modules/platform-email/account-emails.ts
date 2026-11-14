@@ -63,6 +63,35 @@ export function verificationEmail(user: Recipient, link: string): PlatformEmail 
   );
 }
 
+/** The link that finishes a sign-up: the account is made when it is opened. */
+export function signupLinkEmail(to: Recipient, link: string): PlatformEmail {
+  return compose(
+    to.email,
+    'Finish creating your Chumbaq account',
+    to.name,
+    [
+      'Someone asked to create a Chumbaq account with this email address. Open the link to choose a password and finish. It works once and lasts 24 hours.',
+      'If this was not you, ignore this email: no account is made unless the link is opened.',
+    ],
+    { label: 'Finish creating your account', url: link },
+  );
+}
+
+/** Someone tried to sign up with an address that already has an account. */
+export function alreadyRegisteredEmail(user: Recipient, signInLink: string, forgotPasswordLink: string): PlatformEmail {
+  return compose(
+    user.email,
+    'You already have a Chumbaq account',
+    user.name,
+    [
+      'Someone tried to create a Chumbaq account with this email address, which already has one. If it was you, sign in instead.',
+      `If you have forgotten your password, reset it here: ${forgotPasswordLink}`,
+      'If it was not you, you can ignore this email. Nothing about your account has changed.',
+    ],
+    { label: 'Sign in', url: signInLink },
+  );
+}
+
 export function passwordResetEmail(user: Recipient, link: string): PlatformEmail {
   return compose(
     user.email,

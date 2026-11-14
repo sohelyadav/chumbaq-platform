@@ -32,13 +32,20 @@ export class UsersService {
     name: string;
     passwordHash: string;
     managedByTeamId?: string;
+    /** Made from a link that came through the mailbox (a completed sign-up). */
+    emailVerified?: boolean;
   }): Promise<UserEntity> {
     const existing = await this.findByEmail(data.email);
     if (existing) {
       throw new ConflictException(EMAIL_TAKEN_MESSAGE);
     }
 
-    const user = this.userRepository.create({ ...data, email: normaliseEmail(data.email) });
+    const { emailVerified, ...fields } = data;
+    const user = this.userRepository.create({
+      ...fields,
+      email: normaliseEmail(data.email),
+      ...(emailVerified ? { emailVerifiedAt: new Date() } : {}),
+    });
     return this.userRepository.save(user);
   }
 

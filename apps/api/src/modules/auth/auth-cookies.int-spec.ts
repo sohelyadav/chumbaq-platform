@@ -76,7 +76,7 @@ describe('Refresh cookie (integration)', () => {
               config as unknown as ConfigService,
               new SessionsService(ds.getRepository(AuthSessionEntity)),
               new AuthEventsService(ds.getRepository(AuthEventEntity)),
-              { sendVerificationAfterRegister: () => undefined } as unknown as AccountRecoveryService,
+              { sendVerificationAfterRegister: () => undefined, startSignup: () => undefined } as unknown as AccountRecoveryService,
               { putChallenge: async () => undefined } as unknown as PreAuthService,
               { methodsFor: async () => [], hasAnyPasskey: async () => false } as unknown as SecondFactorsService,
               { inBackground: () => undefined, sessionReplayed: () => undefined } as never,
@@ -170,15 +170,19 @@ describe('Refresh cookie (integration)', () => {
       expect(cookie).toContain('Path=/api/auth');
     });
 
-    it('is on registering too', async () => {
-      jest.spyOn(app.get(AuthService), 'register').mockResolvedValueOnce({
+    it('is on finishing a sign-up, and never on its first step', async () => {
+      const first = await post('register', { email: `new${DOMAIN}`, name: 'N' }, CLIENT);
+      expect(first.status).toBe(202);
+      expect(setCookie(first)).toBe('');
+
+      jest.spyOn(app.get(AuthService), 'completeSignup').mockResolvedValueOnce({
         user: {},
         tokens: {
           accessToken: 'a',
           refreshToken: jwt.sign({ sub: 'x' }, { expiresIn: '7d' }),
         },
       });
-      const response = await post('register', { email: `new${DOMAIN}`, password: PASSWORD, name: 'N' }, CLIENT);
+      const response = await post('complete-signup', { token: 't', password: PASSWORD }, CLIENT);
       const body = (await response.json()) as { tokens: Record<string, string> };
       expect(Object.keys(body.tokens)).toEqual(['accessToken']);
       expect(setCookie(response)).toContain('HttpOnly');

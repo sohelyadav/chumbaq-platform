@@ -3,18 +3,15 @@ import { Link } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { newPassword } from '@/lib/password';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { PasswordInput } from '@/components/ui/password-input';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 
 const registerSchema = z.object({
   name: z.string().min(2, 'Name must be at least 2 characters'),
   email: z.string().email('Invalid email address'),
-  password: newPassword(),
 });
 
 type RegisterForm = z.infer<typeof registerSchema>;
@@ -22,6 +19,9 @@ type RegisterForm = z.infer<typeof registerSchema>;
 export default function RegisterPage() {
   const { register: registerUser } = useAuth();
   const [error, setError] = useState<string | null>(null);
+  // The same answer for every address: whether it already has an account is said only
+  // in the email, to whoever holds the mailbox.
+  const [sentTo, setSentTo] = useState<string | null>(null);
 
   const {
     register,
@@ -34,7 +34,8 @@ export default function RegisterPage() {
   const onSubmit = async (data: RegisterForm) => {
     setError(null);
     try {
-      await registerUser(data.email, data.password, data.name);
+      await registerUser(data.email, data.name);
+      setSentTo(data.email);
     } catch (err: unknown) {
       const message =
         err && typeof err === 'object' && 'response' in err
@@ -51,6 +52,17 @@ export default function RegisterPage() {
           <CardTitle className="text-2xl">Create an account</CardTitle>
           <CardDescription>Get started with Chumbaq</CardDescription>
         </CardHeader>
+        {sentTo ? (
+          <CardContent className="space-y-3 text-center text-sm">
+            <p>
+              We sent an email to <span className="font-medium">{sentTo}</span>. Open the link in it to choose a
+              password and finish creating your account.
+            </p>
+            <p className="text-muted-foreground">
+              If you already have an account, the email says so and links to sign in.
+            </p>
+          </CardContent>
+        ) : (
         <form onSubmit={handleSubmit(onSubmit)}>
           <CardContent className="space-y-4">
             {error && (
@@ -83,22 +95,10 @@ export default function RegisterPage() {
                 <p className="text-sm text-destructive">{errors.email.message}</p>
               )}
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
-              <PasswordInput
-                id="password"
-                placeholder="At least 8 characters"
-                autoComplete="new-password"
-                {...register('password')}
-              />
-              {errors.password && (
-                <p className="text-sm text-destructive">{errors.password.message}</p>
-              )}
-            </div>
           </CardContent>
           <CardFooter className="flex flex-col gap-4">
             <Button type="submit" className="w-full" disabled={isSubmitting}>
-              {isSubmitting ? 'Creating account...' : 'Create account'}
+              {isSubmitting ? 'Sending...' : 'Continue'}
             </Button>
             <p className="text-sm text-muted-foreground text-center">
               Already have an account?{' '}
@@ -108,6 +108,7 @@ export default function RegisterPage() {
             </p>
           </CardFooter>
         </form>
+        )}
       </Card>
     </div>
   );

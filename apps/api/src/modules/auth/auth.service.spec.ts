@@ -1,3 +1,4 @@
+import { ConflictException } from '@nestjs/common';
 import { SecurityNoticesService } from '../platform-email/security-notices.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PreAuthService } from './pre-auth.service';
@@ -6,7 +7,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
-import { AuthService, SignedIn } from './auth.service';
+import { AuthService, SignedIn, SIGNUP_LINK_INVALID } from './auth.service';
 import { UsersService } from '../users/users.service';
 import { UserEntity } from '../users/entities/user.entity';
 import { SessionsService } from './sessions.service';
@@ -14,6 +15,7 @@ import { AccountRecoveryService } from './account-recovery.service';
 import { AuthEventsService } from '../auth-events/auth-events.service';
 import { FactorResetsService } from '../factor-resets/factor-resets.service';
 import { TripwiresService } from '../security-alerts/tripwires.service';
+import { signSignupToken, signupKey } from './signup-token';
 
 jest.mock('bcrypt');
 const mockedBcrypt = bcrypt as jest.Mocked<typeof bcrypt>;
@@ -44,6 +46,7 @@ describe('AuthService', () => {
       };
       return map[key] ?? def;
     }),
+    getOrThrow: jest.fn((key: string) => (key === 'jwt.secret' ? 'test-secret' : undefined)),
   };
 
   const mockSessions = {
@@ -58,7 +61,8 @@ describe('AuthService', () => {
     recentLoginFailures: jest.fn(async () => 0),
   };
 
-  const mockRecovery = { sendVerificationAfterRegister: jest.fn() };
+  const mockRecovery = { sendVerificationAfterRegister: jest.fn(), startSignup: jest.fn() };
+  const signupToken = (email = 'a@b.com', name = 'Alice') => signSignupToken(signupKey('test-secret'), { email, name });
 
   const buildUser = (overrides: Partial<UserEntity> = {}): UserEntity =>
     ({
@@ -84,7 +88,7 @@ describe('AuthService', () => {
         { provide: SessionsService, useValue: mockSessions },
         { provide: AuthEventsService, useValue: mockEvents },
         { provide: AccountRecoveryService, useValue: mockRecovery },
-        { provide: PreAuthService, useValue: { putChallenge: async () => undefined } },
+        { provide: PreAuthService, useValue: { putChallenge: async () => undefined, admitLimited: async () => true } },
         { provide: SecondFactorsService, useValue: { methodsFor: async () => [], hasAnyPasskey: async () => false } },
         { provide: SecurityNoticesService, useValue: { inBackground: () => undefined, sessionReplayed: jest.fn() } },
         { provide: FactorResetsService, useValue: { cancelOnFactorUse: async () => undefined, voidStaffLinksOnSignIn: async () => false, staffLinkPending: async () => false } },
@@ -99,50 +103,47 @@ describe('AuthService', () => {
   // register
   // ---------------------------------------------------------------------------
   describe('register', () => {
-    it('hashes the password with bcrypt at cost 12', async () => {
+    // The same answer for every address: the account is made from the mailed link.
+    it('makes no account and no session, and hands the address to the mailed step', async () => {
+      await expect(service.register({ email: 'a@b.com', name: 'Alice' })).resolves.toBeUndefined();
+      expect(mockUsersService.create).not.toHaveBeenCalled();
+      expect(mockSessions.create).not.toHaveBeenCalled();
+      expect(mockRecovery.startSignup).toHaveBeenCalledWith('a@b.com', 'Alice');
+    });
+  });
+
+  describe('completeSignup', () => {
+    it('makes the verified account with the password chosen now, hashed at cost 12, and signs it in', async () => {
       (mockedBcrypt.hash as jest.Mock).mockResolvedValueOnce('hashed');
       mockUsersService.create.mockResolvedValueOnce(buildUser());
-      mockJwtService.signAsync.mockResolvedValue('token');
+      mockJwtService.signAsync.mockResolvedValueOnce('access-tok').mockResolvedValueOnce('refresh-tok');
 
-      await service.register({ email: 'a@b.com', name: 'Alice', password: 'pw' });
+      const result = await service.completeSignup(signupToken(), 'a-new-password');
 
-      expect(mockedBcrypt.hash).toHaveBeenCalledWith('pw', 12);
-    });
-
-    it('creates the user with the hashed password and returns sanitized user + tokens', async () => {
-      (mockedBcrypt.hash as jest.Mock).mockResolvedValueOnce('hashed');
-      const user = buildUser();
-      mockUsersService.create.mockResolvedValueOnce(user);
-      mockJwtService.signAsync
-        .mockResolvedValueOnce('access-tok')
-        .mockResolvedValueOnce('refresh-tok');
-
-      const result = await service.register({
-        email: 'a@b.com',
-        name: 'Alice',
-        password: 'pw',
-      });
-
+      expect(mockedBcrypt.hash).toHaveBeenCalledWith('a-new-password', 12);
       expect(mockUsersService.create).toHaveBeenCalledWith({
         email: 'a@b.com',
         name: 'Alice',
         passwordHash: 'hashed',
+        emailVerified: true,
       });
       expect(result.user).not.toHaveProperty('passwordHash');
-      expect(result.user.email).toBe('a@b.com');
-      expect(result.tokens).toEqual({
-        accessToken: 'access-tok',
-        refreshToken: 'refresh-tok',
-      });
+      expect(result.tokens).toEqual({ accessToken: 'access-tok', refreshToken: 'refresh-tok' });
     });
 
-    it('propagates errors from the users service (e.g. ConflictException)', async () => {
-      (mockedBcrypt.hash as jest.Mock).mockResolvedValueOnce('hashed');
-      mockUsersService.create.mockRejectedValueOnce(new Error('duplicate'));
+    it.each([
+      ['forged', () => `${signupToken().split('.')[0]}.AAAA`],
+      ['signed with another key', () => signSignupToken(signupKey('another-secret'), { email: 'a@b.com', name: 'A' })],
+      ['expired', () => signSignupToken(signupKey('test-secret'), { email: 'a@b.com', name: 'A' }, Date.now() - 25 * 3600_000)],
+    ])('refuses a %s link and makes nothing', async (_kind, token) => {
+      await expect(service.completeSignup(token(), 'a-new-password')).rejects.toThrow(SIGNUP_LINK_INVALID);
+      expect(mockUsersService.create).not.toHaveBeenCalled();
+    });
 
-      await expect(
-        service.register({ email: 'a@b.com', name: 'Alice', password: 'pw' }),
-      ).rejects.toThrow('duplicate');
+    it('refuses a link whose address already has an account, as any spent link', async () => {
+      (mockedBcrypt.hash as jest.Mock).mockResolvedValueOnce('hashed');
+      mockUsersService.create.mockRejectedValueOnce(new ConflictException('taken'));
+      await expect(service.completeSignup(signupToken(), 'a-new-password')).rejects.toThrow(SIGNUP_LINK_INVALID);
     });
   });
 
@@ -353,7 +354,7 @@ describe('AuthService', () => {
   // ---------------------------------------------------------------------------
   // token generation expirations
   // ---------------------------------------------------------------------------
-  describe('generateTokens (via register)', () => {
+  describe('generateTokens (via completeSignup)', () => {
     it('passes access + refresh expirations from ConfigService to jwtService.signAsync', async () => {
       (mockedBcrypt.hash as jest.Mock).mockResolvedValueOnce('hashed');
       mockUsersService.create.mockResolvedValueOnce(buildUser());
@@ -361,7 +362,7 @@ describe('AuthService', () => {
         .mockResolvedValueOnce('access')
         .mockResolvedValueOnce('refresh');
 
-      await service.register({ email: 'a@b.com', name: 'Alice', password: 'pw' });
+      await service.completeSignup(signupToken(), 'a-new-password');
 
       expect(mockJwtService.signAsync).toHaveBeenCalledTimes(2);
       expect(mockJwtService.signAsync).toHaveBeenCalledWith(

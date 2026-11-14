@@ -5,6 +5,7 @@ import {
   HttpStatus,
   Injectable,
   Logger,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -14,6 +15,8 @@ import type { ResendVerificationStatus } from '@chumbaq/shared';
 import { AuthEventsService, RequestContext } from '../auth-events/auth-events.service';
 import {
   accountLink,
+  alreadyRegisteredEmail,
+  signupLinkEmail,
   passwordChangedEmail,
   passwordResetEmail,
   verificationEmail,
@@ -30,6 +33,8 @@ import type { AccountTokenPurpose } from './entities/account-token.entity';
 import { SessionsService } from './sessions.service';
 import { voidStaffEnrolmentAllowances } from './staff-enrolment-allowances';
 import { revokeAllStaffSessions } from './staff-sessions.service';
+import { signSignupToken, signupKey } from './signup-token';
+import { PreAuthService } from './pre-auth.service';
 
 /** One message for unknown, used, expired and refused alike, so it reveals nothing. */
 export const INVALID_TOKEN_MESSAGE = 'This link is invalid or has expired.';
@@ -64,6 +69,9 @@ export class AccountRecoveryService {
     private readonly events: AuthEventsService,
     private readonly config: ConfigService,
     private readonly factorResets: FactorResetsService,
+    // Optional so the suites that build this by hand need not: a reset clears the
+    // address's sign-in attempts (those guesses were at the old password).
+    @Optional() private readonly preAuth?: PreAuthService,
   ) {}
 
   private link(path: string, token?: string): string {
@@ -84,6 +92,25 @@ export class AccountRecoveryService {
   /** Resolves once work started so far has finished. */
   async settled(): Promise<void> {
     await Promise.all(this.background);
+  }
+
+  /**
+   * The rest of a sign-up, after the response (which is the same for every address):
+   * a new address gets the link that makes the account, a taken one hears that it
+   * already has an account. Neither the answer nor its timing says which.
+   */
+  startSignup(email: string, name: string): void {
+    this.inBackground(async () => {
+      const user = await this.users.findByEmail(email);
+      if (user) {
+        const sent = await this.email.send(alreadyRegisteredEmail(user, this.link('/login'), this.link('/forgot-password')));
+        if (!sent.sent) this.logger.warn(`Already-registered email not sent for user ${user.id}`);
+        return;
+      }
+      const token = signSignupToken(signupKey(this.config.getOrThrow<string>('jwt.secret')), { email, name });
+      const sent = await this.email.send(signupLinkEmail({ email, name }, this.link('/complete-signup', token)));
+      if (!sent.sent) this.logger.warn('Sign-up link not sent');
+    });
   }
 
   /** After registering. Whatever goes wrong here, the new account stands. */
@@ -285,6 +312,9 @@ export class AccountRecoveryService {
       ...context,
     });
     if (done.cancelledReset) await this.factorResets.announceCancelled(done.cancelledReset, context);
+    await this.preAuth?.clearSignInAttempts(reset.email.trim().toLowerCase()).catch((error: Error) =>
+      this.logger.error(`Sign-in attempts not cleared after a reset: ${error.message}`),
+    );
     if (!reset.emailVerifiedAt && !done.staffIssued) {
       await this.events.record({
         type: 'email.verified',

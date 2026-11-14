@@ -32,6 +32,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { StaffSessionsService } from './staff-sessions.service';
 import { StaffSessionEntity } from './entities/staff-session.entity';
 import { issueStaffSessionForTest } from '../../test-support/staff-session';
+import { PreAuthService } from './pre-auth.service';
 
 const SECRET = 'test-secret';
 const DOMAIN = '@account-recovery-int.test';
@@ -54,6 +55,7 @@ interface SentEmail {
  * way a person would get it.
  */
 describe('Email verification and forgot password (integration)', () => {
+  let preAuth: PreAuthService;
   let ds: DataSource;
   let app: INestApplication;
   let baseUrl: { port: number };
@@ -184,6 +186,14 @@ describe('Email verification and forgot password (integration)', () => {
     tokens = new AccountTokensService(ds.getRepository(AccountTokenEntity));
     const sessions = new SessionsService(ds.getRepository(AuthSessionEntity));
     const events = new AuthEventsService(ds.getRepository(AuthEventEntity));
+    // A real PreAuthService: the sign-up mail cap is counted in Redis.
+    const redisSettings: Record<string, unknown> = {
+      'redis.host': process.env.REDIS_HOST,
+      'redis.port': Number(process.env.REDIS_PORT ?? 6379),
+      'redis.password': process.env.REDIS_PASSWORD || undefined,
+      'redis.db': Number(process.env.REDIS_DB ?? 0),
+    };
+    preAuth = new PreAuthService({ get: (k: string) => redisSettings[k], getOrThrow: (k: string) => redisSettings[k] } as never);
     recovery = new AccountRecoveryService(
       users,
       tokens,
@@ -197,11 +207,13 @@ describe('Email verification and forgot password (integration)', () => {
         announceCancelled: async () => undefined,
         passwordResetBlockedSince: async () => null,
       } as never,
+      preAuth,
     );
-    auth = new AuthService(users, jwt, config, sessions, events, recovery, { putChallenge: async () => undefined } as never, { methodsFor: async () => [], hasAnyPasskey: async () => false } as never, { inBackground: () => undefined, sessionReplayed: () => undefined } as never, { cancelOnFactorUse: async () => undefined, voidStaffLinksOnSignIn: async () => false, staffLinkPending: async () => false } as never, { findAccount: async () => null, trippedAccount: async () => undefined } as never);
+    auth = new AuthService(users, jwt, config, sessions, events, recovery, preAuth, { methodsFor: async () => [], hasAnyPasskey: async () => false } as never, { inBackground: () => undefined, sessionReplayed: () => undefined } as never, { cancelOnFactorUse: async () => undefined, voidStaffLinksOnSignIn: async () => false, staffLinkPending: async () => false } as never, { findAccount: async () => null, trippedAccount: async () => undefined } as never);
   });
 
   afterAll(async () => {
+    await preAuth.onModuleDestroy();
     await cleanup();
     await closeIntDb(ds);
   });
@@ -363,37 +375,76 @@ describe('Email verification and forgot password (integration)', () => {
   });
 
   describe('email verification', () => {
-    const register = (name = 'Person', email = EMAIL) =>
-      post('register', { email, name, password: PASSWORD });
+    const register = (name = 'Person', email = EMAIL) => post('register', { email, name });
+    const signupTokenIn = (email: SentEmail): string => {
+      const match = /#token=([A-Za-z0-9_.-]+)/.exec(email.text);
+      if (!match) throw new Error('No sign-up link in the email');
+      return match[1];
+    };
 
-    it('sends a link on registration, and the link verifies the address', async () => {
+    it('makes no account until the mailed link is opened, then a verified, signed-in one', async () => {
       const { status, body } = await register();
       await recovery.settled();
 
-      expect(status).toBe(201);
-      expect(body.data.user.emailVerifiedAt).toBeNull();
+      expect(status).toBe(202);
+      expect(body.data).toEqual({ status: 'check_email' });
+      expect(await users.findByEmail(EMAIL)).toBeNull();
       expect(emails).toHaveLength(1);
       expect(emails[0].to).toBe(EMAIL);
-      const me = () => request('GET', '/auth/me', { bearer: body.data.tokens.accessToken });
-      expect((await me()).body.data.emailVerifiedAt).toBeNull();
+      expect(emails[0].subject).toBe('Finish creating your Chumbaq account');
 
-      const verified = await post(
-        'verify-email',
-        { token: tokenIn(emails[0]) },
-        body.data.tokens.accessToken,
-      );
+      const done = await post('complete-signup', { token: signupTokenIn(emails[0]), password: PASSWORD });
+      expect(done.status).toBe(201);
+      expect(done.body.data.tokens.accessToken).toEqual(expect.any(String));
+      const me = await request('GET', '/auth/me', { bearer: done.body.data.tokens.accessToken });
+      expect(me.body.data.emailVerifiedAt).toEqual(expect.any(String));
+      expect((await eventsFor()).map((event) => event.type)).toContain('register.succeeded');
+    });
 
-      expect(verified.status).toBe(200);
-      expect((await me()).body.data.emailVerifiedAt).toEqual(expect.any(String));
-      expect((await eventsFor()).map((event) => event.type)).toContain('email.verified');
+    // The form must not say which addresses have accounts, by its answer or its timing.
+    it('answers a taken address exactly as a new one, and mails its owner instead', async () => {
+      await createUser(EMAIL);
+      const { status, body } = await register();
+      await recovery.settled();
+
+      expect(status).toBe(202);
+      expect(body.data).toEqual({ status: 'check_email' });
+      expect(emails).toHaveLength(1);
+      expect(emails[0].subject).toBe('You already have a Chumbaq account');
+      expect(emails[0].text).not.toMatch(/#token=/);
+    });
+
+    it('works once: a used link finds the address taken', async () => {
+      await register();
+      await recovery.settled();
+      const token = signupTokenIn(emails[0]);
+      expect((await post('complete-signup', { token, password: PASSWORD })).status).toBe(201);
+      const again = await post('complete-signup', { token, password: 'another-password-1' });
+      expect(again.status).toBe(400);
+    });
+
+    it('refuses a link whose address or name was altered', async () => {
+      await register();
+      await recovery.settled();
+      const [payload, signature] = signupTokenIn(emails[0]).split('.');
+      const altered = Buffer.from(
+        JSON.stringify({ ...JSON.parse(Buffer.from(payload, 'base64url').toString()), e: `attacker${DOMAIN}` }),
+      ).toString('base64url');
+      expect((await post('complete-signup', { token: `${altered}.${signature}`, password: PASSWORD })).status).toBe(400);
+    });
+
+    it('sends at most three sign-up mails an hour to one address', async () => {
+      for (let i = 0; i < 5; i++) expect((await register()).status).toBe(202);
+      await recovery.settled();
+      expect(emails).toHaveLength(3);
     });
 
     it('sends both a text and an HTML part, with the link in each', async () => {
       await register();
       await recovery.settled();
 
-      const token = tokenIn(emails[0]);
-      const link = `${APP_URL}/verify-email#token=${token}`;
+      const token = signupTokenIn(emails[0]);
+      const link = `${APP_URL}/complete-signup#token=${token}`;
       expect(emails[0].text).toContain(link);
       expect(emails[0].html).toContain(`href="${link}"`);
     });
@@ -422,26 +473,25 @@ describe('Email verification and forgot password (integration)', () => {
       ['refuses it', () => { provider = 'refuses'; }],
       ['cannot be reached', () => { provider = 'unreachable'; }],
       ['is not configured', () => { env.PLATFORM_BREVO_API_KEY = undefined; }],
-    ])('still registers when the provider %s', async (_label, breakProvider) => {
+    ])('answers the same when the provider %s', async (_label, breakProvider) => {
       breakProvider();
 
       const { status, body } = await register();
       await recovery.settled();
 
-      expect(status).toBe(201);
-      expect(body.data.tokens.accessToken).toEqual(expect.any(String));
-      expect(await users.findByEmail(EMAIL)).not.toBeNull();
+      expect(status).toBe(202);
+      expect(body.data).toEqual({ status: 'check_email' });
       expect(emails).toEqual([]);
-      expect(logged.join()).toContain('Verification email not sent');
+      expect(logged.join()).toContain('Sign-up link not sent');
     });
 
-    it('does not wait for the provider to answer before registering', async () => {
+    it('does not wait for the provider to answer', async () => {
       let release!: () => void;
       holdSend = new Promise((resolve) => (release = resolve));
 
       const { status } = await register();
 
-      expect(status).toBe(201);
+      expect(status).toBe(202);
       expect(emails).toEqual([]);
       release();
       await recovery.settled();

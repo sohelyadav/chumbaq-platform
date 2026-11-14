@@ -6,6 +6,7 @@ import LoginPage from '@/pages/login';
 import RegisterPage from '@/pages/register';
 import ForgotPasswordPage from '@/pages/forgot-password';
 import ResetPasswordPage from '@/pages/reset-password';
+import CompleteSignupPage from '@/pages/complete-signup';
 import VerifyEmailPage from '@/pages/verify-email';
 import { pendingVerification } from '@/lib/account-links';
 import { pendingInvite } from '@/lib/pending-invite';
@@ -121,6 +122,7 @@ export const router = createBrowserRouter([
   // the page could read its token, and the person confirming an address usually is.
   { path: '/verify-email', element: <VerifyEmailPage /> },
   { path: '/reset-password', element: <ResetPasswordPage /> },
+  { path: '/complete-signup', element: <CompleteSignupPage /> },
   // The button in the "Support issued a password reset link" email. Not under either
   // guard: it works from an existing session, and signs in first (coming back here)
   // when there is none.

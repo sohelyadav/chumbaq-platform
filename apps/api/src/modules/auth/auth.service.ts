@@ -4,6 +4,7 @@ import {
   Injectable,
   UnauthorizedException,
   ConflictException,
+  BadRequestException,
   ForbiddenException,
   HttpException,
   HttpStatus,
@@ -29,6 +30,7 @@ import type { BillingConfig } from '../../config/billing.config';
 import { STAFF_KEYS_ONLY_MESSAGE } from '../staff-auth/staff-messages';
 import { rateLimitKey } from '../../common/throttle-tracker';
 import { logValue } from '../../common/log-value';
+import { readSignupToken, signupKey } from './signup-token';
 
 export interface AuthTokens {
   accessToken: string;
@@ -89,6 +91,8 @@ const LOGIN_FAILURE_WINDOW_MINUTES = 15;
 /** First-step attempts on one address from any number of networks in the window. */
 const LOGIN_ATTEMPT_CEILING = 100;
 const SECOND_FACTOR_FIELD = 'second-factor';
+const SIGNUP_MAILS_PER_HOUR = 3;
+export const SIGNUP_LINK_INVALID = 'This sign-up link has expired or was already used. Sign up again, or sign in.';
 
 /** Compared against for an unknown address, so timing does not reveal which exist. */
 let dummyHash: Promise<string> | undefined;
@@ -124,25 +128,49 @@ export class AuthService {
     private readonly tripwires: TripwiresService,
   ) {}
 
-  async register(
-    dto: RegisterDto,
-    context: RequestContext = {},
-  ): Promise<{ user: Partial<UserEntity>; tokens: AuthTokens }> {
-    const passwordHash = await bcrypt.hash(dto.password, 12);
-
-    // A trap address answers exactly as a taken one, after the same hashing.
+  /**
+   * The first step of signing up: the same answer for every address, so the form tells
+   * nobody which addresses have accounts. The account is made by `completeSignup` from
+   * the link mailed to the address (`AccountRecoveryService.startSignup`), so whoever
+   * holds the mailbox chooses the password. At most `SIGNUP_MAILS_PER_HOUR` mails per
+   * address, so the form cannot be used to flood one inbox.
+   */
+  async register(dto: RegisterDto, context: RequestContext = {}): Promise<void> {
     const trap = await this.tripwires.findAccount(dto.email);
     if (trap) {
-      // Not awaited: emailing staff must not make this answer slower than a taken address's.
+      // Not awaited, and no mail: answered exactly as any other address.
       void this.tripwires.trippedAccount(trap, 'sign_up', context.ipAddress ?? null);
-      throw new ConflictException(EMAIL_TAKEN_MESSAGE);
+      return;
     }
+    let admitted = true;
+    try {
+      admitted = await this.preAuth.admitLimited('signup-mail', dto.email, SIGNUP_MAILS_PER_HOUR, 3600);
+    } catch (error) {
+      this.logger.error(`Sign-up mail not counted: ${logValue((error as Error).message)}`);
+    }
+    if (admitted) this.recovery.startSignup(dto.email, dto.name);
+  }
 
-    const user = await this.usersService.create({
-      email: dto.email,
-      name: dto.name,
-      passwordHash,
-    });
+  /**
+   * Makes the account a sign-up link names, with the password chosen now, its address
+   * verified (the link came through the mailbox), and signs it in. Any link that is
+   * forged, expired or already used (the address now has an account) gets the same 400.
+   */
+  async completeSignup(
+    token: string,
+    password: string,
+    context: RequestContext = {},
+  ): Promise<{ user: Partial<UserEntity>; tokens: AuthTokens }> {
+    const claim = readSignupToken(signupKey(this.configService.getOrThrow<string>('jwt.secret')), token);
+    if (!claim) throw new BadRequestException(SIGNUP_LINK_INVALID);
+    const passwordHash = await bcrypt.hash(password, 12);
+    let user: UserEntity;
+    try {
+      user = await this.usersService.create({ email: claim.email, name: claim.name, passwordHash, emailVerified: true });
+    } catch (error) {
+      if (error instanceof ConflictException) throw new BadRequestException(SIGNUP_LINK_INVALID);
+      throw error;
+    }
 
     const { tokens, sessionId } = await this.startSession(user, context, freshAuth(['pwd']));
     await this.events.record({
@@ -152,12 +180,7 @@ export class AuthService {
       sessionId,
       ...context,
     });
-    this.recovery.sendVerificationAfterRegister(user);
-
-    return {
-      user: this.sanitizeUser(user),
-      tokens,
-    };
+    return { user: this.sanitizeUser(user), tokens };
   }
 
   /**

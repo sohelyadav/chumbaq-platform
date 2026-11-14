@@ -41,7 +41,10 @@ interface AuthContextValue {
   loginWithPasskey: () => Promise<void>;
   /** For a passkey chosen from the email field's autofill. */
   completePasskeySignIn: (flowId: string, response: AuthenticationResponse) => Promise<void>;
-  register: (email: string, password: string, name: string) => Promise<void>;
+  /** The first step of signing up: mails a link; signs nobody in. */
+  register: (email: string, name: string) => Promise<void>;
+  /** Finishes a sign-up from the mailed link, with the password chosen now, and signs in. */
+  completeSignup: (token: string, password: string) => Promise<void>;
   /** Then to `to`, the sign-in page by default. */
   logout: (to?: string) => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -120,13 +123,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
-  const register = useCallback(async (email: string, password: string, name: string) => {
-    const data = await apiPost<{
-      user: User;
-      tokens: { accessToken: string };
-    }>('/api/auth/register', { email, password, name });
-    signedIn(data);
+  const register = useCallback(async (email: string, name: string) => {
+    await apiPost('/api/auth/register', { email, name });
   }, []);
+
+  const completeSignup = useCallback(async (token: string, password: string) => {
+    const data = await apiPost<SignedIn>('/api/auth/complete-signup', { token, password });
+    signedIn(data);
+  }, [signedIn]);
 
   const logout = useCallback(async (to = '/login') => {
     // Ends this device's session on the server, so its refresh token dies too. A
@@ -156,6 +160,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loginWithPasskey,
         completePasskeySignIn,
         register,
+        completeSignup,
         logout,
         refreshUser: fetchUser,
       }}

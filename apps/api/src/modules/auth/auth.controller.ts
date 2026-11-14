@@ -22,7 +22,7 @@ import { VerifyEmailDto } from './dto/verify-email.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetLinkStatusDto, ResetPasswordDto } from './dto/reset-password.dto';
 import { ReauthDto } from './dto/reauth.dto';
-import { RegisterDto } from './dto/register.dto';
+import { CompleteSignupDto, RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { ClientHeaderGuard } from './guards/client-header.guard';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
@@ -51,12 +51,21 @@ export class AuthController {
   @Post('register')
   @UseGuards(ClientHeaderGuard)
   @Throttle({ default: { ttl: 60_000, limit: 5 } })
-  async register(
-    @Body() dto: RegisterDto,
+  @HttpCode(202)
+  async register(@Body() dto: RegisterDto, @Req() req: Request): Promise<{ status: 'check_email' }> {
+    await this.authService.register(dto, contextOf(req));
+    return { status: 'check_email' };
+  }
+
+  @Post('complete-signup')
+  @UseGuards(ClientHeaderGuard)
+  @Throttle({ default: { ttl: 60_000, limit: 10 } })
+  async completeSignup(
+    @Body() dto: CompleteSignupDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    return this.cookies.deliverSignIn(res, await this.authService.register(dto, contextOf(req)));
+    return this.cookies.deliverSignIn(res, await this.authService.completeSignup(dto.token, dto.password, contextOf(req)));
   }
 
   @Post('login')

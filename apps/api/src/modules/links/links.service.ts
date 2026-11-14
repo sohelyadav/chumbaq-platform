@@ -52,6 +52,8 @@ const RESERVED_SHORT_CODES = new Set([
   'verify-email',
   'forgot-password',
   'reset-password',
+  // The second step of signing up (`/complete-signup#token=`).
+  'complete-signup',
   // `/account/cancel-support-link`, the button in the staff reset link notice.
   'account',
 ]);
