@@ -150,9 +150,13 @@ export function accountState(
  * staff override or the install's default, and no MAU limit.
  *
  * Billing on: the plan's limits, with a null project limit meaning the install's
- * default. On the free plan the staff override replaces the plan's limit either
- * way (staff can lower a free account as well as raise it); on a paid or comped
- * plan it can only raise it, and a plan with no seat limit stays unlimited.
+ * default. A null seat limit means the install's default on the free plan (so
+ * switching billing on never lifts the seat limit free accounts had) and unlimited
+ * on a paid or comped plan. On the free plan the staff override replaces the
+ * plan's limit either way (staff can lower a free account as well as raise it); on
+ * a paid or comped plan it can only raise it, and a plan with no seat limit stays
+ * unlimited. A plan code with no row (dev before the free row exists) takes the
+ * install's defaults.
  */
 export function effectiveLimits(input: {
   billingEnabled: boolean;
@@ -170,7 +174,7 @@ export function effectiveLimits(input: {
     };
   }
   const planProject = plan?.projectLimit ?? env.projectLimit;
-  const planSeat = plan ? plan.seatLimit : env.seatLimit;
+  const planSeat = plan ? (plan.seatLimit ?? (source === 'free' ? env.seatLimit : null)) : env.seatLimit;
   const mauLimit = plan?.mauLimit ?? null;
   if (source === 'free') {
     return {

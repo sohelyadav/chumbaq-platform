@@ -5,6 +5,7 @@ import { BillingAccountEntity } from './entities/billing-account.entity';
 import { BillingSubscriptionEntity } from './entities/billing-subscription.entity';
 import { PlanPriceEntity } from './entities/plan-price.entity';
 import { PlanEntity } from './entities/plan.entity';
+import { FreePlanSeeder } from './free-plan-seeder';
 
 /**
  * Plans and billing state shared by the customer API, the admin API and the worker.
@@ -14,7 +15,7 @@ import { PlanEntity } from './entities/plan.entity';
   imports: [
     TypeOrmModule.forFeature([PlanEntity, PlanPriceEntity, BillingAccountEntity, BillingSubscriptionEntity]),
   ],
-  providers: [AccountLimitsService],
+  providers: [AccountLimitsService, FreePlanSeeder],
   exports: [TypeOrmModule, AccountLimitsService],
 })
 export class BillingCoreModule {}

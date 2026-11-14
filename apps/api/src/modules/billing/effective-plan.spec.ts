@@ -79,9 +79,25 @@ describe('effectiveLimits', () => {
       { projectLimit: 1, seatLimit: 2, mauLimit: null },
     ],
     [
-      'on, free: a null plan seat limit is no seat limit',
+      'on, free: a null plan seat limit is the install seat default',
       { billingEnabled: true, override: { projectLimit: null, seatLimit: null }, plan: plan(1, null), source: 'free', env },
+      { projectLimit: 1, seatLimit: 25, mauLimit: null },
+    ],
+    [
+      'on, free: a null plan seat limit with no install seat default is no seat limit',
+      {
+        billingEnabled: true,
+        override: { projectLimit: null, seatLimit: null },
+        plan: plan(1, null),
+        source: 'free',
+        env: { projectLimit: 10, seatLimit: null },
+      },
       { projectLimit: 1, seatLimit: null, mauLimit: null },
+    ],
+    [
+      'on, free: the override still replaces a null plan seat limit',
+      { billingEnabled: true, override: { projectLimit: null, seatLimit: 40 }, plan: plan(null, null), source: 'free', env },
+      { projectLimit: 10, seatLimit: 40, mauLimit: null },
     ],
     [
       'on, no plan row: the env defaults',

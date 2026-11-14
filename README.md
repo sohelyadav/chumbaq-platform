@@ -64,6 +64,11 @@ no billing routes, and the project and seat limits are `MAX_PROJECTS_PER_ACCOUNT
 
 Some of the three keys without the others stop the app at start-up, unless `BILLING_ENABLED=false`.
 
+With billing on, every account without a paid plan is on the built-in `free` plan. It starts
+with no limits of its own, so free accounts keep `MAX_PROJECTS_PER_ACCOUNT` and
+`MAX_SEATS_PER_ACCOUNT` until you give the free plan its own; on any other plan an empty seat
+or MAU limit means unlimited.
+
 ## Security
 
 Please report vulnerabilities privately to security@chumbaq.com rather than in a public issue.

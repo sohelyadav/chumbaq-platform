@@ -3,12 +3,17 @@ import { Check, Column, CreateDateColumn, Entity, PrimaryColumn, UpdateDateColum
 /**
  * A plan an account can be on, and the limits it gives while billing is on.
  *
- * Plans are data: the code knows only `free`, which the migration seeds with no
- * limits of its own (so the environment defaults apply) and a trigger keeps from
- * being deleted or switched off. Staff create every other plan, its limits and
- * its prices. A null limit means unlimited, except a null project limit, which
- * means the `MAX_PROJECTS_PER_ACCOUNT` default (per-project caps bound an account
- * only through a finite project count).
+ * Plans are data: the code knows only `free`, which the migration seeds (and dev,
+ * built by synchronize, gets from `FreePlanSeeder`) with no limits of its own, so
+ * the environment defaults apply, and a trigger keeps from being deleted or
+ * switched off. Staff create every other plan, its limits and its prices.
+ *
+ * What a null limit means (`effectiveLimits`):
+ * - project limit: the `MAX_PROJECTS_PER_ACCOUNT` default, on every plan
+ *   (per-project caps bound an account only through a finite project count);
+ * - seat limit: the `MAX_SEATS_PER_ACCOUNT` default on `free`, unlimited on any
+ *   other plan;
+ * - MAU limit: unlimited.
  */
 @Entity('plans')
 @Check('CHK_plans_code', `"code" ~ '^[a-z][a-z0-9_]{1,31}$'`)

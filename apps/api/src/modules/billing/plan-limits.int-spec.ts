@@ -45,11 +45,11 @@ describe('plan limits (integration)', () => {
     tenants: AdminTenantsService;
   }
 
-  const build = (billingEnabled: boolean): Services => {
+  const build = (billingEnabled: boolean, maxSeatsPerAccount: number | null = null): Services => {
     const limits = new AccountLimitsService(
       new ConfigService({
         billing: { enabled: billingEnabled },
-        projects: { maxPerAccount: ENV_PROJECTS, maxSeatsPerAccount: null },
+        projects: { maxPerAccount: ENV_PROJECTS, maxSeatsPerAccount },
       }),
     );
     const seats = new SeatsService(ds, limits);
@@ -251,6 +251,35 @@ describe('plan limits (integration)', () => {
 
       await subscribe(owner, UNLIMITED_SEATS);
       await expect(assertRoom(on, owner, 'third@plan-limits-int.test')).resolves.toBeUndefined();
+    });
+  });
+
+  describe('the free plan with no seat limit of its own', () => {
+    const ENV_SEATS = 2;
+    afterEach(async () => {
+      await ds.query(`UPDATE plans SET seat_limit = 2 WHERE code = 'free'`);
+    });
+
+    it('keeps the install seat default when billing goes on; a paid plan with none stays unlimited', async () => {
+      await ds.query(`UPDATE plans SET seat_limit = NULL WHERE code = 'free'`);
+      const withDefault = build(true, ENV_SEATS);
+      const owner = await account();
+      const [projectId] = await existing(owner, 1);
+      await addOwnerMember(ds, projectId, await account(), 'member');
+
+      await expect(assertRoom(withDefault, owner, 'third@plan-limits-int.test')).rejects.toThrow(SEAT_LIMIT_MESSAGE);
+      expect((await withDefault.projects.findAllByUser(caller(owner), pagination())).meta.seats).toEqual({
+        used: 2,
+        limit: ENV_SEATS,
+      });
+      expect(await withDefault.tenants.findOne(owner)).toMatchObject({ plan: 'free', effectiveSeatLimit: ENV_SEATS });
+      // The same as billing off over the same rows.
+      await expect(assertRoom(build(false, ENV_SEATS), owner, 'third@plan-limits-int.test')).rejects.toThrow(
+        SEAT_LIMIT_MESSAGE,
+      );
+
+      await subscribe(owner, UNLIMITED_SEATS);
+      await expect(assertRoom(withDefault, owner, 'third@plan-limits-int.test')).resolves.toBeUndefined();
     });
   });
 

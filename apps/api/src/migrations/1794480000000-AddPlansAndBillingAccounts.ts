@@ -6,8 +6,8 @@ import { MigrationInterface, QueryRunner } from "typeorm";
  * they pay for.
  *
  * - `plans`: the plans and the limits each gives while billing is on. Only `free` is
- *   seeded, with null limits (so the environment defaults apply); every other plan
- *   is data staff add. A trigger refuses deleting `free`, renaming it, or switching
+ *   seeded, with null limits (so the install's project and seat defaults apply, and
+ *   no MAU limit); every other plan is data staff add. A trigger refuses deleting `free`, renaming it, or switching
  *   it off, since every account without a live subscription falls back to it.
  * - `plan_prices`: versioned prices per plan and interval, in integer paise. The
  *   price excludes GST; `amount_paise` (what the provider charges) is held to
