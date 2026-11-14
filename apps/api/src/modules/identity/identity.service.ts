@@ -34,7 +34,12 @@ const CONSENT_FIELDS = [
 interface PendingConsentChange {
   channel: ConsentChannel;
   granted: boolean;
+  /** When not the call's own source (a handover's withdrawals). */
+  source?: ConsentSource;
 }
+
+/** Consent that belongs to the person and their address, not to the device. */
+const PERSON_CONSENT_FIELDS = CONSENT_FIELDS.filter(({ field }) => field !== 'pushOptIn' && field !== 'doNotTrack');
 
 @Injectable()
 export class IdentityService {
@@ -86,10 +91,13 @@ export class IdentityService {
 
     if (identity) {
       const before = { email: identity.email, phoneE164: identity.phoneE164 };
+      const handover =
+        !!identity.externalUserId && !!dto.externalUserId && dto.externalUserId !== identity.externalUserId;
+      const handoverChanges = handover ? this.startNewPerson(identity) : [];
       // What the SDK may change: see sdkConsent.
       dto = await this.sdkConsent(manager, dto, identity);
       // Read before anything is applied: the history records what changed.
-      const consentChanges = this.consentChanges(identity, dto);
+      const consentChanges = [...handoverChanges, ...this.consentChanges(identity, dto)];
       if (dto.doNotTrack != null && dto.doNotTrack !== identity.doNotTrack) {
         identity.doNotTrackSource = 'sdk';
       }
@@ -472,7 +480,7 @@ export class IdentityService {
         deviceIdentityId: saved.id,
         channel: change.channel,
         granted: change.granted,
-        source,
+        source: change.source ?? source,
       })),
       manager,
     );
@@ -716,6 +724,39 @@ export class IdentityService {
       if (phone) return phone;
     }
     return undefined;
+  }
+
+  /**
+   * A different user signed in on a device whose row names someone else. The row is
+   * found by fingerprint, which survives sign-out in every SDK, and a sign-in carries
+   * only the fields the app passes, so without this the new user's row would keep the
+   * previous user's addresses, names, traits, revenue and channel consent: returned in
+   * the new user's identify response, used to send the new user's messages to the old
+   * user's address on the old user's opt-in, and to judge the new user in segments.
+   * Device facts (push permission, do-not-track, the device itself) stay. Event history
+   * stays with the device, as erasure responses say. Returns the consent the previous
+   * user had given, now withdrawn from this row.
+   */
+  private startNewPerson(identity: DeviceIdentityEntity): PendingConsentChange[] {
+    const withdrawn: PendingConsentChange[] = [];
+    for (const { field, channel, grantedWhen } of PERSON_CONSENT_FIELDS) {
+      if (identity[field] === grantedWhen) withdrawn.push({ channel, granted: false, source: 'device_handover' });
+      (identity as unknown as Record<string, unknown>)[field] = null;
+    }
+    const cleared: Partial<Record<keyof DeviceIdentityEntity, null>> = {
+      email: null,
+      phone: null,
+      phoneE164: null,
+      firstName: null,
+      lastName: null,
+      avatar: null,
+      traits: null,
+      currency: null,
+    };
+    Object.assign(identity, cleared);
+    identity.totalRevenue = 0;
+    if (withdrawn.length > 0) identity.consentUpdatedAt = new Date();
+    return withdrawn;
   }
 
   private updateProfileFields(identity: DeviceIdentityEntity, dto: IdentifyDto): void {

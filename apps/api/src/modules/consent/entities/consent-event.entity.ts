@@ -40,6 +40,8 @@ export type ConsentChannel = (typeof CONSENT_CHANNELS)[number];
  *   Meta/Interakt with no stored secret). Honoured, since it can only add
  *   protection, but anyone holding the URL could have sent it, so it is not
  *   recorded as a verified statement. An unsigned START is never honoured.
+ * - `device_handover`: a different user signed in on this device, so the consent the
+ *   previous user gave on it (with their address) no longer applies to the row.
  */
 export const CONSENT_SOURCES = [
   'sdk',
@@ -52,6 +54,7 @@ export const CONSENT_SOURCES = [
   'stop_reply',
   'stop_reply_unsigned',
   'start_reply',
+  'device_handover',
 ] as const;
 export type ConsentSource = (typeof CONSENT_SOURCES)[number];
 
