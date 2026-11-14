@@ -1,3 +1,9 @@
+import * as path from 'path';
+import { config as loadEnv } from 'dotenv';
+
+// The same repo-root .env the API uses, so the seed drops and fills the database
+// the app is configured for, never the default name.
+loadEnv({ path: path.resolve(__dirname, '../../../../.env') });
 import { AdminAuditLogEntity } from '../modules/admin/entities/admin-audit-log.entity';
 import { DataSource } from 'typeorm';
 import * as bcrypt from 'bcrypt';
@@ -207,17 +213,8 @@ async function seed() {
     username: process.env.DATABASE_USER || 'chumbaq',
     password: process.env.DATABASE_PASSWORD || 'secret',
     database: process.env.DATABASE_NAME || 'chumbaq',
-    entities: [
-      UserEntity, ProjectEntity, LinkEntity, LinkVariantEntity,
-      ClickEventEntity, ConversionEventEntity,
-      TeamEntity, TeamMemberEntity, ApiKeyEntity, WebhookEntity,
-      BannerCategoryEntity, InAppBannerEntity, WidgetEventEntity,
-      DeviceIdentityEntity, PushTokenEntity, PushConfigEntity, PushNotificationLogEntity,
-      InAppMessageEntity, InAppMessageImpressionEntity, PendingMessageEntity,
-      MixpanelConfigEntity, MixpanelCohortEntity, MixpanelCohortMemberEntity,
-      TouchpointEntity, UserEventEntity, AttributionResultEntity,
-      AdminAuditLogEntity,
-    ],
+    // Every entity, so the schema matches what the API builds (new tables included).
+    entities: [path.join(__dirname, '..', '**', '*.entity.{ts,js}')],
     synchronize: true,
   });
 
