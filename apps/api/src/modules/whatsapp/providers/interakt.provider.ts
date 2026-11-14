@@ -17,6 +17,7 @@ import {
   WhatsAppProvider,
   WhatsAppTemplate,
 } from './whatsapp-provider';
+import { providerBaseUrl } from '../../../config/provider-endpoints.config';
 
 export interface InteraktCredentials {
   /** The Secret Key from Settings → Developer Setting, sent as-is after `Basic`. */
@@ -25,7 +26,8 @@ export interface InteraktCredentials {
   webhookSecret?: string;
 }
 
-const API = 'https://api.interakt.ai/v1/public';
+/** `https://api.interakt.ai/v1/public`, or its test-only override (see `provider-endpoints.config.ts`). */
+const api = () => providerBaseUrl('interakt');
 
 /**
  * Interakt's send API, one recipient per request.
@@ -77,7 +79,7 @@ export class InteraktProvider
    */
   async validateCredentials(credentials: unknown): Promise<void> {
     const { apiKey } = this.parseCredentials(credentials);
-    const response = await this.request(`${API}/apis/users/?offset=0&limit=1`, {
+    const response = await this.request(`${api()}/apis/users/?offset=0&limit=1`, {
       method: 'POST',
       headers: { authorization: `Basic ${apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({ filters: [] }),
@@ -112,7 +114,7 @@ export class InteraktProvider
       );
     }
 
-    const response = await this.request(`${API}/message/`, {
+    const response = await this.request(`${api()}/message/`, {
       method: 'POST',
       headers: { authorization: `Basic ${apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({

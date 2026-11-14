@@ -17,6 +17,7 @@ import {
   WhatsAppProvider,
   WhatsAppTemplate,
 } from './whatsapp-provider';
+import { providerBaseUrl } from '../../../config/provider-endpoints.config';
 
 export interface GupshupCredentials {
   /** The account's API key, from the Gupshup dashboard. */
@@ -29,7 +30,8 @@ export interface GupshupCredentials {
   sourceNumber: string;
 }
 
-const API = 'https://api.gupshup.io';
+/** `https://api.gupshup.io`, or its test-only override (see `provider-endpoints.config.ts`). */
+const api = () => providerBaseUrl('gupshup');
 
 /**
  * Gupshup's self-serve WhatsApp API (`/wa/api/v1/template/msg`), one
@@ -83,7 +85,7 @@ export class GupshupProvider
   async validateCredentials(credentials: unknown): Promise<void> {
     const parsed = this.parseCredentials(credentials);
     const response = await this.request(
-      `${API}/wa/app/${encodeURIComponent(parsed.appId)}/template?pageSize=1`,
+      `${api()}/wa/app/${encodeURIComponent(parsed.appId)}/template?pageSize=1`,
       { headers: { apikey: parsed.apiKey } },
     );
     if (response.ok) return;
@@ -115,7 +117,7 @@ export class GupshupProvider
     const media = mediaMessage(message.headerMediaUrl, message.headerMediaType);
     if (media) form.set('message', JSON.stringify(media));
 
-    const response = await this.request(`${API}/wa/api/v1/template/msg`, {
+    const response = await this.request(`${api()}/wa/api/v1/template/msg`, {
       method: 'POST',
       headers: { apikey: apiKey, 'content-type': 'application/x-www-form-urlencoded' },
       body: form.toString(),
@@ -146,7 +148,7 @@ export class GupshupProvider
     const pageSize = 100;
     for (let pageNo = 0; pageNo < 20; pageNo++) {
       const response = await this.request(
-        `${API}/wa/app/${encodeURIComponent(appId)}/template?pageNo=${pageNo}&pageSize=${pageSize}`,
+        `${api()}/wa/app/${encodeURIComponent(appId)}/template?pageNo=${pageNo}&pageSize=${pageSize}`,
         { headers: { apikey: apiKey } },
       );
       const body = await readJson(response);

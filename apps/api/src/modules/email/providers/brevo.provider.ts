@@ -6,13 +6,15 @@ import {
   EmailAccountError,
   readJson,
 } from './email-provider';
+import { providerBaseUrl } from '../../../config/provider-endpoints.config';
 
 export interface BrevoCredentials {
   /** A v3 API key, `xkeysib-...`. An SMTP key (`xsmtpsib-...`) cannot call the API. */
   apiKey: string;
 }
 
-const API = 'https://api.brevo.com/v3';
+/** `https://api.brevo.com/v3`, or its test-only override (see `provider-endpoints.config.ts`). */
+const api = () => providerBaseUrl('brevo');
 
 /**
  * Brevo tags are plain strings, not name/value pairs, so each Chumbaq tag
@@ -49,7 +51,7 @@ export class BrevoProvider extends BaseEmailProvider {
 
   async validateCredentials(credentials: unknown): Promise<void> {
     const { apiKey } = this.parseCredentials(credentials);
-    const response = await this.request(`${API}/account`, {
+    const response = await this.request(`${api()}/account`, {
       headers: { 'api-key': apiKey, accept: 'application/json' },
     });
     if (response.ok) return;
@@ -66,7 +68,7 @@ export class BrevoProvider extends BaseEmailProvider {
     const { apiKey } = credentials as BrevoCredentials;
     const sender = parseFrom(message.from);
 
-    const response = await this.request(`${API}/smtp/email`, {
+    const response = await this.request(`${api()}/smtp/email`, {
       method: 'POST',
       headers: {
         'api-key': apiKey,

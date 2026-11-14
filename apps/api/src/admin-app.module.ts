@@ -12,6 +12,7 @@ import mfaConfig from './config/mfa.config';
 import projectsConfig from './config/projects.config';
 import staffConfig from './config/staff.config';
 import billingConfig from './config/billing.config';
+import providerEndpointsConfig from './config/provider-endpoints.config';
 import { QueueModule } from './queue/queue.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { StaffAuthModule } from './modules/staff-auth/staff-auth.module';
@@ -43,6 +44,8 @@ import { throttleTracker } from './common/throttle-tracker';
         projectsConfig,
         staffConfig,
         billingConfig,
+        // Refuses a provider base URL override outside development and test.
+        providerEndpointsConfig,
       ],
     }),
     TypeOrmModule.forRootAsync({

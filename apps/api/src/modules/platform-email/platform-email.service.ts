@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { providerBaseUrl } from '../../config/provider-endpoints.config';
 
 export interface PlatformEmail {
   to: string;
@@ -12,7 +13,6 @@ export type PlatformEmailResult =
   | { sent: true }
   | { sent: false; reason: 'not_configured' | 'refused' | 'unreachable' };
 
-const BREVO_URL = 'https://api.brevo.com/v3/smtp/email';
 const TIMEOUT_MS = 10_000;
 
 /**
@@ -57,8 +57,17 @@ export class PlatformEmailService {
       return { sent: false, reason: 'not_configured' };
     }
 
+    let url: string;
     try {
-      const response = await fetch(BREVO_URL, {
+      // `https://api.brevo.com/v3`, or its test-only override (see `provider-endpoints.config.ts`).
+      url = `${providerBaseUrl('platformBrevo')}/smtp/email`;
+    } catch (error) {
+      this.logger.error(`Account email not sent: ${(error as Error).message}`);
+      return { sent: false, reason: 'not_configured' };
+    }
+
+    try {
+      const response = await fetch(url, {
         method: 'POST',
         headers: {
           'api-key': this.apiKey as string,

@@ -8,6 +8,7 @@ import {
   readJson,
 } from '../../push-notifications/services/per-recipient-provider';
 import { SmsMessage } from '../sms-rendering';
+import { providerBaseUrl } from '../../../config/provider-endpoints.config';
 
 export type SmsProvider = DeliveryProvider<SmsMessage, SmsProviderName>;
 
@@ -22,7 +23,8 @@ export interface TwilioCredentials {
   authToken: string;
 }
 
-const API = 'https://api.twilio.com/2010-04-01';
+/** `https://api.twilio.com/2010-04-01`, or its test-only override (see `provider-endpoints.config.ts`). */
+const api = () => providerBaseUrl('twilio');
 
 /**
  * Twilio error codes that mean the recipient will never be reachable, and
@@ -89,7 +91,7 @@ export class TwilioProvider
 
   async validateCredentials(credentials: unknown): Promise<void> {
     const { accountSid, authToken } = this.parseCredentials(credentials);
-    const response = await this.request(`${API}/Accounts/${accountSid}.json`, {
+    const response = await this.request(`${api()}/Accounts/${accountSid}.json`, {
       headers: { authorization: basicAuth(accountSid, authToken), accept: 'application/json' },
     });
     const body = await readJson(response);
@@ -113,7 +115,7 @@ export class TwilioProvider
     else form.set('From', message.from);
     if (message.statusCallback) form.set('StatusCallback', message.statusCallback);
 
-    const response = await this.request(`${API}/Accounts/${accountSid}/Messages.json`, {
+    const response = await this.request(`${api()}/Accounts/${accountSid}/Messages.json`, {
       method: 'POST',
       headers: {
         authorization: basicAuth(accountSid, authToken),

@@ -19,6 +19,7 @@ import {
   WhatsAppProvider,
   WhatsAppTemplate,
 } from './whatsapp-provider';
+import { providerBaseUrl } from '../../../config/provider-endpoints.config';
 
 export interface MetaCredentials {
   /** The sending number's id (not the number itself), from WhatsApp Manager / the app's API Setup. */
@@ -33,7 +34,8 @@ export interface MetaCredentials {
 
 /** Pinned so a Graph API change is a deliberate edit, not a surprise. */
 export const GRAPH_VERSION = 'v23.0';
-const GRAPH = `https://graph.facebook.com/${GRAPH_VERSION}`;
+/** `https://graph.facebook.com/<version>`, or its test-only override's host (see `provider-endpoints.config.ts`). */
+const graphApi = () => `${providerBaseUrl('metaGraph')}/${GRAPH_VERSION}`;
 
 /**
  * Error codes about the account, token, number or template — every
@@ -106,14 +108,14 @@ export class MetaWhatsAppProvider
     const headers = { authorization: `Bearer ${parsed.accessToken}` };
 
     const number = await this.request(
-      `${GRAPH}/${parsed.phoneNumberId}?fields=id,display_phone_number,verified_name`,
+      `${graphApi()}/${parsed.phoneNumberId}?fields=id,display_phone_number,verified_name`,
       { headers },
     );
     if (!number.ok) {
       throw new BadRequestException(`Meta refused the phone number ID or token: ${describeGraph(await readJson(number))}`);
     }
     const templates = await this.request(
-      `${GRAPH}/${parsed.businessAccountId}/message_templates?limit=1`,
+      `${graphApi()}/${parsed.businessAccountId}/message_templates?limit=1`,
       { headers },
     );
     if (!templates.ok) {
@@ -130,7 +132,7 @@ export class MetaWhatsAppProvider
   ): Promise<AttemptResult> {
     const { phoneNumberId, accessToken } = credentials as MetaCredentials;
 
-    const response = await this.request(`${GRAPH}/${phoneNumberId}/messages`, {
+    const response = await this.request(`${graphApi()}/${phoneNumberId}/messages`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${accessToken}`,
@@ -178,7 +180,7 @@ export class MetaWhatsAppProvider
     const headers = { authorization: `Bearer ${accessToken}` };
     const templates: WhatsAppTemplate[] = [];
     let url: string | null =
-      `${GRAPH}/${businessAccountId}/message_templates` +
+      `${graphApi()}/${businessAccountId}/message_templates` +
       '?fields=id,name,language,status,category,components,parameter_format&limit=100';
 
     for (let page = 0; url && page < 20; page++) {

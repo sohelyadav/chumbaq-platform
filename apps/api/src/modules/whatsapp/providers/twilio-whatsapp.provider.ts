@@ -17,6 +17,7 @@ import {
   WhatsAppProvider,
   WhatsAppTemplate,
 } from './whatsapp-provider';
+import { providerBaseUrl } from '../../../config/provider-endpoints.config';
 
 export interface TwilioWhatsAppCredentials {
   accountSid: string;
@@ -26,8 +27,9 @@ export interface TwilioWhatsAppCredentials {
   sender: string;
 }
 
-const API = 'https://api.twilio.com/2010-04-01';
-const CONTENT_API = 'https://content.twilio.com/v1';
+/** `https://api.twilio.com/2010-04-01` and `https://content.twilio.com/v1`, or their test-only overrides (see `provider-endpoints.config.ts`). */
+const api = () => providerBaseUrl('twilio');
+const contentApi = () => providerBaseUrl('twilioContent');
 
 /**
  * Codes about the account, the sender or the template rather than the
@@ -93,7 +95,7 @@ export class TwilioWhatsAppProvider
 
   async validateCredentials(credentials: unknown): Promise<void> {
     const { accountSid, authToken } = this.parseCredentials(credentials);
-    const response = await this.request(`${API}/Accounts/${accountSid}.json`, {
+    const response = await this.request(`${api()}/Accounts/${accountSid}.json`, {
       headers: { authorization: basicAuth(accountSid, authToken), accept: 'application/json' },
     });
     const body = await readJson(response);
@@ -122,7 +124,7 @@ export class TwilioWhatsAppProvider
     if (Object.keys(variables).length > 0) form.set('ContentVariables', JSON.stringify(variables));
     if (message.statusCallback) form.set('StatusCallback', message.statusCallback);
 
-    const response = await this.request(`${API}/Accounts/${accountSid}/Messages.json`, {
+    const response = await this.request(`${api()}/Accounts/${accountSid}/Messages.json`, {
       method: 'POST',
       headers: {
         authorization: basicAuth(accountSid, authToken),
@@ -158,7 +160,7 @@ export class TwilioWhatsAppProvider
     const { accountSid, authToken } = this.parseCredentials(credentials);
     const headers = { authorization: basicAuth(accountSid, authToken), accept: 'application/json' };
     const templates: WhatsAppTemplate[] = [];
-    let url: string | null = `${CONTENT_API}/ContentAndApprovals?PageSize=500`;
+    let url: string | null = `${contentApi()}/ContentAndApprovals?PageSize=500`;
 
     for (let page = 0; url && page < 10; page++) {
       const response: Response = await this.request(url, { headers });

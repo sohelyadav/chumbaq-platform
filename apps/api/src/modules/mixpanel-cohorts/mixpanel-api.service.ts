@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import { MixpanelConfigEntity } from './entities/mixpanel-config.entity';
 import { COHORT_MEMBER_CAP, COHORT_SYNC_DEADLINE_MS, cohortSyncTooSlow, cohortTooLarge } from './cohort-sync-limits';
+import { providerBaseUrl } from '../../config/provider-endpoints.config';
 
 export interface MixpanelCohortInfo {
   id: number;
@@ -25,7 +26,10 @@ export interface MixpanelProfile {
 @Injectable()
 export class MixpanelApiService {
   private readonly logger = new Logger(MixpanelApiService.name);
-  private readonly baseUrl = 'https://mixpanel.com/api/2.0';
+  /** `https://mixpanel.com/api/2.0`, or its test-only override (see `provider-endpoints.config.ts`). */
+  private get baseUrl(): string {
+    return providerBaseUrl('mixpanel');
+  }
 
   private parseCohortCount(rawCohort: any): number {
     const rawCount =

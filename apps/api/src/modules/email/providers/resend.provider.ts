@@ -6,6 +6,7 @@ import {
   EmailAccountError,
   readJson,
 } from './email-provider';
+import { providerBaseUrl } from '../../../config/provider-endpoints.config';
 
 export interface ResendCredentials {
   apiKey: string;
@@ -13,7 +14,8 @@ export interface ResendCredentials {
   webhookSecret?: string;
 }
 
-const API = 'https://api.resend.com';
+/** `https://api.resend.com`, or its test-only override (see `provider-endpoints.config.ts`). */
+const api = () => providerBaseUrl('resend');
 
 /**
  * Resend, through its REST API.
@@ -51,7 +53,7 @@ export class ResendProvider extends BaseEmailProvider {
    */
   async validateCredentials(credentials: unknown): Promise<void> {
     const { apiKey } = this.parseCredentials(credentials);
-    const response = await this.request(`${API}/domains`, {
+    const response = await this.request(`${api()}/domains`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
     if (response.ok) return;
@@ -70,7 +72,7 @@ export class ResendProvider extends BaseEmailProvider {
   ): Promise<AttemptResult> {
     const { apiKey } = credentials as ResendCredentials;
 
-    const response = await this.request(`${API}/emails`, {
+    const response = await this.request(`${api()}/emails`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,

@@ -13,9 +13,14 @@ import {
   IMAGE_DATA_KEY,
 } from './channel-provider';
 import { SendOutcome, summariseOutcomes, runPool } from './channel-send';
+import * as http from 'http';
 import * as https from 'https';
 import * as crypto from 'crypto';
 import { logValue } from '../../../common/log-value';
+import {
+  PROVIDER_ENDPOINTS,
+  providerBaseUrl,
+} from '../../../config/provider-endpoints.config';
 
 import type {
   PushDeliveryOptions,
@@ -83,6 +88,34 @@ const ACCEPTED_TOKEN_URIS: ReadonlySet<string> = new Set([
   'https://www.googleapis.com/oauth2/v4/token',
   'https://accounts.google.com/o/oauth2/token',
 ]);
+
+/**
+ * Where a request to Google goes: Google's own host, or a test-only override
+ * (`FCM_API_BASE_URL`, `GOOGLE_OAUTH2_API_BASE_URL`; see
+ * `provider-endpoints.config.ts`, refused outside development and test). The
+ * default keeps the options as they always were: the hostname and this
+ * provider's keep-alive agent. Never taken from the service account.
+ */
+function googleRequest(
+  endpoint: 'fcm' | 'googleOauth',
+  path: string,
+): { request: typeof https.request; options: https.RequestOptions; overridden: boolean } {
+  const base = providerBaseUrl(endpoint);
+  if (base === PROVIDER_ENDPOINTS[endpoint].defaultUrl) {
+    return { request: https.request, options: { hostname: new URL(base).hostname, path }, overridden: false };
+  }
+  const url = new URL(base);
+  return {
+    request: url.protocol === 'http:' ? (http.request as typeof https.request) : https.request,
+    options: {
+      protocol: url.protocol,
+      hostname: url.hostname,
+      ...(url.port ? { port: Number(url.port) } : {}),
+      path: `${url.pathname.replace(/\/+$/, '')}${path}`,
+    },
+    overridden: true,
+  };
+}
 
 export const TOKEN_URI_REFUSED =
   "The service account's token_uri must be Google's token endpoint.";
@@ -339,13 +372,17 @@ export class FcmProvider implements ChannelProvider {
         },
       });
 
-      const requestOptions: https.RequestOptions = {
-        hostname: 'fcm.googleapis.com',
+      const target = googleRequest(
+        'fcm',
         // Encoded so a project_id cannot add path segments or a query and
         // steer the request at another endpoint on Google's host.
-        path: `/v1/projects/${encodeURIComponent(projectId)}/messages:send`,
+        `/v1/projects/${encodeURIComponent(projectId)}/messages:send`,
+      );
+      const requestOptions: https.RequestOptions = {
+        ...target.options,
         method: 'POST',
-        agent: this.agent,
+        // The keep-alive agent is for Google's host; a local stub gets the default one.
+        ...(target.overridden ? {} : { agent: this.agent }),
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
@@ -366,7 +403,7 @@ export class FcmProvider implements ChannelProvider {
         resolve(value);
       };
 
-      const req = https.request(requestOptions, (res) => {
+      const req = target.request(requestOptions, (res) => {
         readCapped(req, res, (data) => {
           const status = res.statusCode ?? 0;
           if (status >= 200 && status < 300) {
@@ -661,9 +698,9 @@ export class FcmProvider implements ChannelProvider {
       const jwt = `${signatureInput}.${signature}`;
       const postData = `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`;
 
+      const target = googleRequest('googleOauth', GOOGLE_TOKEN_PATH);
       const options: https.RequestOptions = {
-        hostname: GOOGLE_TOKEN_HOST,
-        path: GOOGLE_TOKEN_PATH,
+        ...target.options,
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
@@ -686,7 +723,7 @@ export class FcmProvider implements ChannelProvider {
         resolve(value);
       };
 
-      const req = https.request(options, (res) => {
+      const req = target.request(options, (res) => {
         readCapped(req, res, (data) => {
           const status = res.statusCode ?? 0;
           let parsed: unknown;
