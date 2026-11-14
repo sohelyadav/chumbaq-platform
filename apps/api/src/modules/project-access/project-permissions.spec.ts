@@ -9,8 +9,8 @@ import {
 } from './project-permissions';
 
 /**
- * A literal copy of the table the founder approved (docs/superpowers/specs/
- * 2026-11-08-team-roles-design.md, "Roles and permissions"). Change it only with the spec.
+ * A literal copy of the approved roles table. Change it only deliberately, together with
+ * the matrix in project-permissions.ts.
  */
 const SPEC_TABLE: Record<ProjectPermission, Record<ProjectRole, boolean>> = {
   'project.read': { owner: true, admin: true, member: true },

@@ -2,9 +2,8 @@ import type { PersonKeys } from './person-scope';
 
 /**
  * Every table that holds data about an app's end user, and what erasure and
- * export do with each. The single list both services walk; the design and the
- * reasoning per table are in
- * docs/superpowers/specs/2026-11-07-person-erasure-export.md.
+ * export do with each. The single list both services walk; the reasoning per
+ * table is in each entry.
  *
  * **The structural rule** (trust model): every link the SDK sets is a claim,
  * and `POST /identity/merge` rewrites `distinct_id` across the event tables

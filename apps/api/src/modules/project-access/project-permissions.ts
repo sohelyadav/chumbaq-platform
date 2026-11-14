@@ -9,8 +9,7 @@ export const PROJECT_ROLES = ['owner', 'admin', 'member'] as const;
 export type ProjectRole = (typeof PROJECT_ROLES)[number];
 
 /**
- * Everything a role can be allowed in a project, by the names the spec uses
- * (docs/superpowers/specs/2026-11-08-team-roles-design.md, "Roles and permissions").
+ * Everything a role can be allowed in a project, by name.
  */
 export const PROJECT_PERMISSIONS = [
   'project.read',

@@ -112,8 +112,8 @@ export const WITHOUT_DO_NOT_TRACK_SQL = `
  * asks this first and, for a do-not-track person, drops it while still
  * answering 2xx, because the native SDK queues treat a 4xx as terminal and a
  * 5xx as retry-forever, and neither is what a consent decision should cause.
- * Consent changes themselves are never dropped. Design and the full list of
- * paths: docs/superpowers/specs/2026-11-07-consent-enforcement.md.
+ * Consent changes themselves are never dropped. The full list of paths
+ * that ask is in the callers of `isDoNotTrack`.
  */
 @Injectable()
 export class TrackingConsentService {

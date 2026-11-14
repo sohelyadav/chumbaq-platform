@@ -57,7 +57,7 @@ export interface PersonKeys {
  * tables for any value, with no proof of the device), and `external_user_id`
  * on a device. So no row is ever matched by a `distinct_id` or alias id,
  * except orphan rows whose `distinct_id` is the verified external id, and
- * only for erasure. Design: docs/superpowers/specs/2026-11-07-person-erasure-export.md.
+ * only for erasure.
  *
  * - `externalUserId` X (server API): the rows with that external id. X is verified.
  * - `personId` (dashboard, the owner acting on their own data): that row; if
