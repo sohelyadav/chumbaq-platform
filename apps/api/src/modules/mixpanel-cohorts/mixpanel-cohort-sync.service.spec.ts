@@ -263,7 +263,13 @@ describe('MixpanelCohortSyncService', () => {
 
       // identityRepo always returns null => unresolved stays unresolved
       identityRepo.findOne.mockResolvedValue(null);
-      const qb = { where: jest.fn().mockReturnThis(), andWhere: jest.fn().mockReturnThis(), getOne: jest.fn().mockResolvedValue(null) };
+      const qb = {
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue([]),
+      };
       identityRepo.createQueryBuilder.mockReturnValue(qb);
 
       // member save returns the member as-is (isResolved stays false)

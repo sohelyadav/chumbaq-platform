@@ -160,6 +160,24 @@ export class MixpanelCohortSyncService {
     }
   }
 
+  /**
+   * The one device row whose `email` trait is this address, or null when none or
+   * several are. The trait is whatever the app (or anyone holding its public SDK key)
+   * wrote, so with several rows nothing says which is the person's: picking one would
+   * let a row that names a stranger's address take their place in the cohort and
+   * receive its pushes and in-app messages.
+   */
+  private async onlyRowWithEmailTrait(projectId: string, email: string): Promise<DeviceIdentityEntity | null> {
+    const rows = await this.identityRepo
+      .createQueryBuilder('di')
+      .where('di.projectId = :projectId', { projectId })
+      .andWhere("di.traits->>'email' = :email", { email })
+      .orderBy('di.id')
+      .take(2)
+      .getMany();
+    return rows.length === 1 ? rows[0] : null;
+  }
+
   private async resolveMember(
     projectId: string,
     cohortId: string,
@@ -189,11 +207,7 @@ export class MixpanelCohortSyncService {
 
     // Resolution order 3: email match from Mixpanel profile properties
     if (!identity && profile.$properties.$email) {
-      identity = await this.identityRepo
-        .createQueryBuilder('di')
-        .where('di.projectId = :projectId', { projectId })
-        .andWhere("di.traits->>'email' = :email", { email: profile.$properties.$email })
-        .getOne();
+      identity = await this.onlyRowWithEmailTrait(projectId, profile.$properties.$email);
       if (identity) {
         resolvedBy = 'email';
       }
