@@ -3,6 +3,9 @@ import { ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AccountLimitsService } from './account-limits.service';
 import { BillingAccountEntity } from './entities/billing-account.entity';
+import { BillingEventEntity } from './entities/billing-event.entity';
+import { BillingInvoiceEntity } from './entities/billing-invoice.entity';
+import { BillingPaymentEntity } from './entities/billing-payment.entity';
 import { BillingSubscriptionEntity } from './entities/billing-subscription.entity';
 import { PlanPriceEntity } from './entities/plan-price.entity';
 import { PlanEntity } from './entities/plan.entity';
@@ -17,7 +20,15 @@ import { createBillingProvider } from './providers/create-billing-provider';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([PlanEntity, PlanPriceEntity, BillingAccountEntity, BillingSubscriptionEntity]),
+    TypeOrmModule.forFeature([
+      PlanEntity,
+      PlanPriceEntity,
+      BillingAccountEntity,
+      BillingSubscriptionEntity,
+      BillingEventEntity,
+      BillingInvoiceEntity,
+      BillingPaymentEntity,
+    ]),
   ],
   providers: [
     AccountLimitsService,

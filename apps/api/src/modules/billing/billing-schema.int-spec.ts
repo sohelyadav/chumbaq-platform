@@ -91,7 +91,8 @@ describe('billing schema (integration)', () => {
 
   it('matches the entities, so dev (synchronize) and migrated databases agree', async () => {
     const pending = await ds.driver.createSchemaBuilder().log();
-    const tables = /"(plans|plan_prices|billing_accounts|billing_subscriptions)"/;
+    const tables =
+      /"(plans|plan_prices|billing_accounts|billing_subscriptions|billing_events|billing_invoices|billing_payments)"/;
     expect(pending.upQueries.map((q) => q.query).filter((q) => tables.test(q))).toEqual([]);
   });
 
@@ -257,5 +258,103 @@ describe('billing schema (integration)', () => {
       [user],
     );
     await ds.query(`DELETE FROM users WHERE id = $1`, [user]);
+  });
+
+  describe('ledger', () => {
+    const newEvent = async (outcome = 'pending', id = `evt_${hex(7)}`): Promise<string> => {
+      const [row] = await ds.query(
+        `INSERT INTO billing_events (provider, provider_event_id, type, event_created_at, payload, outcome)
+         VALUES ('razorpay', $1, 'subscription.charged', now(), '{"event":"subscription.charged"}', $2) RETURNING id`,
+        [id, outcome],
+      );
+      return row.id as string;
+    };
+
+    const newPayment = async (userId: string, overrides: Partial<{ amount: number; refunded: number; status: string }> = {}) => {
+      const [row] = await ds.query(
+        `INSERT INTO billing_payments
+           (provider_payment_id, user_id, amount_paise, amount_refunded_paise, tax_rate_bps, currency, status, paid_at)
+         VALUES ($1, $2, $3, $4, 1800, 'INR', $5, now()) RETURNING id`,
+        [`pay_${hex(7)}`, userId, overrides.amount ?? 117882, overrides.refunded ?? 0, overrides.status ?? 'captured'],
+      );
+      return row.id as string;
+    };
+
+    it('creates the three ledger tables with uuid primary keys', async () => {
+      expect(await primaryKey('billing_events')).toEqual(['id']);
+      expect(await primaryKey('billing_invoices')).toEqual(['id']);
+      expect(await primaryKey('billing_payments')).toEqual(['id']);
+    });
+
+    it('lets an event move from pending or failed to an outcome, and never out of one', async () => {
+      const id = await newEvent('pending');
+      await ds.query(
+        `UPDATE billing_events SET outcome = 'failed', detail = 'boom', attempts = attempts + 1 WHERE id = $1`,
+        [id],
+      );
+      await ds.query(
+        `UPDATE billing_events SET outcome = 'applied', detail = NULL, attempts = attempts + 1, applied_at = now() WHERE id = $1`,
+        [id],
+      );
+      const [row] = await ds.query(`SELECT outcome, attempts FROM billing_events WHERE id = $1`, [id]);
+      expect(row).toEqual({ outcome: 'applied', attempts: 2 });
+
+      await expect(ds.query(`UPDATE billing_events SET outcome = 'failed' WHERE id = $1`, [id])).rejects.toThrow(
+        /billing_events is append-only/,
+      );
+      const ignored = await newEvent('ignored');
+      await expect(
+        ds.query(`UPDATE billing_events SET outcome = 'applied' WHERE id = $1`, [ignored]),
+      ).rejects.toThrow(/billing_events is append-only/);
+    });
+
+    it('never changes what was received, even while pending', async () => {
+      const id = await newEvent('pending');
+      await expect(
+        ds.query(`UPDATE billing_events SET payload = '{}' WHERE id = $1`, [id]),
+      ).rejects.toThrow(/billing_events is append-only/);
+      await expect(
+        ds.query(`UPDATE billing_events SET type = 'invoice.paid' WHERE id = $1`, [id]),
+      ).rejects.toThrow(/billing_events is append-only/);
+      await expect(
+        ds.query(`UPDATE billing_events SET received_at = received_at - interval '1 day' WHERE id = $1`, [id]),
+      ).rejects.toThrow(/billing_events is append-only/);
+      await expect(ds.query(`DELETE FROM billing_events WHERE id = $1`, [id])).rejects.toThrow(
+        /billing_events is append-only/,
+      );
+      await expect(ds.query(`TRUNCATE billing_events`)).rejects.toThrow(/billing_events is append-only/);
+    });
+
+    it('accepts only the four outcomes and each provider event id once', async () => {
+      await expect(newEvent('done')).rejects.toThrow(/CHK_billing_events_outcome/);
+      const id = `evt_${hex(7)}`;
+      await newEvent('pending', id);
+      await expect(newEvent('pending', id)).rejects.toThrow(/duplicate key/);
+    });
+
+    it('refuses a refund above the amount and a status outside the list', async () => {
+      const user = await newUser();
+      await newPayment(user, { amount: 1000, refunded: 1000, status: 'refunded' });
+      await expect(newPayment(user, { amount: 1000, refunded: 1001 })).rejects.toThrow(
+        /CHK_billing_payments_refund/,
+      );
+      await expect(newPayment(user, { status: 'authorized' })).rejects.toThrow(/CHK_billing_payments_status/);
+    });
+
+    it('keeps payments and invoices for tax law: deleting their user is refused', async () => {
+      const paid = await newUser();
+      await newPayment(paid);
+      await expect(ds.query(`DELETE FROM users WHERE id = $1`, [paid])).rejects.toThrow(/FK_billing_payments_user/);
+
+      const invoiced = await newUser();
+      await ds.query(
+        `INSERT INTO billing_invoices (provider_invoice_id, user_id, status, amount_paise, tax_paise, provider_tax_paise, currency)
+         VALUES ($1, $2, 'paid', 117882, 17982, 0, 'INR')`,
+        [`inv_${hex(7)}`, invoiced],
+      );
+      await expect(ds.query(`DELETE FROM users WHERE id = $1`, [invoiced])).rejects.toThrow(
+        /FK_billing_invoices_user/,
+      );
+    });
   });
 });
