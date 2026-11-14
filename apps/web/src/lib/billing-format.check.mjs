@@ -10,7 +10,7 @@ import { fileURLToPath } from 'url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const jiti = createJiti(import.meta.url, { interopDefault: true });
-const { formatPaise, priceLine, mauShare, canBuy, BILLING_STATE_LABELS, intervalLabel } = await jiti.import(
+const { formatPaise, priceLine, mauShare, canBuy, BILLING_STATE_LABELS, intervalLabel, safeProviderUrl } = await jiti.import(
   path.join(here, 'billing-format.ts'),
 );
 
@@ -88,6 +88,12 @@ check('free never', canBuy({ ...plan, code: 'free' }, 'monthly') === false);
 console.log('BILLING_STATE_LABELS');
 for (const state of ['free', 'checkout', 'active', 'past_due', 'halted', 'cancelling', 'change_scheduled', 'upgrade_pending', 'comped']) {
   check(`labels ${state}`, typeof BILLING_STATE_LABELS[state] === 'string' && BILLING_STATE_LABELS[state].length > 0);
+}
+
+console.log('safeProviderUrl');
+check('an https link', safeProviderUrl('https://rzp.io/i/abc123') === 'https://rzp.io/i/abc123');
+for (const bad of ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'http://rzp.io/i/x', 'data:text/html,x', '//rzp.io/i/x', 'https://user:pw@rzp.io/i/x', '', null, undefined]) {
+  check(`refuses ${JSON.stringify(bad)}`, safeProviderUrl(bad) === null, String(safeProviderUrl(bad)));
 }
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

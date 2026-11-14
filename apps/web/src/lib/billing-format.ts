@@ -73,7 +73,7 @@ export function canBuy(plan: BillingPlanOption, interval: BillingInterval): bool
 }
 
 export const BILLING_STATE_LABELS: Record<BillingAccountState, string> = {
-  free: 'Free',
+  free: 'No paid plan',
   checkout: 'Waiting for payment',
   active: 'Active',
   past_due: 'Payment being retried',
@@ -83,3 +83,17 @@ export const BILLING_STATE_LABELS: Record<BillingAccountState, string> = {
   upgrade_pending: 'Upgraded, billed from the next period',
   comped: 'Complimentary',
 };
+
+/**
+ * A provider link (an invoice's page) for an `href`: only an absolute https URL, so a
+ * stored value can never become a `javascript:` or other scheme link. Null otherwise.
+ */
+export function safeProviderUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : null;
+  } catch {
+    return null;
+  }
+}

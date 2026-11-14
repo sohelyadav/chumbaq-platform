@@ -12,6 +12,8 @@ import { pendingInvite } from '@/lib/pending-invite';
 import InvitePage from '@/pages/invite';
 import { CANCEL_SUPPORT_LINK_PATH, nextAfterSignIn } from '@/lib/staff-link';
 import CancelSupportLinkPage from '@/pages/account/cancel-support-link';
+import BillingPage from '@/pages/account/billing';
+import { BILLING_PATH } from '@/lib/billing-route';
 import DashboardPage from '@/pages/dashboard';
 import LinksListPage from '@/pages/links/links-list';
 import LinkCreatePage from '@/pages/links/link-create';
@@ -140,6 +142,9 @@ export const router = createBrowserRouter([
         children: [
           { path: '/projects', element: <ProjectSelectorPage /> },
           { path: '/settings', element: <UserSettingsPage /> },
+          // The account's billing (it owns billing, not a project). Shows "Not found"
+          // while the API says billing is off. `account` is a reserved short code.
+          { path: BILLING_PATH, element: <BillingPage /> },
         ],
       },
       // Redirect root to projects

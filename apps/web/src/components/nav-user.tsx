@@ -6,6 +6,7 @@ import {
   Monitor,
   ShieldCheck,
   UserCog,
+  CreditCard,
 } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { ADMIN_APP_URL } from "@/lib/admin-app"
@@ -30,6 +31,9 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar"
 import { useAuth } from "@/hooks/use-auth"
+import { useBillingEnabled } from "@/hooks/use-billing"
+import { getImpersonation } from "@/lib/auth"
+import { BILLING_PATH, showBillingNav } from "@/lib/billing-route"
 import { useTheme, accentOptions } from "@/hooks/use-theme"
 
 export function NavUser() {
@@ -37,6 +41,7 @@ export function NavUser() {
   const { user, logout } = useAuth()
   const { theme, setTheme, accent, setAccent } = useTheme()
   const navigate = useNavigate()
+  const { billingEnabled } = useBillingEnabled(Boolean(user))
 
   return (
     <SidebarMenu>
@@ -123,6 +128,12 @@ export function NavUser() {
                   <ShieldCheck className="text-muted-foreground mr-2 h-4 w-4" />
                   Admin app
                 </a>
+              </DropdownMenuItem>
+            )}
+            {showBillingNav(billingEnabled, Boolean(getImpersonation())) && (
+              <DropdownMenuItem onClick={() => navigate(BILLING_PATH)}>
+                <CreditCard className="text-muted-foreground mr-2 h-4 w-4" />
+                Billing
               </DropdownMenuItem>
             )}
             <DropdownMenuItem onClick={() => navigate('/settings')}>

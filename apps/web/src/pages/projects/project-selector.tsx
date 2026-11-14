@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Plus, Globe, ArrowRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,6 +14,9 @@ import { toast } from '@/components/ui/use-toast';
 import { canCreateProject, projectCountLabel } from '@/lib/project-limit';
 import { roleLabel } from '@/lib/project-role';
 import { Badge } from '@/components/ui/badge';
+import { useBillingEnabled } from '@/hooks/use-billing';
+import { getImpersonation } from '@/lib/auth';
+import { BILLING_PATH, showBillingNav } from '@/lib/billing-route';
 
 /** The server's own words, which say what the limit is and what to do. */
 function serverMessage(err: unknown): string | null {
@@ -39,10 +42,23 @@ export default function ProjectSelectorPage() {
   const billed = projectsResponse?.meta.billedProjects ?? 0;
   const projectLimit = projectsResponse?.meta.projectLimit;
   const canCreate = canCreateProject(billed, projectLimit);
+  const { billingEnabled } = useBillingEnabled();
+  // With billing on, the limit is the plan's, so the way to raise it is another plan.
+  const showPlans = showBillingNav(billingEnabled, Boolean(getImpersonation()));
   const atLimitMessage =
     projectLimit === undefined
       ? null
-      : `You can have up to ${projectLimit} projects. Delete one or contact support to raise the limit.`;
+      : showPlans
+        ? `You can have up to ${projectLimit} projects on your plan. Upgrade your plan or delete one.`
+        : `You can have up to ${projectLimit} projects. Delete one or contact support to raise the limit.`;
+  const seePlans = showPlans ? (
+    <>
+      {' '}
+      <Link to={BILLING_PATH} className="underline underline-offset-4">
+        See plans
+      </Link>
+    </>
+  ) : null;
 
   const openCreate = () => {
     setCreateError(null);
@@ -80,7 +96,10 @@ export default function ProjectSelectorPage() {
           <h1 className="text-3xl font-bold">Your Projects</h1>
           <p className="text-muted-foreground mt-1">Every project you belong to, with your role in it.</p>
           {projectLimit !== undefined && (
-            <p className="text-sm text-muted-foreground mt-1">{projectCountLabel(billed, projectLimit)}</p>
+            <p className="text-sm text-muted-foreground mt-1">
+              {projectCountLabel(billed, projectLimit)}
+              {seePlans}
+            </p>
           )}
         </div>
         <Button onClick={openCreate} disabled={!canCreate}>
@@ -90,6 +109,7 @@ export default function ProjectSelectorPage() {
       {!canCreate && atLimitMessage && (
         <p role="status" className="mb-6 rounded-md border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
           {atLimitMessage}
+          {seePlans}
         </p>
       )}
 

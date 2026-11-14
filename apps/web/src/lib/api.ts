@@ -237,6 +237,11 @@ export async function apiPost<T>(url: string, data?: unknown): Promise<T> {
   return unwrap<T>(response.data);
 }
 
+export async function apiPut<T>(url: string, data?: unknown): Promise<T> {
+  const response = await api.put(url, data);
+  return unwrap<T>(response.data);
+}
+
 export async function apiPatch<T>(url: string, data?: unknown): Promise<T> {
   const response = await api.patch(url, data);
   return unwrap<T>(response.data);

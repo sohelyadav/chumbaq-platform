@@ -1,6 +1,9 @@
-import { Outlet } from 'react-router-dom';
-import { Link2, LogOut, Sun, Moon, Monitor, ChevronsUpDown, ShieldCheck } from 'lucide-react';
+import { Outlet, useNavigate } from 'react-router-dom';
+import { Link2, LogOut, Sun, Moon, Monitor, ChevronsUpDown, ShieldCheck, CreditCard } from 'lucide-react';
 import { useAuth } from '@/hooks/use-auth';
+import { useBillingEnabled } from '@/hooks/use-billing';
+import { getImpersonation } from '@/lib/auth';
+import { BILLING_PATH, showBillingNav } from '@/lib/billing-route';
 import { ADMIN_APP_URL } from '@/lib/admin-app';
 import { useTheme, accentOptions } from '@/hooks/use-theme';
 import { Toaster } from '@/components/ui/toast';
@@ -21,6 +24,8 @@ import { Button } from '@/components/ui/button';
 export function MinimalLayout() {
   const { user, logout } = useAuth();
   const { theme, setTheme, accent, setAccent } = useTheme();
+  const navigate = useNavigate();
+  const { billingEnabled } = useBillingEnabled(Boolean(user));
 
   return (
     <div className="min-h-screen bg-background">
@@ -91,6 +96,12 @@ export function MinimalLayout() {
                     <ShieldCheck className="text-muted-foreground" />
                     Admin app
                   </a>
+                </DropdownMenuItem>
+              )}
+              {showBillingNav(billingEnabled, Boolean(getImpersonation())) && (
+                <DropdownMenuItem onClick={() => navigate(BILLING_PATH)}>
+                  <CreditCard className="text-muted-foreground" />
+                  Billing
                 </DropdownMenuItem>
               )}
               <DropdownMenuItem onClick={() => logout()}>
