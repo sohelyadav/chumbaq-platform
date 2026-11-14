@@ -20,6 +20,7 @@ const {
   formatCount,
   formatDay,
   formatShortDay,
+  mauCountedFrom,
   messagesSent,
   nextSort,
   readTenantListParams,
@@ -76,6 +77,25 @@ check(
 );
 check('first of the month stays the first', formatDay('2026-11-01') === '1 Nov 2026', formatDay('2026-11-01'));
 check('short day', formatShortDay('2026-01-31') === '31 Jan', formatShortDay('2026-01-31'));
+
+console.log('mauCountedFrom');
+check(
+  'the month counting started says so',
+  mauCountedFrom(coverage, '2026-11') === 'counted from 1 Nov 2026',
+  String(mauCountedFrom(coverage, '2026-11')),
+);
+check(
+  'mid-month start, the day as written',
+  mauCountedFrom({ ...coverage, mauFrom: '2026-10-16' }, '2026-10') === 'counted from 16 Oct 2026',
+  String(mauCountedFrom({ ...coverage, mauFrom: '2026-10-16' }, '2026-10')),
+);
+check('a later month has no note', mauCountedFrom(coverage, '2026-12') === null);
+check('an earlier month has no note', mauCountedFrom(coverage, '2026-10') === null);
+check('the same month of another year has no note', mauCountedFrom(coverage, '2025-11') === null);
+check('a full day is read by its month', mauCountedFrom(coverage, '2026-11-13') === 'counted from 1 Nov 2026');
+check('no coverage, no note', mauCountedFrom(null, '2026-11') === null);
+check('no month, no note', mauCountedFrom(coverage, null) === null);
+check('no mauFrom, no note', mauCountedFrom({ ...coverage, mauFrom: null }, '2026-11') === null);
 
 console.log('messagesSent');
 check(

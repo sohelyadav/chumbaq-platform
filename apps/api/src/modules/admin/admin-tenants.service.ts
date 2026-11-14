@@ -183,7 +183,14 @@ export class AdminTenantsService {
    */
   async list(query: ListAdminTenantsDto): Promise<{
     data: AdminTenantSummary[];
-    meta: { total: number; page: number; limit: number; totalPages: number; countedThrough: string | null };
+    meta: {
+      total: number;
+      page: number;
+      limit: number;
+      totalPages: number;
+      countedThrough: string | null;
+      mauFrom: string | null;
+    };
   }> {
     const manager = this.userRepository.manager;
     const coverage = await readUsageCoverage(manager);
@@ -208,6 +215,7 @@ export class AdminTenantsService {
         limit: query.limit,
         totalPages: Math.ceil(total / query.limit),
         countedThrough,
+        mauFrom: coverage?.countedThrough ? coverage.mauFrom : null,
       },
     };
   }

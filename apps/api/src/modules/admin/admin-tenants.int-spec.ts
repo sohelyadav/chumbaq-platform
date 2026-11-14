@@ -377,6 +377,8 @@ describe('AdminTenantsService (integration)', () => {
       expect(row(light)).toMatchObject({ mauThisMonth: 0, messagesSent30d: 10, lastUsageDay: '2026-11-01' });
       expect(row(never)).toMatchObject({ mauThisMonth: 0, messagesSent30d: 0, lastUsageDay: null });
       expect(meta.countedThrough).toBe('2026-11-13');
+      // Active devices counted from the first run's month, so the list can say this month is the first.
+      expect(meta.mauFrom).toBe('2026-11-01');
     });
 
     it('sorts by messages sent, the zeros last and together', async () => {
@@ -541,6 +543,7 @@ describe('AdminTenantsService (integration)', () => {
       await ds.query(`DELETE FROM usage_rollup_state`);
       const { data, meta } = await service.list(listQuery({ limit: 100 }));
       expect(meta.countedThrough).toBeNull();
+      expect(meta.mauFrom).toBeNull();
       expect(data.find((t) => t.id === heavy)).toMatchObject({ mauThisMonth: 0, messagesSent30d: 0, lastUsageDay: null });
     });
   });

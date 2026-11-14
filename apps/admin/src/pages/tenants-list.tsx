@@ -36,6 +36,7 @@ import { cn } from '@/lib/utils';
 import {
   formatCount,
   formatDay,
+  mauCountedFrom,
   nextSort,
   readTenantListParams,
   writeTenantListParams,
@@ -62,18 +63,21 @@ function SortableHead({
   list,
   onSort,
   className,
+  title,
 }: {
   column: AdminTenantSort;
   label: string;
   list: TenantListParams;
   onSort: (column: AdminTenantSort) => void;
   className?: string;
+  title?: string;
 }) {
   const active = list.sort === column;
   const Icon = !active ? ArrowUpDown : list.order === 'asc' ? ArrowUp : ArrowDown;
   return (
     <TableHead
       className={className}
+      title={title}
       aria-sort={active ? (list.order === 'asc' ? 'ascending' : 'descending') : 'none'}
     >
       <button
@@ -158,6 +162,8 @@ export default function TenantsListPage() {
   const filtered = !!search || !!status || !!list.activity;
   // Before the roll-up has closed a day, a tenant's 0 means "not counted", not "none".
   const counted = !!meta?.countedThrough;
+  // This month is the first active devices are counted in, so the column may be low.
+  const mauFirstMonth = mauCountedFrom(meta, meta?.countedThrough);
 
   const onSort = (column: AdminTenantSort) => updateList(nextSort(list, column));
 
@@ -248,7 +254,9 @@ export default function TenantsListPage() {
       {meta && (
         <p className="-mt-3 text-xs text-muted-foreground">
           {meta.countedThrough
-            ? `Usage counted through ${formatDay(meta.countedThrough)} (UTC days). Quiet means no usage in the last 14 counted days.`
+            ? `Usage counted through ${formatDay(meta.countedThrough)} (UTC days).${
+                mauFirstMonth ? ` Monthly active devices: first month counted, ${mauFirstMonth}.` : ''
+              } Quiet means no usage in the last 14 counted days.`
             : 'Usage not counted yet.'}
         </p>
       )}
@@ -284,6 +292,7 @@ export default function TenantsListPage() {
                   <SortableHead
                     column="mau_this_month"
                     label="Monthly active devices"
+                    title={mauFirstMonth ? `First month counted, ${mauFirstMonth}` : undefined}
                     list={list}
                     onSort={onSort}
                     className="text-right"

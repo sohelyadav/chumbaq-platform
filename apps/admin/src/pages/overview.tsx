@@ -28,8 +28,8 @@ import {
   USAGE_METRIC_LABELS,
   countedThroughLabel,
   formatCount,
-  formatDay,
   formatShortDay,
+  mauCountedFrom,
 } from '@/lib/usage-format';
 
 function StatCard({
@@ -74,9 +74,8 @@ const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1
  */
 function activeDevicesDescription(coverage: UsageCoverage | null): string {
   if (!coverage?.countedThrough) return 'Not counted yet';
-  const sameMonth = coverage.mauFrom.slice(0, 7) === coverage.countedThrough.slice(0, 7);
-  const from = sameMonth ? `, counted from ${formatDay(coverage.mauFrom)}` : '';
-  return `This month, ${lowerFirst(countedThroughLabel(coverage))}${from}`;
+  const from = mauCountedFrom(coverage, coverage.countedThrough);
+  return `This month, ${lowerFirst(countedThroughLabel(coverage))}${from ? `, ${from}` : ''}`;
 }
 
 function TenantRefCell({ tenant }: { tenant: AdminTenantUsageRef }) {

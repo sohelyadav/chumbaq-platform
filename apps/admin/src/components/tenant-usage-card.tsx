@@ -11,6 +11,7 @@ import {
   formatCount,
   formatDay,
   formatMonth,
+  mauCountedFrom,
   messagesSent,
 } from '@/lib/usage-format';
 
@@ -25,8 +26,20 @@ function monthTitle(month: UsageMonth | null): string | undefined {
   return month ? `${formatDay(month.from)} to ${formatDay(month.through)}` : undefined;
 }
 
+/** The number, and in the month active devices started being counted a note that it may be low. */
+function MonthCell({ value, note }: { value: number | null; note: string | null }) {
+  return (
+    <TableCell className="text-right text-sm tabular-nums" title={note ?? undefined}>
+      {formatCount(value)}
+      {note && <span className="block text-xs font-normal text-muted-foreground">First month counted, {note}</span>}
+    </TableCell>
+  );
+}
+
 function MonthsTable({ usage }: { usage: AdminTenantUsage }) {
   const { thisMonth, lastMonth } = usage;
+  const noteFor = (key: string, month: UsageMonth | null) =>
+    key === 'mau_month_to_date' ? mauCountedFrom(usage.coverage, month?.month) : null;
   const rows: { key: string; label: string; value: (month: UsageMonth | null) => number | null }[] = [
     ...TREND_METRICS.map((metric: UsageMetric) => ({
       key: metric,
@@ -58,8 +71,8 @@ function MonthsTable({ usage }: { usage: AdminTenantUsage }) {
           {rows.map((row) => (
             <TableRow key={row.key}>
               <TableCell className="text-sm">{row.label}</TableCell>
-              <TableCell className="text-right text-sm tabular-nums">{formatCount(row.value(thisMonth))}</TableCell>
-              <TableCell className="text-right text-sm tabular-nums">{formatCount(row.value(lastMonth))}</TableCell>
+              <MonthCell value={row.value(thisMonth)} note={noteFor(row.key, thisMonth)} />
+              <MonthCell value={row.value(lastMonth)} note={noteFor(row.key, lastMonth)} />
             </TableRow>
           ))}
         </TableBody>

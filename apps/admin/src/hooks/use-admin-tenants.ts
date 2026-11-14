@@ -31,8 +31,18 @@ export interface AdminTenantsParams extends AdminTenantsFilters {
 
 export interface AdminTenantsResponse {
   data: AdminTenantSummary[];
-  /** `countedThrough`: the last day usage is counted through, null before the first. */
-  meta: { page: number; limit: number; total: number; totalPages: number; countedThrough: string | null };
+  /**
+   * `countedThrough`: the last day usage is counted through, null before the first.
+   * `mauFrom`: the first day active devices are counted from, null before the first.
+   */
+  meta: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+    countedThrough: string | null;
+    mauFrom: string | null;
+  };
 }
 
 /** Only the filters that are set, so axios sends no empty or `undefined` keys. */

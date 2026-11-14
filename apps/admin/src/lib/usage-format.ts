@@ -67,6 +67,20 @@ export function countedThroughLabel(coverage: UsageCoverage | null): string {
   return coverage?.countedThrough ? `Counted through ${formatDay(coverage.countedThrough)}` : 'Not counted yet';
 }
 
+/**
+ * "counted from 1 Nov 2026" for the month active devices started being counted in
+ * (`month` is `YYYY-MM`, or a day in it), null for any other. That month's count can
+ * be low: device activity from before counting started is only partly known.
+ */
+export function mauCountedFrom(
+  coverage: { mauFrom: string | null } | null | undefined,
+  month: string | null | undefined,
+): string | null {
+  const from = coverage?.mauFrom;
+  if (!from || !month) return null;
+  return from.slice(0, 7) === month.slice(0, 7) ? `counted from ${formatDay(from)}` : null;
+}
+
 /** One point per day; a null stays null so the chart leaves a gap rather than drawing a 0. */
 export function trendPoints(days: UsageDay[], metric: UsageMetric): { date: string; value: number | null }[] {
   return days.map((day) => ({ date: day.date, value: day.values[metric] ?? null }));
