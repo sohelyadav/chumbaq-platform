@@ -19,15 +19,20 @@ export class InternalAlertsController {
   @Post()
   @HttpCode(202)
   async raise(@Body() dto: InternalAlertDto): Promise<{ accepted: true }> {
-    const details = dto.details ?? {};
-    const entries = Object.entries(details);
+    const entries = Object.entries(dto.details ?? {});
     if (entries.length > MAX_DETAILS) throw new BadRequestException(`At most ${MAX_DETAILS} details`);
-    for (const [, value] of entries) {
-      if (typeof value !== 'string' || value.length > MAX_DETAIL_LENGTH) {
-        throw new BadRequestException(`Details must be text of at most ${MAX_DETAIL_LENGTH} characters`);
-      }
+    if (entries.some(([, value]) => typeof value !== 'string')) {
+      throw new BadRequestException('Details must be text');
     }
-    await this.alerts.raise(dto.kind, dto.key, details as Record<string, string>, dto.ip ?? null);
+    // Shortened, never refused: the scripts discard a refusal, so refusing a long value
+    // (AIDE's list of changed files) dropped the alarm without a trace.
+    const details = Object.fromEntries(
+      entries.map(([name, value]) => {
+        const text = value as string;
+        return [name, text.length > MAX_DETAIL_LENGTH ? `${text.slice(0, MAX_DETAIL_LENGTH - 1)}…` : text];
+      }),
+    );
+    await this.alerts.raise(dto.kind, dto.key, details, dto.ip ?? null);
     return { accepted: true };
   }
 }

@@ -70,9 +70,18 @@ describe('POST /api/internal/security-alerts', () => {
     expect((await post(admin.base, { kind: 'server.ssh_login', key: 'x'.repeat(201) }, TOKEN)).status).toBe(400);
     const many = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`k${i}`, 'v']));
     expect((await post(admin.base, { kind: 'server.files_changed', key, details: many }, TOKEN)).status).toBe(400);
-    expect((await post(admin.base, { kind: 'server.files_changed', key, details: { path: 'x'.repeat(501) } }, TOKEN)).status).toBe(400);
     expect((await post(admin.base, { kind: 'server.files_changed', key, details: { n: 3 } }, TOKEN)).status).toBe(400);
     expect(await rowsFor(key)).toEqual([]);
+  });
+
+  // The scripts discard a refusal, so a long list of changed files must still raise.
+  it('raises with a detail too long to keep whole, shortened', async () => {
+    const key = randomUUID();
+    const res = await post(admin.base, { kind: 'server.files_changed', key, details: { paths: 'x'.repeat(2000) } }, TOKEN);
+    expect(res.status).toBe(202);
+    const [row] = await rowsFor(key);
+    expect(row.details.paths).toHaveLength(500);
+    expect(row.details.paths.endsWith('…')).toBe(true);
   });
 
   it('does not answer a request that came through a proxy, even with the token', async () => {

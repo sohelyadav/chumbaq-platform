@@ -9,7 +9,7 @@ export class InternalAlertDto {
   @Length(1, 200)
   key!: string;
 
-  /** At most 20 entries of strings up to 500 characters; checked by the controller. */
+  /** At most 20 entries of strings; the controller shortens any over 500 characters. */
   @IsOptional()
   @IsObject()
   details?: Record<string, unknown>;
