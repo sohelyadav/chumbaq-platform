@@ -72,6 +72,8 @@ export class MixpanelCohortSyncService {
       // actually finish before the job is considered done, so the queue's
       // retry/backoff can engage on real failures.
       await this.runSync(cohort, creds, projectId);
+      // runSync writes its outcome with update(), so read it back.
+      return (await this.cohortRepo.findOne({ where: { id: cohort.id } })) ?? cohort;
     } else {
       // Run the sync asynchronously so the controller can return immediately.
       this.runSync(cohort, creds, projectId).catch((err) => {
@@ -138,13 +140,19 @@ export class MixpanelCohortSyncService {
       }
 
       // 6. Update cohort with final status
-      cohort.mixpanelUserCount = profiles.length;
-      cohort.resolvedCount = resolvedCount;
-      cohort.unresolvedCount = unresolvedCount;
-      cohort.status = 'synced';
-      cohort.lastSyncedAt = new Date();
-      cohort.errorMessage = null;
-      await this.cohortRepo.save(cohort);
+      // update(), never save(): the cohort may have been deleted while this ran, and
+      // save() of the entity loaded before would insert it again.
+      await this.cohortRepo.update(
+        { id: cohort.id },
+        {
+          mixpanelUserCount: profiles.length,
+          resolvedCount,
+          unresolvedCount,
+          status: 'synced',
+          lastSyncedAt: new Date(),
+          errorMessage: null,
+        },
+      );
 
       this.logger.log(
         `Cohort ${cohort.id} synced: ${resolvedCount} resolved, ${unresolvedCount} unresolved`,
@@ -154,9 +162,12 @@ export class MixpanelCohortSyncService {
       const errMsg = err instanceof Error ? err.message : String(err);
       const errStack = err instanceof Error ? err.stack : undefined;
       this.logger.error(`Sync error for cohort ${cohort.id}: ${errMsg}`, errStack);
-      cohort.status = 'error';
-      cohort.errorMessage = errMsg ?? 'Unknown error during sync';
-      await this.cohortRepo.save(cohort);
+      // update(), never save(): a sync that failed because the cohort was deleted
+      // under it must not bring the cohort back.
+      await this.cohortRepo.update(
+        { id: cohort.id },
+        { status: 'error', errorMessage: errMsg ?? 'Unknown error during sync' },
+      );
     }
   }
 
@@ -263,16 +274,12 @@ export class MixpanelCohortSyncService {
     }
 
     // Update cohort counts
-    const cohort = await this.cohortRepo.findOne({ where: { id: cohortId } });
-    if (cohort) {
-      const [resolved, unresolved] = await Promise.all([
-        this.memberRepo.count({ where: { cohortId, isResolved: true } }),
-        this.memberRepo.count({ where: { cohortId, isResolved: false } }),
-      ]);
-      cohort.resolvedCount = resolved;
-      cohort.unresolvedCount = unresolved;
-      await this.cohortRepo.save(cohort);
-    }
+    const [resolved, unresolved] = await Promise.all([
+      this.memberRepo.count({ where: { cohortId, isResolved: true } }),
+      this.memberRepo.count({ where: { cohortId, isResolved: false } }),
+    ]);
+    // Changes nothing if the cohort was deleted meanwhile (see runSync).
+    await this.cohortRepo.update({ id: cohortId }, { resolvedCount: resolved, unresolvedCount: unresolved });
 
     return { attempted: unresolvedMembers.length, resolved: resolvedCount };
   }

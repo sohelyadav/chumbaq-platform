@@ -231,7 +231,7 @@ describe('MixpanelCohortSyncService', () => {
       cohortRepo.save.mockResolvedValueOnce(newCohort);
 
       mixpanelApiService.getCohortMembers.mockResolvedValueOnce([]);
-      cohortRepo.save.mockResolvedValue(newCohort);
+      cohortRepo.findOne.mockResolvedValueOnce({ ...newCohort, status: 'synced' });
 
       const result = await service.importCohort('proj-1', 42, { awaitSync: true });
 
@@ -315,15 +315,13 @@ describe('MixpanelCohortSyncService', () => {
     it('updates cohort resolved and unresolved counts after retry', async () => {
       memberRepo.find.mockResolvedValueOnce([]);
 
-      const cohort = makeCohortEntity();
-      cohortRepo.findOne.mockResolvedValueOnce(cohort);
       memberRepo.count.mockResolvedValueOnce(3).mockResolvedValueOnce(1);
-      cohortRepo.save.mockResolvedValueOnce(cohort);
 
       await service.retryUnresolved('cohort-uuid-1');
 
-      // When there are no unresolved members the cohort save still happens
-      expect(cohortRepo.findOne).toHaveBeenCalledWith({ where: { id: 'cohort-uuid-1' } });
+      // When there are no unresolved members the counts are still written
+      expect(cohortRepo.update).toHaveBeenCalledWith({ id: 'cohort-uuid-1' }, { resolvedCount: 3, unresolvedCount: 1 });
+      expect(cohortRepo.save).not.toHaveBeenCalled();
     });
   });
 });
