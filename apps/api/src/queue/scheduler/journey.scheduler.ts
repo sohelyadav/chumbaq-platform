@@ -99,6 +99,30 @@ export class JourneyScheduler {
     private readonly suspension: ProjectSuspensionService,
   ) {}
 
+  /**
+   * The due runs one tick advances, taken in turns across projects: each project's
+   * oldest first, then each one's second, and so on, up to `MAX_RUNS_PER_TICK`. Oldest
+   * first across everyone let one tenant's backlog of runs fill every tick and delay
+   * every other tenant's journey steps without bound.
+   */
+  async selectDueRuns(dueAsOf: Date, suspended: Set<string>): Promise<JourneyRunEntity[]> {
+    const rows: Array<{ id: string }> = await this.runRepository.query(
+      `SELECT id FROM (
+         SELECT id, next_due_at,
+                row_number() OVER (PARTITION BY project_id ORDER BY next_due_at, id) AS turn
+           FROM journey_runs
+          WHERE status = 'active' AND next_due_at <= $1 AND NOT (project_id = ANY($2::uuid[]))
+       ) due
+       ORDER BY turn, next_due_at, id
+       LIMIT $3`,
+      [dueAsOf, [...suspended], MAX_RUNS_PER_TICK],
+    );
+    if (rows.length === 0) return [];
+    const order = new Map(rows.map((row, index) => [row.id, index]));
+    const runs = await this.runRepository.find({ where: { id: In(rows.map((row) => row.id)) } });
+    return runs.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  }
+
   @Cron(CronExpression.EVERY_MINUTE)
   async handleTick(): Promise<void> {
     // Enrolment first, so somebody who matched a moment ago takes their first
@@ -487,15 +511,7 @@ export class JourneyScheduler {
     // are left as they are, and reactivation moves them on by the suspension's length.
     const suspended = await this.suspension.suspendedProjectIds();
 
-    const due = await this.runRepository.find({
-      where: {
-        status: 'active',
-        nextDueAt: LessThanOrEqual(dueAsOf),
-        ...(suspended.size > 0 ? { projectId: Not(In([...suspended])) } : {}),
-      },
-      order: { nextDueAt: 'ASC' },
-      take: MAX_RUNS_PER_TICK,
-    });
+    const due = await this.selectDueRuns(dueAsOf, suspended);
 
     if (due.length === 0) return 0;
 

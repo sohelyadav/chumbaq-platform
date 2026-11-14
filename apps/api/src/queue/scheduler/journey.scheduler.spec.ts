@@ -33,9 +33,16 @@ describe('JourneyScheduler', () => {
   const journeyRepository = { find: jest.fn(), update: jest.fn() };
   const runRepository = {
     find: jest.fn(),
+    // The due-run selection (selectDueRuns): ids in turn order, then find by id.
+    query: jest.fn(),
     update: jest.fn(),
     createQueryBuilder: jest.fn(),
     manager: { query: jest.fn() },
+  };
+  /** The cut-off and suspended list the due-run selection was asked with. */
+  const selection = () => {
+    const [sql, [dueAsOf, suspended, limit]] = runRepository.query.mock.calls[0];
+    return { sql: sql as string, dueAsOf: dueAsOf as Date, suspended: suspended as string[], limit: limit as number };
   };
   const segmentRepository = { findOne: jest.fn() };
   const segmentEvaluation = {
@@ -95,6 +102,7 @@ describe('JourneyScheduler', () => {
     });
     runRepository.createQueryBuilder.mockReturnValue(qb);
     runRepository.find.mockResolvedValue([]);
+    runRepository.query.mockResolvedValue([]);
     runRepository.update.mockResolvedValue({ affected: 1 });
     journeyRepository.find.mockResolvedValue([]);
     journeyRepository.update.mockResolvedValue({ affected: 1 });
@@ -330,18 +338,21 @@ describe('JourneyScheduler', () => {
 
   describe('advancing runs', () => {
     const due = (runs: Array<Record<string, unknown>>) => {
+      runRepository.query.mockResolvedValue(runs.map((r) => ({ id: r.id })));
       runRepository.find.mockResolvedValue(runs);
     };
+
 
     it('selects only active runs whose time has come', async () => {
       await scheduler.advanceDueRuns();
 
-      const options = runRepository.find.mock.calls[0][0];
-      expect(options.where.status).toBe('active');
+      const { sql } = selection();
       // A completed, exited or failed run has no status 'active' and no
       // next_due_at, so it can never be picked up again.
-      expect(options.where.nextDueAt).toBeDefined();
-      expect(options.order).toEqual({ nextDueAt: 'ASC' });
+      expect(sql).toContain("status = 'active'");
+      expect(sql).toContain('next_due_at <= $1');
+      // In turns across projects, each one's oldest first (journey-fairness.int-spec).
+      expect(sql).toMatch(/PARTITION BY project_id ORDER BY next_due_at/);
     });
 
     it('treats a run due within the grace as due now', async () => {
@@ -352,8 +363,7 @@ describe('JourneyScheduler', () => {
       const before = Date.now();
       await scheduler.advanceDueRuns();
 
-      const { nextDueAt } = runRepository.find.mock.calls[0][0].where;
-      const cutoff = (nextDueAt.value as Date).getTime();
+      const cutoff = selection().dueAsOf.getTime();
 
       // Ahead of the wall clock, by the grace rather than by a whole tick.
       expect(cutoff).toBeGreaterThanOrEqual(before + 1000);
@@ -369,9 +379,7 @@ describe('JourneyScheduler', () => {
 
       await scheduler.advanceDueRuns();
 
-      const selectCutoff = (
-        runRepository.find.mock.calls[0][0].where.nextDueAt.value as Date
-      ).getTime();
+      const selectCutoff = selection().dueAsOf.getTime();
       const claimCall = qb.andWhere.mock.calls.find(
         ([clause]: [string]) => clause === 'next_due_at <= :now',
       );
@@ -912,6 +920,7 @@ describe('JourneyScheduler', () => {
       journeyRepository.find.mockImplementation(async (options: any) =>
         options.where.status === 'active' ? Promise.reject(new Error('db down')) : [journey()],
       );
+      runRepository.query.mockResolvedValue([{ id: run().id }]);
       runRepository.find.mockResolvedValue([run()]);
 
       await scheduler.handleTick();
@@ -926,7 +935,7 @@ describe('JourneyScheduler', () => {
     it('does not exclude anybody when nobody is suspended', async () => {
       await scheduler.advanceDueRuns();
 
-      expect(runRepository.find.mock.calls[0][0].where).not.toHaveProperty('projectId');
+      expect(selection().suspended).toEqual([]);
     });
 
     it('moves a suspended journey\'s watermark on and enrols nobody, leaving other tenants alone', async () => {
