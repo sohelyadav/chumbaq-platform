@@ -87,7 +87,10 @@ export class WhatsAppEventsService {
         // Only a provider-signed START may lift a STOP. An unsigned event
         // can come from anyone who learned the webhook URL, and must never
         // re-subscribe someone who opted out; it may only add protection.
-        await this.suppressions.remove(projectId, 'whatsapp', event.address, { onlyReason: 'unsubscribed' });
+        await this.suppressions.remove(projectId, 'whatsapp', event.address, {
+          onlyReason: 'unsubscribed',
+          saidAt: event.occurredAt,
+        });
       }
     }
 

@@ -210,7 +210,20 @@ export class SuppressionsService {
     projectId: string,
     channel: MessageChannel,
     address: string,
-    { onlyReason, requester = null }: { onlyReason?: SuppressionReason; requester?: ActivityRequester | null } = {},
+    {
+      onlyReason,
+      requester = null,
+      saidAt,
+    }: {
+      onlyReason?: SuppressionReason;
+      requester?: ActivityRequester | null;
+      /**
+       * When the person said it (a START reply's own time). The suppression is lifted
+       * only if no opt-out of the address was made or recorded after that, so a START
+       * redelivered or replayed after a later STOP does not undo the STOP.
+       */
+      saidAt?: Date;
+    } = {},
   ): Promise<boolean> {
     const normalised = normaliseAddress(channel, address);
     if (!normalised) return false;
@@ -225,6 +238,24 @@ export class SuppressionsService {
         .andWhere('channel = :channel', { channel })
         .andWhere('address = :address', { address: normalised });
       if (onlyReason) query.andWhere('reason = :reason', { reason: onlyReason });
+      if (saidAt && channel !== 'push') {
+        // Allow-listed, never caller text: the column is chosen from the channel.
+        const column = channel === 'email' ? 'email' : 'phone_e164';
+        // created_at is a timestamp without time zone, written by now() in the session's
+        // zone, so the reply's instant is put into that zone before comparing.
+        query.andWhere(`created_at <= ((:saidAt)::timestamptz AT TIME ZONE current_setting('TimeZone'))`, { saidAt }).andWhere(
+          `NOT EXISTS (
+            SELECT 1 FROM consent_events ce
+            JOIN device_identities d ON d.id = ce.device_identity_id
+            WHERE ce.project_id = :projectId
+              AND ce.channel = :channel
+              AND ce.granted = false
+              AND ce.occurred_at > :saidAt
+              AND d.project_id = :projectId
+              AND d.${column} = :address
+          )`,
+        );
+      }
       const result = await query.returning(['reason']).execute();
       const removedReasons = ((result.raw ?? []) as Array<{ reason: SuppressionReason }>).map(
         (row) => row.reason,

@@ -76,7 +76,7 @@ describe('WhatsAppEventsService', () => {
       { verified: true },
     );
     await service.ingest('proj-1', 'meta', [reply('start')], ERRORS, { signed: true });
-    expect(suppressions.remove).toHaveBeenCalledWith('proj-1', 'whatsapp', '+919876543210', { onlyReason: 'unsubscribed' });
+    expect(suppressions.remove).toHaveBeenCalledWith('proj-1', 'whatsapp', '+919876543210', { onlyReason: 'unsubscribed', saidAt: expect.any(Date) });
   });
 
   describe('unsigned (Gupshup, or no secret stored)', () => {

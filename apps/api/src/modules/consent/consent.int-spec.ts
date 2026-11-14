@@ -529,6 +529,27 @@ describe('Consent history and do-not-track (integration)', () => {
       ]);
     });
 
+    // A provider may redeliver a START, or someone may replay its signed body, after
+    // the person has since said STOP again.
+    it('does not let a START older than the latest STOP lift it', async () => {
+      const startSaidAt = new Date(Date.now() - 60_000);
+      await suppressions.suppress(INT_PROJECT_ID, 'whatsapp', [{ address: '+919800000001', reason: 'unsubscribed' }], 'meta');
+
+      expect(
+        await suppressions.remove(INT_PROJECT_ID, 'whatsapp', '+919800000001', { onlyReason: 'unsubscribed', saidAt: startSaidAt }),
+      ).toBe(false);
+      expect((await history(PHONE)).map((r: { granted: boolean }) => r.granted)).toEqual([false]);
+    });
+
+    it('lets a START sent after the STOP lift it, whatever the session time zone', async () => {
+      await suppressions.suppress(INT_PROJECT_ID, 'whatsapp', [{ address: '+919800000001', reason: 'unsubscribed' }], 'meta');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(
+        await suppressions.remove(INT_PROJECT_ID, 'whatsapp', '+919800000001', { onlyReason: 'unsubscribed', saidAt: new Date() }),
+      ).toBe(true);
+    });
+
     it('records a STOP from an unsigned webhook as unverified', async () => {
       await suppressions.suppress(
         INT_PROJECT_ID, 'whatsapp', [{ address: '+919800000001', reason: 'unsubscribed' }], 'gupshup', { verified: false },
