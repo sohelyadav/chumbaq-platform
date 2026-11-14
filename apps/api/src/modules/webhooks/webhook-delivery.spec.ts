@@ -165,6 +165,26 @@ describe('postToVettedTarget against a stalling receiver', () => {
     }
   });
 
+  // Node emits 'upgrade', never 'response', for a 101: the delivery must still end, or
+  // its in-flight slot is never given back.
+  it('settles and closes the socket when the receiver answers 101 Switching Protocols', async () => {
+    await listen((socket) => {
+      socket.once('data', () => socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n'));
+    });
+    const started = Date.now();
+    const outcome = await Promise.race([
+      postToVettedTarget(target(), send, onlyLoopback).then(
+        () => 'resolved',
+        (error: { code?: string }) => error.code,
+      ),
+      new Promise((resolve) => setTimeout(() => resolve('still pending'), send.timeoutMs + margin)),
+    ]);
+    expect(outcome).toBe('EPROTO');
+    const closed = await settled(closedAt);
+    expect(closed).not.toBeNull();
+    expect((closed as number) - started).toBeLessThanOrEqual(send.timeoutMs + margin);
+  });
+
   it('rejects and closes the socket when the receiver accepts and never sends headers', async () => {
     await listen(() => undefined);
     const started = Date.now();

@@ -88,21 +88,42 @@ export function postToVettedTarget(
       // headers ends even apart from the deadline below.
       timeout: request.timeoutMs,
     });
+    // Settles exactly once, however the request ends: the caller's in-flight slot is
+    // released only when this promise settles, so an ending that emits neither
+    // 'response' nor 'error' (a 101 upgrade, a close after destroy) must still settle.
+    let settled = false;
+    const settle = (outcome: { status: number } | Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (outcome instanceof Error) reject(outcome);
+      else resolve(outcome);
+    };
     // ETIMEDOUT, as the OS gives a connect that times out: the service cools
     // the endpoint down on it, whichever of the two gave up first.
-    const fail = (message: string) => req.destroy(Object.assign(new Error(message), { code: 'ETIMEDOUT' }));
+    const timedOut = (message: string) => Object.assign(new Error(message), { code: 'ETIMEDOUT' });
+    const fail = (message: string) => {
+      const error = timedOut(message);
+      req.destroy(error);
+      // destroy() does nothing on a request already destroyed, so do not wait for it.
+      settle(error);
+    };
     // One deadline from the start of connect until the status line and
     // headers arrive. An idle timeout alone would not do: a receiver that
     // sends one byte at a time resets it forever.
     const timer = setTimeout(() => fail(`Webhook timed out after ${request.timeoutMs}ms`), request.timeoutMs);
     req.on('timeout', () => fail(`Webhook socket idle for ${request.timeoutMs}ms`));
-    req.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
+    req.on('error', (err) => settle(err));
+    // 101 Switching Protocols: not an answer to a webhook. Node emits 'upgrade', never
+    // 'response', and leaves the socket to the listener.
+    req.on('upgrade', (res, socket) => {
+      settle(Object.assign(new Error(`Webhook receiver switched protocols (${res.statusCode})`), { code: 'EPROTO' }));
+      socket.destroy();
+      req.destroy();
     });
+    req.on('close', () => settle(new Error('Webhook request closed before a response')));
     req.on('response', (res) => {
-      clearTimeout(timer);
-      resolve({ status: res.statusCode ?? 0 });
+      settle({ status: res.statusCode ?? 0 });
       // Only the status is used. The body is dropped and the socket closed at
       // once rather than drained: draining has no time or size limit, so a
       // receiver trickling a body forever would hold the socket open, and
