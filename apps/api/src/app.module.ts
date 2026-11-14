@@ -37,6 +37,7 @@ import { WhatsAppModule } from './modules/whatsapp/whatsapp.module';
 import { PrivacyModule } from './modules/privacy/privacy.module';
 import { ProjectActivityModule } from './modules/project-activity/project-activity.module';
 import { ProjectActivityApiModule } from './modules/project-activity/project-activity-api.module';
+import { UsageModule } from './modules/usage/usage.module';
 import databaseConfig from './config/database.config';
 import jwtConfig from './config/jwt.config';
 import appConfig from './config/app.config';
@@ -118,6 +119,8 @@ import { QueueModule } from './queue/queue.module';
     PrivacyModule,
     ProjectActivityModule,
     ProjectActivityApiModule,
+    // Usage roll-up tables: registered here so dev synchronize creates them.
+    UsageModule,
     // GET /api/health: the deploy scripts wait on it after each (re)start.
     HealthModule,
     // RedirectModule must be last so /:shortCode doesn't intercept /api/* routes

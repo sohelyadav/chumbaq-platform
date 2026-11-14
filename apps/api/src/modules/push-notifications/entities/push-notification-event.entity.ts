@@ -54,6 +54,8 @@ export const CLIENT_REPORTABLE_EVENT_TYPES: PushEventType[] = [
 ];
 
 @Entity('push_notification_events')
+// Usage roll-up: devices reached in a window, per project.
+@Index('IDX_push_events_project_created', ['projectId', 'createdAt'])
 // Reporting is at-least-once: a client that retries after a dropped response,
 // or an OS that re-delivers on app restart, would otherwise inflate CTR. One
 // row per device per event type makes ingestion idempotent and keeps the

@@ -11,6 +11,8 @@ import {
 import { ProjectEntity } from '../../projects/entities/project.entity';
 
 @Entity('device_identities')
+// Usage roll-up: people first seen in a window, per project.
+@Index('IDX_device_identities_project_first_seen', ['projectId', 'firstSeenAt'])
 @Index(['projectId', 'deviceFingerprint'], { unique: true })
 @Index(['projectId', 'distinctId'])
 // Email recipient selection reads `project_id = ? AND email IS NOT NULL` and

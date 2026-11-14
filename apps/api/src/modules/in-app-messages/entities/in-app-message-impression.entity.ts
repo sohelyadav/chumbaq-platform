@@ -19,6 +19,8 @@ export type ImpressionEventType =
   | 'expired';
 
 @Entity('in_app_message_impressions')
+// Usage roll-up: impressions received in a window, per project.
+@Index('IDX_in_app_impressions_project_created', ['projectId', 'createdAt'])
 @Index(['messageId', 'deviceFingerprint'])
 @Index(['messageId', 'eventType'])
 @Index(['projectId', 'deviceFingerprint', 'createdAt'])

@@ -100,6 +100,8 @@ export const NON_TERMINAL_STATUSES: NotificationStatus[] = [
 ];
 
 @Entity('push_notification_logs')
+// Usage roll-up: campaigns that finished in a window, per project.
+@Index('IDX_push_logs_project_completed', ['projectId', 'completedAt'])
 export class PushNotificationLogEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;

@@ -15,6 +15,8 @@ import { DeviceIdentityEntity } from '../../identity/entities/device-identity.en
 // person CTE on device_identity_id, filtering event_name and timestamp — with
 // no project_id predicate on user_events, so neither index above can serve it.
 @Index(['deviceIdentityId', 'eventName', 'timestamp'])
+// Usage roll-up: events received (not client time) in a window, per project.
+@Index('IDX_user_events_project_created', ['projectId', 'createdAt'])
 @Entity('user_events')
 export class UserEventEntity {
   @PrimaryGeneratedColumn('uuid')
