@@ -16,6 +16,7 @@ import { QueueModule } from './queue/queue.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { StaffAuthModule } from './modules/staff-auth/staff-auth.module';
 import { HealthModule } from './modules/health/health.module';
+import { throttleTracker } from './common/throttle-tracker';
 
 /**
  * The admin API (`main-admin.ts`): /api/admin/*, /api/staff/auth/* and /api/health, and
@@ -62,7 +63,7 @@ import { HealthModule } from './modules/health/health.module';
         logging: false,
       }),
     }),
-    ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }]),
+    ThrottlerModule.forRoot({ throttlers: [{ ttl: 60000, limit: 100 }], getTracker: throttleTracker }),
     QueueModule,
     AdminModule,
     StaffAuthModule,

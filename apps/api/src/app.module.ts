@@ -49,6 +49,7 @@ import projectsConfig from './config/projects.config';
 import staffConfig from './config/staff.config';
 import billingConfig from './config/billing.config';
 import { QueueModule } from './queue/queue.module';
+import { throttleTracker } from './common/throttle-tracker';
 
 @Module({
   imports: [
@@ -95,12 +96,8 @@ import { QueueModule } from './queue/queue.module';
         };
       },
     }),
-    ThrottlerModule.forRoot([
-      {
-        ttl: 60000,
-        limit: 100,
-      },
-    ]),
+    // IPv6 clients count as their /64: see throttle-tracker.ts.
+    ThrottlerModule.forRoot({ throttlers: [{ ttl: 60000, limit: 100 }], getTracker: throttleTracker }),
     QueueModule,
     UsersModule,
     AuthModule,
