@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, randomInt, randomUUID } from 'crypto';
+import { connect } from 'net';
 import { Client } from 'pg';
 import type { Browser, Locator, Page, Route } from '@playwright/test';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
@@ -441,6 +442,20 @@ export async function openShortCode(code: string, ip: string): Promise<{ status:
   const response = await fetch(apiUrl(`/${code}`), { redirect: 'manual', headers: { 'User-Agent': DESKTOP_UA, 'X-Forwarded-For': ip } });
   await response.text();
   return { status: response.status, location: response.headers.get('location'), ms: Date.now() - started };
+}
+
+/** True when a TCP connection from this machine to `host:port` neither opens nor fails within `ms`. */
+export function connectHangs(host: string, port: number, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ host, port });
+    const done = (hangs: boolean) => {
+      socket.destroy();
+      resolve(hangs);
+    };
+    socket.setTimeout(ms, () => done(true));
+    socket.once('connect', () => done(false));
+    socket.once('error', () => done(false));
+  });
 }
 
 /** Clicks are written after the redirect answers: waits until the link has `expected` of them. */

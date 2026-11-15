@@ -13,6 +13,7 @@ import {
   allActivity,
   apiKeyRows,
   as,
+  connectHangs,
   createWebhook,
   identityKeyVersion,
   literalHookUrl,
@@ -135,10 +136,18 @@ test('INTEG-007 create needs a name; Cancel sends nothing', async ({ page }) => 
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
 
-  await page.waitForTimeout(300);
-  expect(posts.filter((r) => r.method === 'POST')).toEqual([]);
   await expect(page.getByText('No API keys yet. Create one to get started.', { exact: true })).toBeVisible();
   expect(await apiKeyRows(p.project.id)).toHaveLength(0);
+
+  // Positive control: a real create is seen by the same recorder, and is the only POST it saw,
+  // so nothing was sent by the Cancel or Escape above.
+  await page.getByRole('button', { name: 'Create Key' }).click();
+  await dialog.getByPlaceholder(NAME_FIELD).fill('Control key');
+  const created = page.waitForResponse((r) => new URL(r.url()).pathname.endsWith('/api-keys') && r.request().method() === 'POST');
+  await create.click();
+  expect((await created).status()).toBe(201);
+  expect(posts.filter((r) => r.method === 'POST')).toEqual([{ method: 'POST', path: `/api/projects/${p.project.id}/api-keys` }]);
+  expect(await apiKeyRows(p.project.id)).toHaveLength(1);
 });
 
 test('INTEG-008 a key name with markup is shown as text', async ({ page }) => {
@@ -434,6 +443,13 @@ test('INTEG-045 add a webhook with a host name', async () => {
   expect(response.body.data).toMatchObject({ url: 'https://example.com/hook', events: ['click'], isActive: true });
   const rows = await webhookRows(p.project.id);
   expect(rows.map((r) => r.url)).toEqual(['https://example.com/hook']);
+
+  // The name is looked up on create: a well-formed public name with no address is refused.
+  const nowhere = `https://chumbaq-e2e-${randomUUID().slice(0, 8)}.example.com/hook`;
+  const unresolved = await as(p.owner, 'POST', `/api/projects/${p.project.id}/webhooks`, { url: nowhere, events: ['click'] });
+  expect(unresolved.status).toBe(400);
+  expect(messageOf(unresolved)).toBe(PUBLIC_ADDRESS);
+  expect((await webhookRows(p.project.id)).map((r) => r.url)).toEqual(['https://example.com/hook']);
 });
 
 test('INTEG-046 copy the signing secret, and a refused copy', async ({ page, browser, baseURL }) => {
@@ -676,6 +692,8 @@ test("INTEG-067 change a webhook's URL through the API", async () => {
 });
 
 test('INTEG-077 a failing endpoint never slows the redirect or loses the click', async () => {
+  // The timings below mean something only if a connection to the endpoint hangs from here.
+  test.skip(!(await connectHangs('1.1.1.1', 81, 2500)), 'The endpoint answers quickly on this network');
   const p = await ownerWithProject();
   await createWebhook(p.owner, p.project.id, { url: 'https://1.1.1.1:81/never', events: ['click'] });
   const link = await seedShortLink(p.owner, p.project.id, 'integ-slow');
@@ -736,10 +754,17 @@ test('INTEG-083 the configure form requires every field', async ({ page }) => {
   await expect(page.getByText('Username is required', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Password is required', { exact: true })).toBeVisible();
   await expect(page.getByText('Project ID is required', { exact: true })).toBeVisible();
-
-  await page.waitForTimeout(300);
-  expect(requests).toEqual([]);
   expect(await mixpanelConfigRows(p.project.id)).toHaveLength(0);
+
+  // Positive control: with every field filled the same recorder sees the save, and it is the
+  // only request it saw, so neither refused save above sent anything.
+  await page.getByPlaceholder('Service account secret').fill(MIXPANEL_ACCOUNT.password);
+  await page.getByPlaceholder('123456').fill(MIXPANEL_ACCOUNT.projectId);
+  const saved = page.waitForResponse((r) => r.url().endsWith('/mixpanel/configure'));
+  await page.getByRole('button', { name: 'Save Configuration' }).click();
+  expect((await saved).status()).toBe(201);
+  expect(requests).toEqual([{ method: 'POST', path: `/api/projects/${p.project.id}/mixpanel/configure` }]);
+  expect(await mixpanelConfigRows(p.project.id)).toHaveLength(1);
 });
 
 test('INTEG-086 saving the same Mixpanel account again changes nothing', async () => {
@@ -810,16 +835,27 @@ test('INTEG-090 an admin can connect Mixpanel', async ({ page }) => {
   await page.getByPlaceholder('123456').fill(MIXPANEL_ACCOUNT.projectId);
   const saved = page.waitForResponse((r) => r.url().endsWith('/mixpanel/configure'));
   await page.getByRole('button', { name: 'Save Configuration' }).click();
-  expect((await saved).status()).toBe(201);
+  const response = await saved;
+  expect(response.status()).toBe(201);
+  const { data } = (await response.json()) as { data: Record<string, unknown> };
+  expect(Object.keys(data).sort()).toEqual(['id', 'isActive', 'projectId']);
+  expect(data).toMatchObject({ projectId: p.project.id, isActive: true });
   await expect(toast(page, 'Mixpanel configured successfully')).toBeVisible();
   const status = page.locator('[data-slot="card"]').filter({ hasText: 'Current Status' });
   await expect(status.getByText('Configured', { exact: true })).toBeVisible();
+  await expect(status.getByText('Active', { exact: true })).toBeVisible();
+  await expect(status.getByText('Project ID:', { exact: true }).locator('xpath=following-sibling::span[1]')).toHaveText(MIXPANEL_ACCOUNT.projectId);
   await expect(status.getByText('Service Account:', { exact: true }).locator('xpath=following-sibling::span[1]')).toHaveText(MIXPANEL_ACCOUNT.username);
 
   const [config] = await mixpanelConfigRows(p.project.id);
   expect(config).toMatchObject({ serviceAccountUsername: MIXPANEL_ACCOUNT.username, mixpanelProjectId: MIXPANEL_ACCOUNT.projectId, isActive: true });
+  expect(JSON.stringify(config)).not.toContain(MIXPANEL_ACCOUNT.password);
   const entries = await activityRows(p.project.id, 'mixpanel.configured');
   expect(entries).toHaveLength(1);
   expect(entries[0].actor_user_id).toBe(admin.userId);
+  expect(entries[0].target_label).toBe('Mixpanel');
+  expect(entries[0].details).toBeNull();
+  expect(JSON.stringify(entries[0])).not.toContain(MIXPANEL_ACCOUNT.password);
+  expect(JSON.stringify(entries[0])).not.toContain(MIXPANEL_ACCOUNT.username);
   expect((await allActivity(p.project.id)).filter((e) => e.actor_user_id === p.owner.userId && e.action === 'mixpanel.configured')).toHaveLength(0);
 });
