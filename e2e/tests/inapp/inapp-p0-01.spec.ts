@@ -13,6 +13,7 @@ import {
   dataOf,
   deliveredIds,
   detailBadge,
+  dismissToasts,
   EDITOR_DEFAULT_THEME,
   editorField,
   fingerprint,
@@ -104,6 +105,9 @@ test('INAPP-020 pause from the list', async ({ page }) => {
   expect(entries[0]).toMatchObject({ actor_user_id: p.owner.userId, target_label: 'Live promo', details: null });
 
   expect(await deliveredIds(p, device.fingerprint)).not.toContain(message.id);
+
+  await page.goto(`/projects/${p.project.id}/activity`);
+  await expect(page.getByText('paused the in-app message "Live promo"')).toBeVisible();
 });
 
 test('INAPP-025 delete a draft from the list', async ({ page }) => {
@@ -145,6 +149,9 @@ test('INAPP-025 delete a draft from the list', async ({ page }) => {
     target_label: 'Old promo',
     details: { kind: 'in_app_message' },
   });
+
+  await page.goto(`/projects/${p.project.id}/activity`);
+  await expect(page.getByText('deleted the in-app message "Old promo"')).toBeVisible();
 });
 
 test('INAPP-029 names and titles with markup show as text', async ({ page }) => {
@@ -192,6 +199,7 @@ test('INAPP-049 create a minimal campaign', async ({ page }) => {
 
   await editorField(page, 'Campaign Name').fill('Welcome modal');
   await editorField(page, 'Title *').fill('Welcome');
+  const activityBefore = (await activityRows(p.project.id)).length;
   await page.getByRole('button', { name: 'Save Campaign', exact: true }).click();
 
   await expect(toastTitled(page, 'Campaign created')).toBeVisible();
@@ -215,7 +223,8 @@ test('INAPP-049 create a minimal campaign', async ({ page }) => {
   });
   expect(stored.theme).toEqual(EDITOR_DEFAULT_THEME);
   expect((await messageRow(id))?.created_by).toBe(p.owner.userId);
-  expect(await messageActivity(p.project.id)).toEqual([]);
+  // Creating is not logged: the project's log is as long as before the save.
+  expect(await activityRows(p.project.id)).toHaveLength(activityBefore);
 
   // The editor's address was replaced, so Back goes to the list, not to /new.
   await page.goBack();
@@ -231,6 +240,7 @@ test('INAPP-053 image URL must be an http(s) URL', async ({ page }) => {
   await editorField(page, 'Title *').fill('Has a picture');
 
   const save = async (imageUrl: string) => {
+    await dismissToasts(page);
     await editorField(page, 'Image URL').fill(imageUrl);
     const answered = page.waitForResponse((r) => r.url().endsWith(MESSAGES(p.project.id)) && r.request().method() === 'POST');
     await page.getByRole('button', { name: 'Save Campaign', exact: true }).click();
@@ -247,7 +257,7 @@ test('INAPP-053 image URL must be an http(s) URL', async ({ page }) => {
     const response = await save(bad);
     expect(response.status(), bad).toBe(400);
     expect((await response.json()).message, bad).toContain(IMAGE_URL_REFUSED);
-    await expect(toastTitled(page, 'Failed to save').first()).toBeVisible();
+    await expect(toastTitled(page, 'Failed to save'), bad).toHaveCount(1);
   }
   expect(await messageRows(p.project.id)).toEqual([]);
 
@@ -267,13 +277,14 @@ test('INAPP-062 theme colour validation refuses anything else', async ({ page })
   await editorField(page, 'Title *').fill('Colourful');
 
   for (const bad of ['red', '#fff" onmouseover="alert(1)', 'red; background-image: url(//evil/pixel)', 'url(//evil/pixel)', 'hsl(0,0%,0%)']) {
+    await dismissToasts(page);
     await editorField(page, 'Background').fill(bad);
     const answered = page.waitForResponse((r) => r.url().endsWith(MESSAGES(p.project.id)) && r.request().method() === 'POST');
     await page.getByRole('button', { name: 'Save Campaign', exact: true }).click();
     const response = await answered;
     expect(response.status(), bad).toBe(400);
     expect((await response.json()).message, bad).toContain(BACKGROUND_REFUSED);
-    await expect(toastTitled(page, 'Failed to save').first()).toBeVisible();
+    await expect(toastTitled(page, 'Failed to save'), bad).toHaveCount(1);
   }
   expect(await messageRows(p.project.id)).toEqual([]);
 });
@@ -295,6 +306,7 @@ test('INAPP-094 activate on the detail page', async ({ page }) => {
   expect(await activityRows(p.project.id, 'in_app_message.activated')).toHaveLength(1);
 
   // Expected (current code): no toast, and the page keeps the old status until a reload.
+  // Nothing on the page changes to wait for, so it is given a moment to show a toast.
   await page.waitForTimeout(1000);
   await expect(toastTitled(page, 'Campaign activated')).toHaveCount(0);
   await expect(detailBadge(page, 'Detail activate').getByText('Draft', { exact: true })).toBeVisible();
@@ -388,6 +400,9 @@ test('INAPP-111 trigger to all users', async ({ page }) => {
     [entries[0].id, message.id],
   );
   expect(order.before).toBe(true);
+
+  await page.goto(`/projects/${p.project.id}/activity`);
+  await expect(page.getByText('triggered the in-app message "Flash sale"')).toBeVisible();
 });
 
 test('INAPP-120 trigger an unknown or foreign message', async () => {

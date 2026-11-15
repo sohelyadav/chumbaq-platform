@@ -406,6 +406,19 @@ export function toastTitled(page: Page, title: string): Locator {
     .filter({ has: page.locator('div.text-sm.font-semibold', { hasText: new RegExp(`^${escaped}$`) }) });
 }
 
+/**
+ * Closes every toast on screen and waits until none is left, so a toast seen afterwards
+ * was raised by what the test does next, not left over from an earlier step.
+ */
+export async function dismissToasts(page: Page): Promise<void> {
+  const toasts = page.getByRole('region', { name: /Notifications/ }).locator('li');
+  for (let tries = 0; tries < 10 && (await toasts.count()) > 0; tries++) {
+    // A toast can close on its own between the count and the click.
+    await toasts.first().locator('[toast-close]').click({ timeout: 2_000 }).catch(() => {});
+  }
+  await expect(toasts).toHaveCount(0);
+}
+
 /** The status badge beside the detail page's heading. */
 export function detailBadge(page: Page, name: string): Locator {
   return page.getByRole('heading', { level: 1, name, exact: true }).locator('..');
