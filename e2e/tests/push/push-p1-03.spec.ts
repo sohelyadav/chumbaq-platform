@@ -450,9 +450,10 @@ test('PUSH-181 send to one person by distinct id', async ({ browser, baseURL }) 
   const d6 = await addDevice(p, p.owner.ip, { distinctId: 'user-42' });
   const d7 = await addDevice(p, p.owner.ip, { distinctId: 'user-42' });
   await addDevice(p, p.owner.ip, { distinctId: 'someone-else' });
-  // The earlier device is the one seen most recently.
-  await sql(`UPDATE device_identities SET last_seen_at = now() WHERE id = $1`, [d6.id]);
-  await sql(`UPDATE device_identities SET last_seen_at = now() - interval '1 day' WHERE id = $1`, [d7.id]);
+  // The later-created device is the one seen most recently, so picking the first row
+  // found would name the wrong one.
+  await sql(`UPDATE device_identities SET last_seen_at = now() - interval '1 day' WHERE id = $1`, [d6.id]);
+  await sql(`UPDATE device_identities SET last_seen_at = now() WHERE id = $1`, [d7.id]);
   const member = await teammate(p.project.id, 'member', p.owner);
   const sendToUser = (as: Parameters<typeof call>[2], body: Record<string, unknown>) =>
     call('POST', '/api/push-notifications/send-to-user', as, { projectId: p.project.id, ...body });
@@ -465,7 +466,7 @@ test('PUSH-181 send to one person by distinct id', async ({ browser, baseURL }) 
 
   const entries = await activityRows(p.project.id, 'push.sent_to_person');
   expect(entries).toHaveLength(1);
-  expect(entries[0]).toMatchObject({ actor_user_id: p.owner.userId, target_type: 'person', target_id: d6.id });
+  expect(entries[0]).toMatchObject({ actor_user_id: p.owner.userId, target_type: 'person', target_id: d7.id });
   const logged = JSON.stringify(entries[0]);
   for (const secret of ['user-42', ...d6.tokens, ...d7.tokens]) expect(logged).not.toContain(secret);
 
@@ -498,8 +499,7 @@ test('PUSH-183 campaign not found', async ({ page }) => {
     expect([answer.status, messageOf(answer)]).toEqual([404, CAMPAIGN_NOT_FOUND]);
     expect(answer.text).not.toContain('Theirs 183');
   }
-  // Current behaviour: an id that is not a uuid reaches the database, and the answer
-  // carries no detail.
+  // Current behaviour: an id that is not a uuid gets a generic 500 with no detail.
   const malformed = await call('GET', `/api/push-notifications/campaign/${p.project.id}/abc`, p.owner);
   expect([malformed.status, messageOf(malformed)]).toEqual([500, 'Internal server error']);
   expect(malformed.text).not.toMatch(/uuid|syntax|postgres|query/i);
@@ -1100,7 +1100,9 @@ test('PUSH-218 delete a template', async ({ page }) => {
   expect(answer.status()).toBe(200);
   await expect(row).toHaveCount(0);
   await expect(templateRowOnPage(page, 'Stays')).toHaveCount(1);
-  await expect(page.getByRole('region', { name: /Notifications/ }).locator('li')).toHaveCount(0);
+  const toasts = page.getByRole('region', { name: /Notifications/ });
+  await expect(toasts).toHaveCount(1);
+  await expect(toasts.locator('li')).toHaveCount(0);
 
   expect(await templateRow(template.id)).toBeUndefined();
   const entries = await activityRows(p.project.id, 'content.deleted');
