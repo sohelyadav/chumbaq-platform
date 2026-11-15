@@ -144,7 +144,9 @@ test('TEAM-045 owner invites a member and gets the link once', async ({ page }) 
   const record = await invitationRecord(created.invitation.id);
   expect(record.token_hash).toBe(sha256Hex(token));
   for (const text of await invitationRowsAsText(project.id)) expect(text).not.toContain(token);
-  for (const file of readdirSync(LOG_DIR)) {
+  const logs = readdirSync(LOG_DIR);
+  expect(logs).toContain('api.log');
+  for (const file of logs) {
     expect(readFileSync(path.join(LOG_DIR, file), 'utf8'), file).not.toContain(token);
   }
 
@@ -419,6 +421,9 @@ test('TEAM-074 an invite dies with its inviter\'s removal', async () => {
 
   const removed = await call('DELETE', `/api/projects/${project.id}/members/${admin.userId}`, { as: owner });
   expect(removed.status).toBe(200);
+  // Ended by the removal itself, before anyone tries the link.
+  expect((await invitationRecord(invite.id)).revoked_at).not.toBeNull();
+  expect(await invitationsOf(project.id, owner)).toEqual([]);
 
   const accepted = await acceptInvite(invitee, invite.token);
   expect(accepted.status).toBe(400);
@@ -521,11 +526,16 @@ test('TEAM-079 seat refusal shown to an admin of someone else\'s project', async
   await expect(page.getByLabel('Email address')).toHaveCount(0);
   await expect(invite.getByRole('alert')).toHaveCount(0);
 
-  // The owner frees a seat elsewhere: this page has no seat count, so the refusal stands.
+  // The owner frees a seat elsewhere: this page has no seat count, so the refusal stands,
+  // even once the page has fetched the project list again (a resend refetches it).
   const removed = await call('DELETE', `/api/projects/${project.id}/members/${member.userId}`, { as: owner });
   expect(removed.status).toBe(200);
-  await page.waitForTimeout(1_000);
+  const refetched = page.waitForResponse((r) => r.request().method() === 'GET' && new URL(r.url()).pathname === '/api/projects');
+  await page.getByRole('button', { name: `Resend the invite to ${pending}` }).click();
+  expect((await refetched).status()).toBe(200);
+  await page.getByRole('dialog', { name: `Invite link for ${pending}` }).getByRole('button', { name: 'Done' }).click();
   await expect(full).toBeVisible();
+  await expect(page.getByLabel('Email address')).toHaveCount(0);
 
   // Freeing a seat from this page brings the form back.
   await page.getByRole('button', { name: `Cancel the invite to ${pending}` }).click();
@@ -673,12 +683,20 @@ test('TEAM-089 signed out, sign in, come back, accept', async ({ page, browser, 
     expect(request.postDataJSON()).toEqual({ token: invite.token });
   }
 
+  const historyBefore = await page.evaluate(() => window.history.length);
   const release = await holdRequests(page, 'POST', '/api/invitations/accept');
   await page.getByRole('button', { name: 'Accept invite' }).click();
   await expect(page.getByRole('button', { name: 'Joining...' })).toBeDisabled();
   release();
   await expect(page).toHaveURL(new RegExp(`/projects/${project.id}$`));
+  // The project replaced the invite page in history rather than adding to it.
+  expect(await page.evaluate(() => window.history.length)).toBe(historyBefore);
   expect((await projectsOf(invitee)).find((p) => p.id === project.id)?.role).toBe('member');
+  const switcher = page.locator('[data-sidebar="header"] [data-sidebar="menu-button"]');
+  await expect(switcher).toContainText(project.name);
+  await switcher.click();
+  await expect(page.getByRole('menuitem').filter({ hasText: project.name })).toContainText('Member');
+  await page.keyboard.press('Escape');
   expect(await invitationsOf(project.id, owner)).toEqual([]);
 
   const entry = (await teamActivity(project.id, owner)).find((e) => e.action === 'invite.accepted');
