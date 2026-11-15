@@ -809,3 +809,66 @@ export function widgetRowStat(scope: Locator, label: string): Locator {
     .filter({ has: scope.page().locator('p', { hasText: new RegExp(`^${escapeRegExp(label)}$`) }) })
     .locator('p.text-xl');
 }
+
+// ---- Widget editor, widget detail and item report (P1)
+
+/** Waits for the next response to `method` on a path ending with `suffix` (or matching it). */
+export function apiResponse(page: Page, method: string, suffix: string | RegExp) {
+  return page.waitForResponse((r) => {
+    const path = new URL(r.url()).pathname;
+    return r.request().method() === method && (typeof suffix === 'string' ? path.endsWith(suffix) : suffix.test(path));
+  });
+}
+
+/** True for the POST that adds an item to a widget (`/banner-categories/:id/banners`). */
+export function isItemPost(r: { url(): string; request(): { method(): string } }): boolean {
+  return /\/api\/banner-categories\/[0-9a-f-]{36}\/banners$/.test(new URL(r.url()).pathname) && r.request().method() === 'POST';
+}
+
+/** A number field by its label, inside `scope` (labels without htmlFor). */
+export function labelledNumber(scope: Locator, label: string): Locator {
+  return scope
+    .locator('label', { hasText: new RegExp(`^${escapeRegExp(label)}$`) })
+    .locator('..')
+    .getByRole('spinbutton');
+}
+
+/** Sets the time of a date-and-time picker (today's date when it had none) and closes it. */
+export async function setPickerTime(page: Page, trigger: Locator, time: string): Promise<void> {
+  await trigger.click();
+  const input = page.locator('[data-slot="popover-content"] input[type="time"]');
+  await input.fill(time);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[data-slot="popover-content"]')).toHaveCount(0);
+}
+
+/** Serves a widget `serves` times and clicks `clickOn` items, then waits for the item counters. */
+export async function widgetTraffic(
+  p: InAppProject,
+  categoryId: string,
+  serves: number,
+  clicks: Array<{ bannerId: string; ip?: string }>,
+  ips: string[] = [],
+): Promise<void> {
+  for (let i = 0; i < serves; i++) {
+    dataOf(await sdkRequest('GET', `/api/in-app-banners/serve/${categoryId}`, { apiKey: p.sdkKey, ip: ips[i] }));
+  }
+  for (const click of clicks) {
+    dataOf(await sdkRequest('POST', `/api/in-app-banners/${click.bannerId}/click`, { apiKey: p.sdkKey, ip: click.ip }));
+  }
+}
+
+/** Waits for a widget item's denormalised impression and click counters. */
+export async function waitForItemCounters(bannerId: string, impressions: number, clicks: number): Promise<void> {
+  await expect
+    .poll(async () => {
+      const row = await widgetItemRow(bannerId);
+      return [Number(row?.impressions), Number(row?.clicks)];
+    })
+    .toEqual([impressions, clicks]);
+}
+
+/** The item titles of a multi-item widget's detail page, in the order shown. */
+export function itemTitlesShown(page: Page): Locator {
+  return page.getByRole('tabpanel').locator('[data-slot="card"] p.font-medium.truncate');
+}
