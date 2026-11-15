@@ -220,6 +220,7 @@ export interface PhonePerson {
   smsOptIn?: boolean;
   whatsappOptIn?: boolean;
   firstName?: string;
+  traits?: Record<string, unknown>;
 }
 
 /** One device through the SDK's identify route; answers its device identity id. */
@@ -680,4 +681,72 @@ export function campaignRow(page: Page, title: string): Locator {
 export async function activityOf(projectId: string, action: string): Promise<Array<{ actor: string | null; details: any }>> {
   const rows = await activityRows(projectId, action);
   return rows.map((row) => ({ actor: row.actor_user_id, details: row.details }));
+}
+
+// ---- P1: SMS composer, WhatsApp page and provider settings
+
+/** A live segment of the people whose trait `group` equals `value`, through the API. */
+export async function traitSegment(as: Caller, projectId: string, value: string, name = `smswa-${value}-${randomBytes(3).toString('hex')}`): Promise<{ id: string; name: string }> {
+  const created = dataOf(
+    await call('POST', `/api/projects/${projectId}/segments`, as, {
+      name,
+      definition: { type: 'group', operator: 'and', children: [{ type: 'attribute', field: 'traits.group', op: 'eq', value }] },
+      evaluationMode: 'live',
+    }),
+  );
+  return { id: created.id, name };
+}
+
+/** Opens the SMS composer and waits for the project's SMS settings to have loaded. */
+export async function openSmsComposer(page: Page, projectId: string, sender = DEFAULT_SENDER): Promise<void> {
+  await page.goto(`/projects/${projectId}/sms/new`);
+  await expect(page.getByRole('heading', { name: 'New text', exact: true })).toBeVisible();
+  await expect(card(page, 'Preview').getByText(`From ${sender}. Tokens are filled in per person.`, { exact: true })).toBeVisible();
+}
+
+/** The segment counter under a text box (`scope`: the Message card or an A/B arm). */
+export function segmentMeter(scope: Locator): Locator {
+  return scope.locator('p').filter({ hasText: /left in this segment/ });
+}
+
+/** The text bubble of the SMS composer's Preview card. */
+export function smsBubble(page: Page): Locator {
+  return card(page, 'Preview').locator('div.whitespace-pre-wrap');
+}
+
+/** One A/B arm box of the SMS composer, by its key. */
+export function armBox(page: Page, key: string): Locator {
+  return card(page, 'A/B test')
+    .locator('div.rounded-md.border')
+    .filter({ has: page.getByText(`Arm ${key}`, { exact: true }) });
+}
+
+/** The switch beside a label of the composer's When or A/B card (labels have no htmlFor). */
+export function labelledSwitch(page: Page, label: string): Locator {
+  return page.getByText(label, { exact: true }).locator('xpath=ancestor::div[contains(@class,"justify-between")][1]').getByRole('switch');
+}
+
+/** A toast by title and description (several toasts can show at once). */
+export function toastWith(page: Page, title: string, description: string): Locator {
+  return toastTitled(page, title).filter({ hasText: description });
+}
+
+/** Records the JSON bodies the page posts to URLs matching `url`. */
+export function recordBodies(page: Page, url: RegExp): Array<Record<string, unknown>> {
+  const seen: Array<Record<string, unknown>> = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && url.test(request.url())) seen.push((request.postDataJSON() ?? {}) as Record<string, unknown>);
+  });
+  return seen;
+}
+
+/** A tab of the WhatsApp Provider card by the provider's label. */
+export function waProviderTab(page: Page, label: string): Locator {
+  return card(page, 'Provider').getByRole('tab', { name: new RegExp(`^${label}`) });
+}
+
+/** The project's whatsapp credential rows (provider names), oldest first. */
+export async function credentialProviders(projectId: string): Promise<string[]> {
+  const rows = await sql<{ provider: string }>(`SELECT provider FROM push_channel_credentials WHERE project_id = $1 ORDER BY created_at`, [projectId]);
+  return rows.map((row) => row.provider);
 }
