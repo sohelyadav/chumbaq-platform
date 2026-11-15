@@ -626,3 +626,147 @@ export function jwtClaims(token: string): Record<string, any> {
 export function runStaffKey(): Buffer {
   return Buffer.from(hkdfSync('sha256', runSecrets().jwtSecret, 'chumbaq-staff-session', 'staff-access-token-v1', 32));
 }
+
+// ---- P1 chunk 1: Redis keys, registrations in the page, CLIs, alerts
+
+/** Deletes Redis keys (a handle or a challenge running out). Answers how many existed. */
+export function redisDel(...keys: string[]): Promise<number> {
+  return withRedis((redis) => redis.del(...keys));
+}
+
+export function redisExists(key: string): Promise<number> {
+  return withRedis((redis) => redis.exists(key));
+}
+
+/** The Redis key of a sign-in handle (`PreAuthService`). */
+export function preAuthKey(handle: string): string {
+  return `chumbaq:preauth:${createHash('sha256').update(handle).digest('hex')}`;
+}
+
+/** The Redis key of a WebAuthn challenge: `staff-passwordless` by ceremony id, `staff-register` by session id, and so on. */
+export function challengeKey(ceremony: string, id: string): string {
+  return `chumbaq:webauthn:${ceremony}:${createHash('sha256').update(id).digest('hex')}`;
+}
+
+/**
+ * A registration (RegistrationResponseJSON) from the tab's virtual authenticator for
+ * options the API gave, made by navigator.credentials.create in the page's own origin,
+ * as @simplewebauthn/browser would. The origin is whichever app the page is on.
+ */
+export async function browserAttestation(page: Page, options: any): Promise<any> {
+  return page.evaluate(async (o) => {
+    const fromB64u = (value: string) => {
+      const b64 = value.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+      return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0)).buffer;
+    };
+    const toB64u = (buffer: ArrayBuffer) =>
+      btoa(String.fromCharCode(...new Uint8Array(buffer))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const credential = (await navigator.credentials.create({
+      publicKey: {
+        challenge: fromB64u(o.challenge),
+        rp: o.rp,
+        user: { id: fromB64u(o.user.id), name: o.user.name, displayName: o.user.displayName },
+        pubKeyCredParams: o.pubKeyCredParams,
+        timeout: o.timeout,
+        attestation: o.attestation,
+        authenticatorSelection: o.authenticatorSelection,
+        excludeCredentials: (o.excludeCredentials ?? []).map((c: { id: string; transports?: string[] }) => ({
+          type: 'public-key' as const,
+          id: fromB64u(c.id),
+          transports: c.transports as AuthenticatorTransport[] | undefined,
+        })),
+      },
+    })) as PublicKeyCredential;
+    const response = credential.response as AuthenticatorAttestationResponse;
+    return {
+      id: credential.id,
+      rawId: toB64u(credential.rawId),
+      type: credential.type,
+      authenticatorAttachment: credential.authenticatorAttachment ?? undefined,
+      clientExtensionResults: credential.getClientExtensionResults(),
+      response: {
+        clientDataJSON: toB64u(response.clientDataJSON),
+        attestationObject: toB64u(response.attestationObject),
+        transports: response.getTransports ? response.getTransports() : [],
+      },
+    };
+  }, options);
+}
+
+export interface CliRun {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+/** `npm run <script> -- <args>` from apps/api against the lane's database; never throws on a failing exit. */
+export async function runApiCli(script: string, args: string[]): Promise<CliRun> {
+  try {
+    const { stdout, stderr } = await execFileAsync('npm', ['run', script, '--', ...args], {
+      cwd: path.join(REPO_ROOT, 'apps/api'),
+      env: process.env,
+      timeout: 120_000,
+    });
+    return { exitCode: 0, stdout, stderr };
+  } catch (error) {
+    const failed = error as { code?: number; stdout?: string; stderr?: string };
+    return { exitCode: typeof failed.code === 'number' ? failed.code : 1, stdout: failed.stdout ?? '', stderr: failed.stderr ?? '' };
+  }
+}
+
+/** auth_events rows sent from one client address since `since`. */
+export function authEventsFromIp(
+  ip: string,
+  since: Date,
+): Promise<Array<{ type: string; reason: string | null; user_id: string | null; session_id: string | null }>> {
+  return sql(
+    `SELECT type, reason, user_id, session_id FROM auth_events WHERE ip_address = $1 AND created_at >= $2 ORDER BY created_at`,
+    [ip, since],
+  );
+}
+
+export interface AlertRow {
+  kind: string;
+  dedupe_key: string;
+  count: number;
+  details: Record<string, unknown>;
+}
+
+/** `staff.new_device` alerts for one user (dedupe key `<userId>:<device>`). */
+export function newDeviceAlerts(userId: string): Promise<AlertRow[]> {
+  return sql<AlertRow>(
+    `SELECT kind, dedupe_key, count, details FROM security_alerts
+      WHERE kind = 'staff.new_device' AND dedupe_key LIKE $1 ORDER BY first_at`,
+    [`${userId}:%`],
+  );
+}
+
+/**
+ * A passkey-first staff sign-in through the admin API with a chosen User-Agent (the
+ * device the new-device check compares), the tab's authenticator answering.
+ */
+export async function staffPasskeySignInAs(page: Page, userAgent: string, ip = newClientIp()): Promise<StaffSignedIn> {
+  const started = await staffApi('POST', '/api/staff/auth/passkey/options', {}, { ip, headers: { 'User-Agent': userAgent } });
+  if (started.status !== 200) throw new Error(`passkey/options answered ${started.status}`);
+  const response = await browserAssertion(page, started.data.options);
+  const verified = await staffApi(
+    'POST',
+    '/api/staff/auth/passkey/verify',
+    { ceremonyId: started.data.ceremonyId, response },
+    { ip, headers: { 'User-Agent': userAgent } },
+  );
+  if (verified.status !== 200) throw new Error(`passkey/verify answered ${verified.status}: ${JSON.stringify(verified.body)}`);
+  return { accessToken: verified.data.accessToken, session: verified.data.session, cookie: staffCookiePair(verified.setCookies) };
+}
+
+/**
+ * A staff passkey added through the admin API by an enrolment session's token, the tab's
+ * authenticator making the key (the page must be on the admin app).
+ */
+export async function enrolPasskeyByApi(page: Page, token: string, name = 'E2E staff key', ip = newClientIp()): Promise<StaffResponse> {
+  const options = await staffApi('POST', '/api/staff/auth/passkeys/options', {}, { token, ip });
+  if (options.status !== 200) throw new Error(`passkeys/options answered ${options.status}: ${JSON.stringify(options.body)}`);
+  const response = await browserAttestation(page, options.data.options);
+  return staffApi('POST', '/api/staff/auth/passkeys', { response, name }, { token, ip });
+}
