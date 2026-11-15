@@ -1,10 +1,12 @@
 import { createHmac, randomBytes, randomInt, randomUUID } from 'crypto';
+import { readFileSync } from 'fs';
+import path from 'path';
 import { expect, type Browser, type Locator, type Page } from '@playwright/test';
 import { Client } from 'pg';
 import { adminApi, enrolAndSignInStaff } from '../admin';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
 import { newPersonContext } from '../fixtures';
-import { assertE2eDatabase, stackEnv } from '../stack';
+import { assertE2eDatabase, LOG_DIR, stackEnv } from '../stack';
 
 /**
  * Helpers for the in-app message specs (INAPP): projects with an SDK key, messages
@@ -871,4 +873,77 @@ export async function waitForItemCounters(bannerId: string, impressions: number,
 /** The item titles of a multi-item widget's detail page, in the order shown. */
 export function itemTitlesShown(page: Page): Locator {
   return page.getByRole('tabpanel').locator('[data-slot="card"] p.font-medium.truncate');
+}
+
+// ---- Review round: counting, delivery, trigger and widget edge cases (P1)
+
+/** The customer API's log so far (the harness writes each process's output to a file). */
+export function apiLogText(): string {
+  try {
+    return readFileSync(path.join(LOG_DIR, 'api.log'), 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+/** An SDK request with extra headers (a Referer, a user agent), answering status and body. */
+export async function sdkRequestWithHeaders(
+  method: string,
+  urlPath: string,
+  options: { apiKey: string; ip: string; headers: Record<string, string> },
+): Promise<RawResponse> {
+  const response = await fetch(apiUrl(urlPath), {
+    method,
+    headers: { 'X-Forwarded-For': options.ip, 'X-API-Key': options.apiKey, ...options.headers },
+  });
+  const text = await response.text();
+  let parsed: any = text;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    // Not JSON: keep the text.
+  }
+  return { status: response.status, text, body: parsed };
+}
+
+/** `count` device rows written straight to the table, each with its own fingerprint. */
+export async function insertDevices(projectId: string, count: number): Promise<string[]> {
+  const prefix = `bulk-${randomBytes(4).toString('hex')}`;
+  const rows = await sql<{ device_fingerprint: string }>(
+    `INSERT INTO device_identities (project_id, device_fingerprint, platform, first_seen_at, last_seen_at)
+     SELECT $1, $2 || '-' || g, 'ios', now(), now() FROM generate_series(1, $3::int) g
+     RETURNING device_fingerprint`,
+    [projectId, prefix, count],
+  );
+  return rows.map((row) => row.device_fingerprint);
+}
+
+/**
+ * Empties a date-and-time picker that holds a date: opens it and clicks the selected
+ * day, which a single-date calendar takes as clearing it. The calendar opens on the
+ * current month, so the stored date has to be in it.
+ */
+export async function clearPickedDate(page: Page, trigger: Locator): Promise<void> {
+  await trigger.click();
+  const popover = page.locator('[data-slot="popover-content"]');
+  await popover.locator('button[data-selected-single="true"]').click();
+  await page.keyboard.press('Escape');
+  await expect(popover).toHaveCount(0);
+}
+
+/** Answers every request `matches` picks with a 500, and counts them. */
+export async function failRequests(page: Page, matches: (method: string, pathname: string) => boolean): Promise<string[]> {
+  const failed: string[] = [];
+  await page.route('**/api/**', async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (!matches(request.method(), pathname)) return route.fallback();
+    failed.push(`${request.method()} ${pathname}`);
+    await route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ statusCode: 500, message: 'Internal server error' }),
+    });
+  });
+  return failed;
 }
