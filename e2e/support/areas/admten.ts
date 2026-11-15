@@ -1,9 +1,12 @@
+import { execFile } from 'child_process';
 import { createHash } from 'crypto';
-import type { Page } from '@playwright/test';
+import path from 'path';
+import { promisify } from 'util';
+import { expect, type Page } from '@playwright/test';
 import { Client } from 'pg';
 import { api, apiUrl, createAccount, type Account } from '../api';
-import { enrolAndSignInStaff } from '../admin';
-import { assertE2eDatabase, stackEnv } from '../stack';
+import { adminUrl, enrolAndSignInStaff } from '../admin';
+import { assertE2eDatabase, REPO_ROOT, stackEnv } from '../stack';
 
 /**
  * Helpers for the admin tenant specs (ADMTEN): staff set-up, raw admin API requests,
@@ -392,4 +395,168 @@ export function parseCsv(text: string): string[][] {
 /** The raw text of each record (line) of a CSV whose cells hold no line breaks. */
 export function csvLines(text: string): string[] {
   return text.split('\r\n').filter((line, index, all) => !(index === all.length - 1 && line === ''));
+}
+
+// ---- Staff sessions (view-as chunk)
+
+const runCli = promisify(execFile);
+
+/**
+ * Takes super admin away the real way, with the CLI from apps/api against the lane's
+ * database (as `grantSuperAdmin` in support/admin.ts grants it).
+ */
+export async function revokeSuperAdminCli(email: string): Promise<void> {
+  await runCli('npm', ['run', 'admin:revoke', '--', email], {
+    cwd: path.join(REPO_ROOT, 'apps/api'),
+    env: process.env,
+    timeout: 120_000,
+  });
+}
+
+/**
+ * A fresh staff passkey sign-in in a tab whose virtual authenticator already holds the
+ * staff member's passkey (after `signedInStaff` there and a sign-out). Answers the new
+ * staff access token.
+ */
+export async function staffPasskeySignIn(page: Page): Promise<string> {
+  await page.goto(adminUrl('/sign-in'));
+  const [verified] = await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith('/api/staff/auth/passkey/verify')),
+    page.getByRole('button', { name: 'Sign in with a passkey' }).click(),
+  ]);
+  if (!verified.ok()) throw new Error(`Staff passkey sign-in answered ${verified.status()}`);
+  return ((await verified.json()) as { data: { accessToken: string } }).data.accessToken;
+}
+
+/**
+ * Refreshes the staff session with the tab's cookie, as the admin app does on a page
+ * load, and answers the new access token (it carries the session's sign-in time).
+ */
+export async function refreshStaffToken(page: Page): Promise<string> {
+  const response = await page.request.post(adminUrl('/api/staff/auth/session/refresh'), {
+    headers: { 'X-Chumbaq-Client': 'admin' },
+  });
+  if (!response.ok()) throw new Error(`Staff refresh answered ${response.status()}: ${await response.text()}`);
+  return ((await response.json()) as { data: { accessToken: string } }).data.accessToken;
+}
+
+// ---- Admin app and customer app pages (view-as chunk)
+
+/** Opens a tenant's page in the admin app and waits for its header. */
+export async function openTenantPage(page: Page, tenant: Pick<Account, 'userId' | 'email'>): Promise<void> {
+  await page.goto(adminUrl(`/tenants/${tenant.userId}`));
+  await expect(page.getByText(tenant.email, { exact: true }).first()).toBeVisible();
+}
+
+/**
+ * View-as from the tenant page through to the customer app's new tab, which has landed
+ * on /projects with the banner.
+ */
+export async function openViewAsTab(page: Page, tenant: Account, reason = 'E2E: checking the view-as session'): Promise<Page> {
+  await openTenantPage(page, tenant);
+  await page.getByRole('button', { name: 'View as tenant' }).click();
+  const start = page.getByRole('dialog', { name: 'View as this tenant?' });
+  await start.getByLabel('Reason').fill(reason);
+  await start.getByRole('button', { name: 'Start read-only session' }).click();
+  const ready = page.getByRole('dialog', { name: `View as ${tenant.email}` });
+  const [viewAs] = await Promise.all([
+    page.context().waitForEvent('page'),
+    ready.getByRole('link', { name: 'Open view-as' }).click(),
+  ]);
+  await expect(viewAs).toHaveURL(/\/projects$/);
+  await expect(viewAsBanner(viewAs)).toBeVisible();
+  return viewAs;
+}
+
+export function viewAsBanner(page: Page) {
+  return page.getByRole('region', { name: 'Impersonation session' });
+}
+
+/** The tab's stored view-as record (sessionStorage, customer app origin), parsed. */
+export async function storedViewAs(page: Page): Promise<Record<string, unknown> | null> {
+  const raw = await page.evaluate(() => sessionStorage.getItem('chumbaq_impersonation'));
+  return raw === null ? null : (JSON.parse(raw) as Record<string, unknown>);
+}
+
+/** A toast in the customer app's notifications region, by its title. */
+export function customerToast(page: Page, title: string) {
+  return page
+    .getByRole('region', { name: /^Notifications/ })
+    .getByRole('listitem')
+    .filter({ has: page.getByText(title, { exact: true }) });
+}
+
+/** The link detail page's actions menu button (an icon button beside the tabs). */
+export function linkActionsButton(page: Page) {
+  return page.getByRole('tablist').locator('xpath=..').locator('button[aria-haspopup="menu"]');
+}
+
+/**
+ * Records the status and message of every API answer the tab receives with a status of
+ * 400 or more, read on the way in (a view-as tab navigates away as soon as a refusal
+ * arrives, so its body cannot be read afterwards).
+ */
+export async function recordRefusals(page: Page): Promise<{ url: string; status: number; message: unknown }[]> {
+  const refusals: { url: string; status: number; message: unknown }[] = [];
+  await page.route('**/api/**', async (route) => {
+    const response = await route.fetch();
+    if (response.status() >= 400) {
+      let message: unknown = null;
+      try {
+        message = ((await response.json()) as { message?: unknown }).message;
+      } catch {
+        message = null;
+      }
+      refusals.push({ url: route.request().url(), status: response.status(), message });
+    }
+    await route.fulfill({ response });
+  });
+  return refusals;
+}
+
+// ---- Factor resets (view-as chunk)
+
+export interface PendingResetSeed {
+  userId: string;
+  requestedBy: { userId: string; email: string };
+  reason?: string;
+  noticeSent?: boolean;
+  verificationMethod?: string | null;
+  verificationNotes?: string | null;
+}
+
+/**
+ * A pending factor reset as a request leaves it once its warning has gone (or, with
+ * `noticeSent: false`, before), 72 hours ahead. Answers the row id.
+ */
+export async function seedPendingFactorReset(seed: PendingResetSeed): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO factor_resets
+       (user_id, status, requested_by_id, requested_by_email, reason, execute_after, notice_sent_at,
+        verification_method, verification_notes)
+     VALUES ($1, 'pending', $2, $3, $4, now() + interval '72 hours', CASE WHEN $5 THEN now() ELSE NULL END, $6, $7)
+     RETURNING id`,
+    [
+      seed.userId,
+      seed.requestedBy.userId,
+      seed.requestedBy.email,
+      seed.reason ?? 'E2E: owner lost their phone and recovery codes',
+      seed.noticeSent ?? true,
+      seed.verificationMethod === undefined ? 'video_call' : seed.verificationMethod,
+      seed.verificationNotes === undefined ? 'E2E: saw the owner on a video call' : seed.verificationNotes,
+    ],
+  );
+  return row.id;
+}
+
+export async function factorResetRows(userId: string) {
+  return sql<{
+    id: string;
+    status: string;
+    cancelled_at: Date | null;
+    cancelled_by: string | null;
+    requested_by_id: string | null;
+  }>(`SELECT id, status, cancelled_at, cancelled_by, requested_by_id FROM factor_resets WHERE user_id = $1 ORDER BY requested_at`, [
+    userId,
+  ]);
 }
