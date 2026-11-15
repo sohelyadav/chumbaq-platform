@@ -374,17 +374,20 @@ test('AUTH-119 suspension while signed in signs the browser out', async ({ page,
   await other.context.close();
 });
 
-test('AUTH-120 reaching the 30-day session limit', async ({ page, clientIp }) => {
-  test.fail(true, 'AUTH-120');
-  test.info().annotations.push({ type: 'issue', description: 'AUTH-120' });
-  const account = await createAccount(clientIp, 'auth120', 'Lena Limit');
+/** Signs in, moves the session's start past the 30-day limit, and reloads. */
+async function pastSessionLimit(page: Page, clientIp: string, label: string) {
+  const account = await createAccount(clientIp, label, 'Lena Limit');
   const since = await dbNow();
   await signIn(page, account);
   const [session] = await sessionsSince(account.userId, since);
   await sql(`UPDATE auth_sessions SET created_at = now() - interval '31 days' WHERE id = $1`, [session.id]);
-
   const refreshes = await captureResponses(page, '/api/auth/refresh');
   await page.reload();
+  return { account, since, session, refreshes };
+}
+
+test('AUTH-120 reaching the 30-day session limit ends the session', async ({ page, clientIp }) => {
+  const { account, since, session, refreshes } = await pastSessionLimit(page, clientIp, 'auth120');
   await expect(page).toHaveURL(/\/login\?sessionLimit=/);
   await expect(page.getByRole('heading', { name: 'Login to your account' })).toBeVisible();
   expect(refreshes).toHaveLength(1);
@@ -397,12 +400,16 @@ test('AUTH-120 reaching the 30-day session limit', async ({ page, clientIp }) =>
   );
   const notes = await page.evaluate(() => [localStorage.getItem('chumbaq_signed_in'), localStorage.getItem('chumbaq_session_limit')]);
   expect(notes).toEqual([null, null]);
+  expect(await refreshCookie(page)).toBeUndefined();
+});
 
-  // Last, so everything above is checked whatever the notice says.
-  await expect(page).toHaveURL(/\/login\?sessionLimit=30-day$/, { timeout: 2_000 });
+test('AUTH-120 the sign-in page names the 30-day limit', async ({ page, clientIp }) => {
+  test.fail(true, 'AUTH-120');
+  test.info().annotations.push({ type: 'issue', description: 'AUTH-120' });
+  await pastSessionLimit(page, clientIp, 'auth120-label');
+  await expect(page).toHaveURL(/\/login\?sessionLimit=30-day$/);
   await expect(page.getByRole('status')).toHaveText(
     'You were signed out because your session reached its 30-day limit. Sign in again to continue.',
-    { timeout: 2_000 },
   );
 });
 
@@ -470,10 +477,13 @@ test('AUTH-129 logout-all ends every session', async ({ page, clientIp }) => {
   expect((await authEventsFor(account.email, since)).map((e) => e.type)).toContain('logout.all');
 
   // B, the open browser: its next request fails, the refresh too, and it is sent to sign in.
+  const projectCalls = await captureResponses(page, `/api/projects/${project.id}*`);
   const refresh = page.waitForResponse(isApi('/api/auth/refresh'));
   await page.getByText(project.name, { exact: true }).click();
   expect((await refresh).status()).toBe(401);
   await expect(page).toHaveURL(/\/login$/);
+  expect(projectCalls.length).toBeGreaterThan(0);
+  expect(projectCalls[0].status).toBe(401);
   await expect(page.getByRole('heading', { name: 'Login to your account' })).toBeVisible();
 });
 
@@ -545,6 +555,7 @@ test('AUTH-133 opening a verify link does not confirm on its own', async ({ page
 
   await page.goto(`/verify-email#token=${token}`);
   await expect(page.getByRole('button', { name: 'Confirm email address' })).toBeVisible();
+  // Proving that nothing is sent needs a wait with nothing to poll for: the case's 5 seconds.
   await page.waitForTimeout(5_000);
   expect(verifies).toEqual([]);
   expect((await userState(account.userId)).email_verified_at).toBeNull();
