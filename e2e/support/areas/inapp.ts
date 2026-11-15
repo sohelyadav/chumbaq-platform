@@ -783,3 +783,29 @@ export function updatePatched(page: Page, projectId: string, id: string) {
     (r) => r.url().endsWith(`/api/projects/${projectId}/in-app-messages/${id}`) && r.request().method() === 'PATCH',
   );
 }
+
+// ---- SDK check and events, widgets list (P1)
+
+/** The ids `POST /api/messages/check` delivers for a device with this context (throws unless 2xx). */
+export async function deliveredIdsWith(p: InAppProject, deviceFingerprint: string, context: Record<string, unknown>): Promise<string[]> {
+  const result = dataOf<{ messages: Array<{ id: string }> }>(await checkMessages(p, deviceFingerprint, { context }));
+  return result.messages.map((m) => m.id);
+}
+
+/** Waits for a message's three denormalised counters (updated after the event route answers). */
+export async function waitForAllCounters(messageId: string, impressions: number, clicks: number, dismissals: number): Promise<void> {
+  await expect
+    .poll(async () => {
+      const row = await messageRow(messageId);
+      return [Number(row?.total_impressions), Number(row?.total_clicks), Number(row?.total_dismissals)];
+    })
+    .toEqual([impressions, clicks, dismissals]);
+}
+
+/** The value of one of an expanded widgets-list row's stat cards, by its label. */
+export function widgetRowStat(scope: Locator, label: string): Locator {
+  return scope
+    .locator('div.rounded-lg.border')
+    .filter({ has: scope.page().locator('p', { hasText: new RegExp(`^${escapeRegExp(label)}$`) }) })
+    .locator('p.text-xl');
+}
