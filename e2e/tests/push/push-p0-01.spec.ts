@@ -87,6 +87,7 @@ test('PUSH-020 campaign copy is shown as text, never as HTML', async ({ page }) 
   await expect(page).toHaveURL(new RegExp(`/push-notifications/${sent.id}$`));
   await expect(page.getByRole('heading', { level: 1, name: title, exact: true })).toBeVisible();
   await expect(page.locator('img[src="x"]')).toHaveCount(0);
+  await expect(page.locator('main b', { hasText: 'bold' })).toHaveCount(0);
   expect(dialogs).toEqual([]);
 });
 
@@ -503,7 +504,11 @@ test('PUSH-137 start an experiment', async ({ page }) => {
   expect(children.length).toBeGreaterThan(0);
   const control: string[] = (await campaignRow(parentId))!.control_device_ids;
   const armed = children.flatMap((child) => child.target_device_ids as string[]);
-  for (const child of children) expect(['A', 'B']).toContain(child.variant_key);
+  const titles: Record<string, string> = { A: 'Free shipping today', B: 'Twenty percent off' };
+  for (const child of children) {
+    expect(['A', 'B']).toContain(child.variant_key);
+    expect(child.title).toBe(titles[child.variant_key]);
+  }
   expect(new Set(children.map((c) => c.variant_key)).size).toBe(children.length);
   expect(new Set(armed).size).toBe(armed.length);
   expect(armed.filter((id) => control.includes(id))).toEqual([]);
@@ -558,7 +563,7 @@ test('PUSH-169 send API: configuration and audience errors', async () => {
   expect((await campaignRows(other.project.id)).length).toBe(0);
 });
 
-test('PUSH-176 send while the billing owner is suspended', async () => {
+test('PUSH-176 send while the billing owner is suspended', async ({ page }) => {
   test.setTimeout(300_000);
   const p = await pushProject('push-176', { fcm: true });
   const admin = await teammate(p.project.id, 'admin', p.owner);
@@ -580,12 +585,25 @@ test('PUSH-176 send while the billing owner is suspended', async () => {
   await sql(`UPDATE push_notification_logs SET scheduled_at = date_trunc('milliseconds', now() - interval '1 minute') WHERE id = ANY($1)`, [
     [due.id, series.id],
   ]);
-  const queued = await call('POST', '/api/push-notifications/send', admin, { projectId: p.project.id, title: 'Sent while suspended' });
-  expect(queued.status).toBe(201);
-  expect(dataOf(queued).status).toBe('queued');
+  // The admin composes and sends now: the API accepts it, the worker stops it.
+  await signIn(page, admin);
+  await page.goto(`/projects/${p.project.id}/push-notifications/new`);
+  await expect(reachFigure(page)).toHaveText('1');
+  await page.getByRole('button', { name: 'Next' }).click();
+  await field(page, 'Title *').getByRole('textbox').fill('Sent while suspended');
+  await page.getByRole('button', { name: 'Next' }).click();
+  await page.getByRole('button', { name: 'Next' }).click();
+  const [sent] = await Promise.all([
+    page.waitForResponse((r) => r.url().endsWith('/api/push-notifications/send')),
+    page.getByRole('button', { name: 'Send campaign' }).click(),
+  ]);
+  expect(sent.status()).toBe(201);
+  const queued = (await sent.json()).data as { id: string; status: string };
+  expect(queued.status).toBe('queued');
+  await expect(toastTitled(page, 'Campaign queued')).toContainText('Sending to 1 device(s).');
 
-  await expect.poll(async () => (await campaignRow(dataOf(queued).id))?.status, { timeout: 60_000 }).toBe('failed');
-  expect((await campaignRow(dataOf(queued).id))?.error_message).toBe(STOPPED_BY_SUSPENSION);
+  await expect.poll(async () => (await campaignRow(queued.id))?.status, { timeout: 60_000 }).toBe('failed');
+  expect((await campaignRow(queued.id))?.error_message).toBe(STOPPED_BY_SUSPENSION);
   await expect.poll(async () => (await campaignRow(due.id))?.status, { timeout: 100_000, intervals: [2_000] }).toBe('cancelled');
   expect((await campaignRow(due.id))?.error_message).toBe(MISSED_DURING_SUSPENSION);
   const template = await campaignRow(series.id);
@@ -599,7 +617,7 @@ test('PUSH-176 send while the billing owner is suspended', async () => {
   await reactivateAccount(p.owner.userId);
   await sql(`UPDATE push_notification_logs SET scheduled_at = date_trunc('milliseconds', now() - interval '1 minute') WHERE id = $1`, [series.id]);
   await expect.poll(async () => (await occurrences()).length, { timeout: 100_000, intervals: [2_000] }).toBe(1);
-  expect((await campaignRow(dataOf(queued).id))?.status).toBe('failed');
+  expect((await campaignRow(queued.id))?.status).toBe('failed');
   expect((await campaignRow(due.id))?.status).toBe('cancelled');
 });
 
