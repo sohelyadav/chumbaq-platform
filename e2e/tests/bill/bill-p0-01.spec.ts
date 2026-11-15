@@ -222,6 +222,19 @@ test('BILL-010 view-as: the page refuses and shows staff where billing is', asyn
 
 test('BILL-011 view-as: every customer billing route answers 403, reads included', async ({ clientIp }) => {
   const tenant = await createAccount(clientIp, 'bill-011', 'Tara Tenant');
+  // An account with details and a live subscription, so every write would have something to change.
+  const active = await activeOn(tenant, clientIp, G);
+  const snapshot = async () => ({
+    account: await query(`SELECT to_jsonb(b)::text AS row FROM billing_accounts b WHERE user_id = $1`, [tenant.userId]),
+    subscriptions: await query(`SELECT to_jsonb(s)::text AS row FROM billing_subscriptions s WHERE user_id = $1 ORDER BY id`, [
+      tenant.userId,
+    ]),
+    calls: await mockCallsFor(tenant.userId),
+    cancels: await cancelCalls(active.checkout.subscriptionId),
+  });
+  const before = await snapshot();
+  expect(before.account).toHaveLength(1);
+  expect(before.subscriptions).toHaveLength(1);
   const url = await viewAsHandoff(await staffPasskeyToken(staffPage, adminUrl('/sign-in')), staffIp, tenant.userId);
   const token = await exchangeHandoff(url, clientIp);
 
@@ -238,8 +251,8 @@ test('BILL-011 view-as: every customer billing route answers 403, reads included
     expect(reply.status, `${method} ${path}`).toBe(403);
     expect(reply.body.message, `${method} ${path}`).toBe('Impersonation sessions are read-only');
   }
-  expect(await query(`SELECT 1 FROM billing_accounts WHERE user_id = $1`, [tenant.userId])).toHaveLength(0);
-  expect(await mockCallsFor(tenant.userId)).toEqual([]);
+  // Nothing changed: the account row, its subscriptions, and no call reached the mock.
+  expect(await snapshot()).toEqual(before);
   // The tenant's own session reads the same route (the refusal is the view-as, not the account).
   expect((await rawApi('GET', '/api/billing', { token: tenant.accessToken, ip: clientIp })).status).toBe(200);
 });
@@ -284,6 +297,16 @@ test('BILL-032 a member of a project billed to someone else sees only their own 
   expect(mine.usage.projects).toEqual({ used: 0, limit: 10 });
   const theirs = await overview(owner, clientIp);
   expect(JSON.stringify(mine)).not.toContain(theirs.current!.id);
+  // No billing route takes a project: naming D's project changes nothing, or is refused.
+  const pointed = await rawApi('GET', `/api/billing?projectId=${project.id}`, { token: member.accessToken, ip: clientIp });
+  expect(pointed.status).toBe(200);
+  expect(pointed.body.data).toEqual(mine);
+  const pointedInvoices = await rawApi('GET', `/api/billing/invoices?projectId=${project.id}`, {
+    token: member.accessToken,
+    ip: clientIp,
+  });
+  expect(pointedInvoices.status).toBe(400);
+  expect(pointedInvoices.body.message).toEqual(['property projectId should not exist']);
 
   await signIn(page, member);
   await openBilling(page);
@@ -865,6 +888,10 @@ test('BILL-099 the successor starts charging and becomes current', async ({ page
   expect(o.current?.id).toBe(newRow.id);
   expect(o.next).toBeNull();
   expect(o.effectivePlan.code).toBe(P.code);
+  // P's limits, not Free's (both have the default project limit and no seat limit; the MAU limit differs).
+  expect(o.usage.mau.limit).toBe(50_000);
+  expect(o.usage.projects.limit).toBe(10);
+  expect(o.usage.seats.limit).toBeNull();
   // No second cancel for the old one: it was already cancelled at its cycle end.
   expect(await cancelCalls(active.checkout.subscriptionId)).toHaveLength(1);
   expect(oldRow.cancel_sent_at).not.toBeNull();
