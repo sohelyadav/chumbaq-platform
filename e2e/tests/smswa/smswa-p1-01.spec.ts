@@ -95,6 +95,7 @@ test('SMSWA-002 not set up: warning on the Campaigns tab, no create button', asy
   );
   await expect(page.getByText('No SMS campaigns yet.')).toBeVisible();
   await expect(page.getByRole('link', { name: 'Create your first text' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'New text' })).toHaveAttribute('disabled', '');
 });
 
 test('SMSWA-004 ready project with no campaigns shows the create button', async ({ page }) => {
@@ -298,6 +299,14 @@ test('SMSWA-019 saving changes logs one activity entry naming the changed fields
 test('SMSWA-020 empty opt-out line stores none', async ({ page }) => {
   const p = await smsProject('smswa-020', { sender: true });
   await signIn(page, p.owner);
+  const description = card(page, 'Message').locator('[data-slot="card-description"]');
+  const bubble = card(page, 'Preview').locator('div.whitespace-pre-wrap');
+  // With the default line the composer names it and the preview appends it.
+  await page.goto(`/projects/${p.project.id}/sms/new`);
+  await expect(description).toContainText('“Reply STOP to opt out.” is added at the end.');
+  await page.getByLabel('Text', { exact: true }).fill('Hello there');
+  await expect(bubble).toContainText('Reply STOP to opt out.');
+
   await openSms(page, p.project.id, 'Settings');
   await expect(page.getByLabel('Opt-out line')).toHaveValue('Reply STOP to opt out.');
   await page.getByLabel('Opt-out line').fill('');
@@ -313,11 +322,12 @@ test('SMSWA-020 empty opt-out line stores none', async ({ page }) => {
 
   await page.goto(`/projects/${p.project.id}/sms/new`);
   await expect(page.getByRole('heading', { name: 'New text', exact: true })).toBeVisible();
-  const description = card(page, 'Message').locator('[data-slot="card-description"]');
+  // Shown only once the settings have loaded (this project has a sender, no Twilio), so the
+  // checks below read the stored line rather than the page before it arrives.
+  await expect(page.getByRole('link', { name: 'Finish setup' })).toBeVisible();
   await expect(description).toContainText('Personalise with');
   await expect(description).not.toContainText('is added at the end');
   await page.getByLabel('Text', { exact: true }).fill('Hello there');
-  const bubble = card(page, 'Preview').locator('div.whitespace-pre-wrap');
   await expect(bubble).toHaveText('Hello there');
 });
 
@@ -408,6 +418,7 @@ test('SMSWA-030 account SID format refused before any request', async ({ page })
 
   const toast = toastTitled(page, 'Could not connect');
   await expect(toast).toBeVisible();
+  await expect(toast).toHaveClass(/\bdestructive\b/);
   await expect(toast).toContainText(SID_FORMAT);
   await expect(twilio.getByLabel('Account SID')).toHaveValue('ACxyz');
   await expect(twilio.getByLabel('Auth token')).toHaveValue(token);
@@ -499,6 +510,7 @@ test('SMSWA-037 connected state shown from seeded credentials', async ({ page })
 test('SMSWA-038 inbound webhook URL block and copy', async ({ page }) => {
   const p = await smsProject('smswa-038', { sender: true });
   const token = (await smsSettingsRow(p.project.id))!.webhook_token as string;
+  expect(token).toMatch(/^[0-9a-f]{48}$/);
   const url = publicApiUrl(`/api/sms/webhooks/twilio/${token}/inbound`);
 
   await signIn(page, p.owner);
@@ -517,16 +529,20 @@ test('SMSWA-042 admin sees and manages the connection like the owner', async ({ 
   const p = await smsProject('smswa-042', { twilio: true });
   const admin = await teammate(p.project.id, 'admin', p.owner);
   const { accountSid, authToken } = p.sms!.credentials;
+  const url = publicApiUrl(`/api/sms/webhooks/twilio/${p.sms!.webhookToken}/inbound`);
 
   await signIn(page, admin);
+  await allowClipboard(page);
   await openSms(page, p.project.id, 'Settings');
   const twilio = card(page, 'Twilio');
   await expect(twilio.getByText(`Account ${accountSid}, auth token ending ${authToken.slice(-4)}.`, { exact: true })).toBeVisible();
   await expect(twilio.getByRole('button', { name: 'Replace credentials' })).toBeVisible();
   await expect(twilio.getByLabel('Account SID')).toBeEditable();
   const block = repliesBlock(page);
-  await expect(block.locator('code')).toHaveText(publicApiUrl(`/api/sms/webhooks/twilio/${p.sms!.webhookToken}/inbound`));
-  await expect(block.getByRole('button')).toHaveCount(1);
+  await expect(block.locator('code')).toHaveText(url);
+  await block.getByRole('button').click();
+  await expect(toastTitled(page, 'Copied')).toBeVisible();
+  expect(await readClipboard(page)).toBe(url);
   await expect(page.getByRole('button', { name: 'Save sender' })).toBeVisible();
   await expect(page.getByLabel('From', { exact: true })).toBeEditable();
 });
@@ -591,6 +607,7 @@ test('SMSWA-055 invalid number toast', async ({ page }) => {
   await page.getByRole('button', { name: 'Suppress', exact: true }).click();
   const toast = toastTitled(page, 'That is not a valid number');
   await expect(toast).toBeVisible();
+  await expect(toast).toHaveClass(/\bdestructive\b/);
   await expect(toast).toContainText('Use international form with the country code: +14155550123.');
   await expect(input).toHaveValue('+123');
   expect(await suppressionRows(p.project.id)).toHaveLength(0);
@@ -627,11 +644,11 @@ test('SMSWA-060 dismissing the confirm keeps the suppression', async ({ page }) 
   await row.getByRole('button', { name: 'Resubscribe' }).click();
   await expect.poll(() => asked).toBe('Text +14155550199 again? Only do this if they asked to be resubscribed.');
   await expect(row).toHaveCount(1);
-  expect(deletes).toHaveLength(0);
-  expect(await suppressionRows(p.project.id)).toHaveLength(1);
   await page.reload();
   await page.getByRole('tab', { name: 'Suppressions', exact: true }).click();
   await expect(page.getByRole('row').filter({ hasText: '+14155550199' })).toHaveCount(1);
+  expect(deletes).toHaveLength(0);
+  expect(await suppressionRows(p.project.id)).toHaveLength(1);
 });
 
 test('SMSWA-066 member can add and lift suppressions', async ({ page }) => {
