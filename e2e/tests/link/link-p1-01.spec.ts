@@ -179,7 +179,8 @@ test('LINK-013 search today: the API refuses the search parameter', async ({ pag
   await expect(page.getByText('Failed to load links.')).toHaveClass(/text-destructive/);
   await expect(page.getByRole('table')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Next' })).toHaveCount(0);
-  expect(refused.length).toBeGreaterThanOrEqual(1);
+  // The first request and the query's one retry, both refused.
+  await expect.poll(() => refused.length).toBeGreaterThanOrEqual(2);
   for (const answer of refused) {
     expect(answer).toMatchObject({ status: 400, page: '1', limit: '20', body: { message: ['property search should not exist'] } });
   }
@@ -480,8 +481,8 @@ test('LINK-037 reserved words protect the dashboard pages', async ({ page, clien
   const pages = ['/login', '/register', '/invite', '/impersonate', '/settings', '/projects', '/account/billing', '/complete-signup', '/verify-email', '/reset-password', '/forgot-password'];
   for (const path of pages) {
     await page.goto(path);
-    await page.waitForLoadState('load');
-    await page.waitForTimeout(400);
+    // A dashboard page renders text or controls of its own; the short-link page renders only a spinner.
+    await expect(page.locator('#root').locator('h1, h2, h3, p, form, button, input, a').first(), `${path} rendered a page`).toBeVisible();
     const landed = new URL(page.url()).pathname;
     expect(landed.startsWith('/redirect/'), `${path} landed on ${landed}`).toBe(false);
     // Signed out, the protected pages send to the sign-in page; the rest stay.
@@ -534,8 +535,9 @@ test('LINK-040 title and tags are saved', async ({ page, clientIp }) => {
   for (const tag of ['marketing', 'summer-campaign', 'x']) {
     await expect(page.locator('[data-slot="badge"][data-variant="secondary"]').getByText(tag, { exact: true })).toBeVisible();
   }
-  const [row] = await sql<{ title: string; tags: string[] }>('SELECT title, tags FROM links WHERE project_id = $1', [project.id]);
-  expect(row.title).toBe('Launch');
+  // `tags` is a simple-array column: stored comma-joined.
+  const [row] = await sql<{ title: string; tags: string }>('SELECT title, tags FROM links WHERE project_id = $1', [project.id]);
+  expect(row).toEqual({ title: 'Launch', tags: 'marketing,summer-campaign,x' });
 });
 
 test('LINK-043 unknown body fields are refused', async ({ clientIp }) => {
@@ -576,7 +578,7 @@ test('LINK-049 deep link parameters: invalid JSON', async ({ page, clientIp }) =
   await expect(invalid).toBeVisible();
   await expect(invalid).toContainText('Deep link params must be valid JSON');
   await expect(page).toHaveURL(new RegExp(`/projects/${project.id}/links/new$`));
-  await page.waitForTimeout(300);
+  // The JSON check returns before the mutation runs, so the toast means nothing was sent.
   expect(posts).toHaveLength(0);
   expect(await countLinks(project.id)).toBe(0);
 });
