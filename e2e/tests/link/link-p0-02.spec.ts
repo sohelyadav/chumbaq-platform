@@ -815,7 +815,7 @@ test('LINK-176 a suspended tenant\'s links show an unavailable page', async ({ p
       await stubHosts(tab, ['example.com']);
       await routeRedirectHop(tab);
       const hop = tab.waitForResponse((r) => new URL(r.url()).pathname === `/redirect/${link.shortCode}`);
-      await tab.goto(`/${link.shortCode}`);
+      await tab.goto(`/${link.shortCode}`, { waitUntil: 'commit' });
       const response = await hop;
       expect(response.status()).toBe(404);
       expect(response.headers()['content-type']).toMatch(/^text\/html/);
