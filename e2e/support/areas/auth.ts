@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes } from 'crypto';
+import http from 'http';
 import path from 'path';
 import type { Locator, Page } from '@playwright/test';
 import Redis from 'ioredis';
@@ -968,4 +969,130 @@ export async function viewAsAccessTokenIn(page: Page): Promise<string> {
 /** The email-verification banner (a region named after what it asks). */
 export function verificationBanner(page: Page): Locator {
   return page.getByRole('region', { name: 'Confirm your email address' });
+}
+
+// ---- Re-authentication, /auth/me and response shapes (P1, chunk 3)
+
+/** Ends the address's sign-in window in Redis, as a complete sign-in does. */
+export async function clearSignInAttempts(email: string): Promise<void> {
+  await withRedis((redis) => redis.del(`chumbaq:signin-attempts:${sha256Hex(email.trim().toLowerCase())}`));
+}
+
+/**
+ * A customer-scope passkey row for the account with key material nothing can sign for,
+ * so the account counts as holding a passkey (re-authentication options are issued) while
+ * no real assertion can match it.
+ */
+export async function insertCustomerPasskeyRow(userId: string): Promise<string> {
+  const credentialId = randomBytes(32).toString('base64url');
+  await sql(
+    `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, transports, device_type, backed_up, name, scope)
+     VALUES ($1, $2, $3, 0, '["internal"]', 'singleDevice', false, 'E2E unusable key', 'customer')`,
+    [userId, credentialId, randomBytes(77)],
+  );
+  return credentialId;
+}
+
+/** Moves the account's sign-ins `minutes` back (each session's last real proof). */
+export async function setSignInAge(userId: string, minutes: number): Promise<void> {
+  await sql(`UPDATE auth_sessions SET authenticated_at = now() - make_interval(mins => $2) WHERE user_id = $1`, [userId, minutes]);
+}
+
+/** Lets the account's authenticator-app codes of any step be used again (the replay guard). */
+export async function resetTotpStep(userId: string): Promise<void> {
+  await sql(`UPDATE totp_secrets SET last_used_step = 0 WHERE user_id = $1`, [userId]);
+}
+
+export async function totpLastUsedStep(userId: string): Promise<string> {
+  const [row] = await sql<{ last_used_step: string }>('SELECT last_used_step::text AS last_used_step FROM totp_secrets WHERE user_id = $1', [userId]);
+  return row.last_used_step;
+}
+
+/**
+ * Changes the stored authenticator-app secret's key version prefix, so the API can no
+ * longer open it (as after a lost or rotated encryption key). Answers a function that puts
+ * the original back.
+ */
+export async function corruptTotpSecret(userId: string): Promise<() => Promise<void>> {
+  const [row] = await sql<{ secret_ciphertext: string }>('SELECT secret_ciphertext FROM totp_secrets WHERE user_id = $1', [userId]);
+  if (!row?.secret_ciphertext.startsWith('v1.')) throw new Error('Expected a v1. authenticator-app secret');
+  await sql(`UPDATE totp_secrets SET secret_ciphertext = 'v2' || substring(secret_ciphertext from 3) WHERE user_id = $1`, [userId]);
+  return async () => {
+    await sql('UPDATE totp_secrets SET secret_ciphertext = $2 WHERE user_id = $1', [userId, row.secret_ciphertext]);
+  };
+}
+
+export async function markAllRecoveryCodesUsed(userId: string): Promise<void> {
+  await sql('UPDATE recovery_codes SET used_at = now() WHERE user_id = $1', [userId]);
+}
+
+/** A trap address, stored as the admin app's tripwire form stores one (only its sha256). */
+export async function seedTrapAddress(email: string, label: string): Promise<void> {
+  await sql(`INSERT INTO security_tripwires (kind, value_hash, label) VALUES ('account', $1, $2)`, [sha256Hex(email.trim().toLowerCase()), label]);
+}
+
+/**
+ * A POST to the customer API through node's http client, with X-Chumbaq-Client set to
+ * exactly `clientValue` (empty or blank included, which some clients drop), or not at all
+ * when it is null.
+ */
+export function postWithClientValue(
+  pathname: string,
+  body: unknown,
+  { ip, clientValue, cookie }: { ip: string; clientValue: string | null; cookie?: string },
+): Promise<{ status: number; message: unknown; setCookie: string[] }> {
+  const url = new URL(apiUrl(pathname));
+  const payload = JSON.stringify(body ?? {});
+  return new Promise((resolve, reject) => {
+    const request = http.request(
+      {
+        host: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+          'X-Forwarded-For': ip,
+          ...(clientValue === null ? {} : { 'X-Chumbaq-Client': clientValue }),
+          ...(cookie ? { Cookie: cookie } : {}),
+        },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        response.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          let message: unknown;
+          try {
+            const parsed = JSON.parse(text);
+            message = parsed?.message ?? parsed?.data ?? parsed;
+          } catch {
+            message = text;
+          }
+          const setCookie = response.headers['set-cookie'] ?? [];
+          resolve({ status: response.statusCode ?? 0, message, setCookie });
+        });
+      },
+    );
+    request.on('error', reject);
+    request.end(payload);
+  });
+}
+
+/**
+ * Turns off the sign-in page's passkey autofill (as `blockPasskeyAutofill` does) unless
+ * this origin's localStorage holds `e2e_allow_autofill`, so one tab, and the virtual
+ * authenticator it holds, can try the sign-in page both with and without it.
+ */
+export async function blockPasskeyAutofillUnlessAllowed(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    if (localStorage.getItem('e2e_allow_autofill') === '1') return;
+    if (typeof PublicKeyCredential !== 'undefined') {
+      Object.defineProperty(PublicKeyCredential, 'isConditionalMediationAvailable', {
+        configurable: true,
+        value: () => Promise.resolve(false),
+      });
+    }
+  });
 }
