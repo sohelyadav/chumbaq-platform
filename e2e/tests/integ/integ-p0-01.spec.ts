@@ -96,6 +96,21 @@ function reauthDialog(page: Page) {
   return page.getByRole('dialog', { name: 'Confirm it is you' });
 }
 
+/**
+ * A view-as write refused as read-only, with its own toast: earlier read-only toasts are
+ * waited out first (they go after 4 s), so the one seen afterwards is this write's.
+ */
+async function refusedAsReadOnly(page: Page, urlPart: string, method: string, action: () => Promise<void>): Promise<void> {
+  const readOnly = toast(page, 'Read-only session').filter({ hasText: READ_ONLY });
+  await expect(readOnly).toHaveCount(0, { timeout: 10_000 });
+  const refused = page.waitForResponse((r) => new URL(r.url()).pathname.endsWith(urlPart) && r.request().method() === method);
+  await action();
+  const response = await refused;
+  expect(response.status(), `${method} ${urlPart}`).toBe(403);
+  expect((await response.json()).message, `${method} ${urlPart}`).toBe(READ_ONLY);
+  await expect(readOnly).toHaveCount(1);
+}
+
 // ---------------------------------------------------------------- API keys
 
 test('INTEG-004 create an ordinary API key', async ({ page }) => {
@@ -436,12 +451,12 @@ test('INTEG-023 view-as can read keys but not change them', async ({ page, brows
   await page.getByRole('button', { name: 'Create Key' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByPlaceholder('e.g., Production API Key').fill('va');
-  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+  await refusedAsReadOnly(page, `/projects/${p.project.id}/api-keys`, 'POST', () => dialog.getByRole('button', { name: 'Create', exact: true }).click());
   await expect(toast(page, 'Failed to create key')).toBeVisible();
-  await expect(toast(page, 'Read-only session').filter({ hasText: READ_ONLY }).first()).toBeVisible();
   await dialog.getByRole('button', { name: 'Cancel' }).click();
 
-  await prod.getByRole('button').click();
+  const [prodRow] = await apiKeyRows(p.project.id);
+  await refusedAsReadOnly(page, `/api-keys/${prodRow.id}`, 'DELETE', () => prod.getByRole('button').click());
   await expect(toast(page, 'Failed to revoke key')).toBeVisible();
   await expect(prod.getByText('Active', { exact: true })).toBeVisible();
 
@@ -600,7 +615,7 @@ test('INTEG-039 view-as never sees the identity secret', async ({ page, browser,
   await expect(card.locator('button:has(svg.lucide-copy)')).toBeDisabled();
 
   page.once('dialog', (d) => d.accept());
-  await card.getByRole('button', { name: 'Rotate secret' }).click();
+  await refusedAsReadOnly(page, '/identity-secret/rotate', 'POST', () => card.getByRole('button', { name: 'Rotate secret' }).click());
   await expect(toast(page, 'Could not rotate the secret')).toBeVisible();
   expect(await identityKeyVersion(p.project.id)).toBe(1);
 
@@ -861,7 +876,9 @@ async function slackWebhooks(p: Awaited<ReturnType<typeof ownerWithProject>>) {
 
 test('INTEG-063 a member sees webhooks without their URLs and cannot change them', async ({ page }) => {
   const p = await ownerWithProject();
-  const { active, inactive } = await slackWebhooks(p);
+  const { slackUrl, active, inactive } = await slackWebhooks(p);
+  // The owner reads the stored URL, so its absence below is the member's view, not the seed's.
+  expect((await as(p.owner, 'GET', `/api/projects/${p.project.id}/webhooks/${active.id}`)).body.data.url).toBe(slackUrl);
   const member = await teammate(p, 'member', 'Mo Member');
   await signIn(page, member);
   await openWebhooks(page, p.project.id);
@@ -921,30 +938,26 @@ test('INTEG-064 view-as sees webhooks without URLs and cannot change them', asyn
   const card = webhookCard(page, `ending ${active.secretHint}`);
   await expect(card.getByText(HIDDEN, { exact: true })).toBeVisible();
   expect(await page.content()).not.toContain('hooks.slack.com');
-  const readOnlyToast = () => toast(page, 'Read-only session').filter({ hasText: READ_ONLY });
 
   await card.getByRole('button', { name: 'Rotate secret' }).click();
   const confirm = page.getByRole('dialog', { name: 'Rotate signing secret?' });
   await expect(confirm).toContainText(`Deliveries to ${HIDDEN} will fail verification`);
-  await confirm.getByRole('button', { name: 'Rotate', exact: true }).click();
+  expect(await confirm.textContent()).not.toContain('hooks.slack.com');
+  await refusedAsReadOnly(page, `/webhooks/${active.id}/rotate-secret`, 'POST', () => confirm.getByRole('button', { name: 'Rotate', exact: true }).click());
   await expect(toast(page, 'Failed to rotate the secret')).toBeVisible();
-  await expect(readOnlyToast().first()).toBeVisible();
   await confirm.getByRole('button', { name: 'Cancel' }).click();
 
-  await card.getByRole('switch').click();
+  await refusedAsReadOnly(page, `/webhooks/${active.id}`, 'PATCH', () => card.getByRole('switch').click());
   await expect(toast(page, 'Could not turn the webhook off')).toContainText(READ_ONLY);
 
-  const deleted = page.waitForResponse((r) => r.url().endsWith(`/webhooks/${active.id}`) && r.request().method() === 'DELETE');
-  await card.getByRole('button').last().click();
-  expect((await deleted).status()).toBe(403);
+  await refusedAsReadOnly(page, `/webhooks/${active.id}`, 'DELETE', () => card.getByRole('button').last().click());
 
   await page.getByRole('button', { name: 'Add Webhook' }).click();
   const add = page.getByRole('dialog', { name: 'Add Webhook' });
   await add.getByPlaceholder('https://example.com/webhook').fill(literalHookUrl('va'));
   await add.getByText('click', { exact: true }).click();
-  await add.getByRole('button', { name: 'Create', exact: true }).click();
+  await refusedAsReadOnly(page, `/projects/${p.project.id}/webhooks`, 'POST', () => add.getByRole('button', { name: 'Create', exact: true }).click());
   await expect(toast(page, 'Failed to create webhook')).toContainText(READ_ONLY);
-  await expect(readOnlyToast().first()).toBeVisible();
 
   expect(await webhookRows(p.project.id)).toEqual(before);
 });
@@ -1084,8 +1097,7 @@ test('INTEG-092 view-as sees the Mixpanel status but cannot change it', async ({
   await page.getByPlaceholder('service-account@mixpanel.com').fill('staff@mixpanel.com');
   await page.getByPlaceholder('Service account secret').fill('staff-pass');
   await page.getByPlaceholder('123456').fill('777');
-  await page.getByRole('button', { name: 'Save Configuration' }).click();
-  await expect(toast(page, 'Read-only session').filter({ hasText: READ_ONLY })).toBeVisible();
+  await refusedAsReadOnly(page, '/mixpanel/configure', 'POST', () => page.getByRole('button', { name: 'Save Configuration' }).click());
   await expect(toast(page, 'Error').filter({ hasText: 'Failed to configure Mixpanel' })).toBeVisible();
   const [after] = await sql(`SELECT * FROM mixpanel_configs WHERE "projectId" = $1`, [p.project.id]);
   expect(after).toEqual(before);
@@ -1106,19 +1118,17 @@ test('INTEG-106 view-as cannot import, sync or delete cohorts', async ({ page, b
   await page.goto(`/projects/${p.project.id}/mixpanel/cohorts`);
   const row = page.getByRole('row').filter({ hasText: 'Loyal buyers' });
   await expect(row).toBeVisible();
-  const readOnly = () => toast(page, 'Read-only session').filter({ hasText: READ_ONLY });
 
-  await row.getByRole('button').nth(0).click();
+  await refusedAsReadOnly(page, `/mixpanel/cohorts/${cohort.id}/sync`, 'POST', () => row.getByRole('button').nth(0).click());
   await expect(toast(page, 'Error').filter({ hasText: 'Failed to sync cohort' })).toBeVisible();
-  await expect(readOnly().first()).toBeVisible();
 
   page.once('dialog', (d) => d.accept());
-  await row.getByRole('button').nth(2).click();
+  await refusedAsReadOnly(page, `/mixpanel/cohorts/${cohort.id}`, 'DELETE', () => row.getByRole('button').nth(2).click());
   await expect(toast(page, 'Error').filter({ hasText: 'Failed to delete cohort' })).toBeVisible();
 
   await page.getByRole('combobox').click();
   await page.getByRole('option', { name: 'Fresh signups (12 users)' }).click();
-  await page.getByRole('button', { name: 'Import', exact: true }).click();
+  await refusedAsReadOnly(page, '/mixpanel/cohorts/import', 'POST', () => page.getByRole('button', { name: 'Import', exact: true }).click());
   await expect(toast(page, 'Error').filter({ hasText: 'Failed to import cohort' })).toBeVisible();
   await expect(row).toBeVisible();
 
@@ -1299,8 +1309,7 @@ test('INTEG-126 who may push to a cohort', async ({ page, browser, baseURL }) =>
     const viewAs = await context.newPage();
     await openViewAs(viewAs, await viewAsHandoff(browser, baseURL, p.owner));
     await viewAs.goto(`/projects/${p.project.id}/mixpanel/cohorts/${cohort.id}`);
-    await sendCohortPushFromPage(viewAs, 'From staff', 'Hi');
-    await expect(toast(viewAs, 'Read-only session').filter({ hasText: READ_ONLY })).toBeVisible();
+    await refusedAsReadOnly(viewAs, `/mixpanel/cohorts/${cohort.id}/push`, 'POST', () => sendCohortPushFromPage(viewAs, 'From staff', 'Hi'));
     await expect(toast(viewAs, 'Error').filter({ hasText: 'Failed to send push' })).toBeVisible();
   } finally {
     await context.close();
@@ -1309,7 +1318,7 @@ test('INTEG-126 who may push to a cohort', async ({ page, browser, baseURL }) =>
   expect(await activityRows(p.project.id, 'cohort.push_sent')).toHaveLength(1);
 });
 
-test('INTEG-127 show an in-app message to a cohort', async () => {
+test('INTEG-127 show an in-app message to a cohort', async ({ page }) => {
   const p = await sdkProject(await ownerWithProject());
   const messageId = await createInAppMessage(p.owner, p.project.id);
   const f1 = await identifyDevice(p);
@@ -1332,6 +1341,10 @@ test('INTEG-127 show an in-app message to a cohort', async () => {
   expect(entries).toHaveLength(1);
   expect(entries[0].target_label).toBe('Buyers');
   expect(await activityRows(p.project.id, 'in_app.triggered')).toHaveLength(0);
+
+  await signIn(page, p.owner);
+  await page.goto(`/projects/${p.project.id}/activity`);
+  await expect(page.getByText(`${p.owner.name} showed an in-app message to the Mixpanel cohort "Buyers"`, { exact: true })).toBeVisible();
 });
 
 test('INTEG-130 Mixpanel routes by role', async ({ browser, baseURL }) => {
