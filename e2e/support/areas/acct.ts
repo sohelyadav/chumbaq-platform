@@ -1,8 +1,12 @@
-import type { Locator, Page, Response } from '@playwright/test';
+import { randomUUID } from 'crypto';
+import { existsSync, readFileSync, statSync } from 'fs';
+import path from 'path';
+import type { Browser, BrowserContext, Locator, Page, Response } from '@playwright/test';
 import { Client } from 'pg';
+import { adminApi } from '../admin';
 import { apiUrl, newClientIp, type Account } from '../api';
 import { totpCode, totpStep, type TotpEnrolment } from '../factors';
-import { assertE2eDatabase, stackEnv } from '../stack';
+import { assertE2eDatabase, LOG_DIR, stackEnv } from '../stack';
 
 /**
  * Helpers for the ACCT specs (the signed-in person's /settings): raw API calls that keep
@@ -235,4 +239,195 @@ export async function holdRequests(page: Page, method: string, path: string): Pr
 /** The change-password form's fields (their labels have no htmlFor). */
 export function passwordField(page: Page, name: 'currentPassword' | 'newPassword' | 'confirmPassword'): Locator {
   return page.locator(`input[name="${name}"]`);
+}
+
+// ---- Seeded rows (ACCT chunk 2)
+
+/**
+ * A customer-scope passkey row with placeholder key material: it is listed, counted and
+ * offered like any key, but can never verify. For a second key a test only lists or
+ * removes, since a tab's virtual authenticator refuses to make two for one account.
+ */
+export async function seedPasskeyRow(userId: string, name: string, scope: 'customer' | 'staff' = 'customer'): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, transports, device_type, backed_up, name, scope)
+     VALUES ($1, $2, $3, 0, '[]', 'singleDevice', false, $4, $5) RETURNING id`,
+    [userId, `e2e-placeholder-${randomUUID()}`, Buffer.from('not-a-key'), name, scope],
+  );
+  return row.id;
+}
+
+export function passkeyRows(userId: string): Promise<Array<{ id: string; name: string; scope: string }>> {
+  return sql('SELECT id, name, scope FROM webauthn_credentials WHERE user_id = $1 ORDER BY created_at, id', [userId]);
+}
+
+/**
+ * A pending staff reset of the account's factors, as `request()` leaves it once the
+ * owner's warning went out: due 72 hours from now.
+ */
+export async function seedPendingFactorReset(userId: string): Promise<{ id: string; executeAfter: Date; requestedAt: Date }> {
+  const [row] = await sql<{ id: string; execute_after: Date; requested_at: Date }>(
+    `INSERT INTO factor_resets (user_id, status, requested_by_email, reason, execute_after, notice_sent_at, verification_method, verification_notes)
+     VALUES ($1, 'pending', 'staff@example.com', 'Lost phone', now() + interval '72 hours', now(), 'video_call', 'Checked on a video call')
+     RETURNING id, execute_after, requested_at`,
+    [userId],
+  );
+  return { id: row.id, executeAfter: row.execute_after, requestedAt: row.requested_at };
+}
+
+export async function factorResetRow(id: string): Promise<{ status: string; cancelled_by: string | null; cancelled_at: Date | null }> {
+  const [row] = await sql('SELECT status, cancelled_by, cancelled_at FROM factor_resets WHERE id = $1', [id]);
+  return row;
+}
+
+/** Moves every live sign-in of the account 20 minutes back, past the 15-minute recent window. */
+export async function ageSignIns(userId: string): Promise<void> {
+  await sql(`UPDATE auth_sessions SET authenticated_at = now() - interval '20 minutes' WHERE user_id = $1`, [userId]);
+}
+
+export function sessionRows(userId: string): Promise<Array<{ id: string; revoked_at: Date | null; user_agent: string | null }>> {
+  return sql('SELECT id, revoked_at, user_agent FROM auth_sessions WHERE user_id = $1 ORDER BY created_at, id', [userId]);
+}
+
+/** The factors' rows, to compare before and after something that must not touch them. */
+export async function factorSnapshot(userId: string) {
+  const [user] = await sql<{ password_reset_at: Date | null; factors_reset_at: Date | null }>(
+    'SELECT password_reset_at, factors_reset_at FROM users WHERE id = $1',
+    [userId],
+  );
+  return {
+    totp: await sql('SELECT secret_ciphertext, confirmed_at FROM totp_secrets WHERE user_id = $1', [userId]),
+    passkeys: await sql('SELECT id, credential_id, name, scope FROM webauthn_credentials WHERE user_id = $1 ORDER BY id', [userId]),
+    recoveryCodes: await sql('SELECT code_hash, used_at FROM recovery_codes WHERE user_id = $1 ORDER BY code_hash', [userId]),
+    passwordResetAt: user.password_reset_at,
+    factorsResetAt: user.factors_reset_at,
+  };
+}
+
+/** Adds someone to a project with a role, as an accepted invite leaves it. */
+export async function addProjectMember(projectId: string, userId: string, role: 'owner' | 'admin' | 'member', addedBy: string): Promise<void> {
+  await sql(
+    `INSERT INTO project_members (project_id, user_id, role, added_by, created_at) VALUES ($1, $2, $3, $4, clock_timestamp())`,
+    [projectId, userId, role, addedBy],
+  );
+}
+
+// ---- View-as
+
+/** A staff member's one-time view-as link for the tenant (the admin API's handoff). */
+export async function viewAsHandoffUrl(staffToken: string, tenantId: string, ip: string): Promise<string> {
+  const handoff = await adminApi<{ url: string }>(
+    'POST',
+    `/api/admin/tenants/${tenantId}/impersonate`,
+    { reason: 'E2E: checking account settings while viewing as' },
+    staffToken,
+    ip,
+  );
+  return handoff.url;
+}
+
+/** Spends a view-as link on the customer API, as the /impersonate page does; answers the view-as token. */
+export async function exchangeViewAsUrl(url: string, ip: string): Promise<string> {
+  const code = new URL(url).hash.replace(/^#code=/, '');
+  return (await ok<{ accessToken: string }>('POST', '/api/auth/impersonation/exchange', { code }, { ip })).accessToken;
+}
+
+/**
+ * Opens a view-as link in `page` (a tab of its own: the session is kept per tab) and
+ * waits for the tenant's project list.
+ */
+export async function openViewAs(page: Page, url: string): Promise<void> {
+  await page.goto(url);
+  await page.waitForURL(/\/projects$/);
+  await page.getByRole('region', { name: 'Impersonation session' }).waitFor();
+}
+
+/** Every account route the settings page uses, with a body each would accept. */
+export function accountRoutes(ids: { sessionId: string; passkeyId: string }): Array<{ method: string; path: string; body?: unknown }> {
+  return [
+    { method: 'GET', path: '/api/auth/sessions' },
+    { method: 'DELETE', path: '/api/auth/sessions' },
+    { method: 'DELETE', path: `/api/auth/sessions/${ids.sessionId}` },
+    { method: 'GET', path: '/api/auth/activity' },
+    { method: 'GET', path: '/api/auth/passkeys' },
+    { method: 'POST', path: '/api/auth/passkeys/options' },
+    { method: 'POST', path: '/api/auth/passkeys', body: { response: {}, name: 'E2E' } },
+    { method: 'DELETE', path: `/api/auth/passkeys/${ids.passkeyId}` },
+    { method: 'GET', path: '/api/auth/factors' },
+    { method: 'POST', path: '/api/auth/totp/setup' },
+    { method: 'POST', path: '/api/auth/totp/confirm', body: { code: '123456' } },
+    { method: 'DELETE', path: '/api/auth/totp' },
+    { method: 'POST', path: '/api/auth/recovery-codes' },
+    { method: 'GET', path: '/api/auth/factor-reset' },
+    { method: 'DELETE', path: '/api/auth/factor-reset' },
+    { method: 'PATCH', path: '/api/users/me/password', body: { currentPassword: 'e2e-Password-123!', newPassword: 'Another-Passw0rd!' } },
+  ];
+}
+
+/** A request with any Authorization header (or none); never throws. */
+export async function callWithAuthorization(method: string, path: string, body: unknown, ip: string, authorization?: string): Promise<RawResponse> {
+  const response = await fetch(apiUrl(path), {
+    method,
+    headers: {
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      'X-Chumbaq-Client': 'web',
+      'X-Forwarded-For': ip,
+      ...(authorization ? { Authorization: authorization } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await response.text();
+  let parsed: any;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    parsed = text;
+  }
+  return { status: response.status, body: parsed, message: parsed?.message, headers: response.headers, text };
+}
+
+// ---- Browsers
+
+export const CHROME_ON_MACOS =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
+export const FIREFOX_ON_LINUX = 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0';
+export const SAFARI_ON_IOS =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
+
+/** A separate browser (another device) with its own client address and user agent. */
+export async function deviceContext(browser: Browser, baseURL: string | undefined, userAgent: string): Promise<{ context: BrowserContext; ip: string }> {
+  const ip = newClientIp();
+  const context = await browser.newContext({ baseURL, ignoreHTTPSErrors: true, userAgent, extraHTTPHeaders: { 'X-Forwarded-For': ip } });
+  return { context, ip };
+}
+
+/** Answers the customer app's "Confirm it is you" dialog with an authenticator-app code. */
+export async function confirmWithTotpCode(page: Page, code: string): Promise<void> {
+  const dialog = page.getByRole('dialog', { name: 'Confirm it is you' });
+  await dialog.getByLabel('Code from your authenticator app').fill(code);
+  await dialog.getByRole('button', { name: 'Confirm' }).click();
+  await dialog.waitFor({ state: 'hidden' });
+}
+
+/** Answers the customer app's "Confirm it is you" dialog with the tab's passkey. */
+export async function confirmWithPasskey(page: Page): Promise<void> {
+  const dialog = page.getByRole('dialog', { name: 'Confirm it is you' });
+  await dialog.getByRole('button', { name: 'Use passkey' }).click();
+  await dialog.waitFor({ state: 'hidden' });
+}
+
+/** What the API process has logged since `mark` (a byte offset from `apiLogMark`). */
+export function apiLogMark(): number {
+  const file = path.join(LOG_DIR, 'api.log');
+  return existsSync(file) ? statSync(file).size : 0;
+}
+
+export function apiLogSince(mark: number): string {
+  const file = path.join(LOG_DIR, 'api.log');
+  return readFileSync(file).subarray(mark).toString('utf8');
+}
+
+/** The claims of a JWT, unverified. */
+export function jwtClaims(token: string): Record<string, unknown> {
+  return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')) as Record<string, unknown>;
 }
