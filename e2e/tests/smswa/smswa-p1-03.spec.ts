@@ -100,6 +100,8 @@ const S1_WA = '919876543210';
 const hex = (bytes: number) => randomBytes(bytes).toString('hex');
 const later = () => new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
 const digits = (phone: string) => phone.replace(/^\+/, '');
+/** The national part of a uniquePhone() number (+91…), as Interakt is sent it apart from the country code. */
+const national = (phone: string) => phone.replace(/^\+91/, '');
 
 /** The project's WhatsApp suppressions as address → [reason, detail]. */
 async function waSuppressed(projectId: string): Promise<Record<string, [string, string | null]>> {
@@ -515,8 +517,13 @@ test('SMSWA-184 composer on a project without a provider', async ({ page }) => {
 
 test('SMSWA-185 composer test send refusals', async ({ page, browser, baseURL }) => {
   const p = await waProject('smswa-185', 'interakt', { signed: false });
-  await seedPeople(p, p.owner.ip, ['S1', 'S3']);
-  expect((await call('POST', '/api/whatsapp/suppressions', p.owner, { projectId: p.project.id, address: '+14155550199' })).status).toBe(201);
+  await seedPeople(p, p.owner.ip, ['S1']);
+  // Numbers no other test draws, so the provider stub's shared call log speaks only of this test.
+  const suppressed = uniquePhone();
+  const optedOut = uniquePhone();
+  const suspendedTo = uniquePhone();
+  await identifyPhone(p, p.owner.ip, { phone: optedOut, smsOptIn: false, whatsappOptIn: false });
+  expect((await call('POST', '/api/whatsapp/suppressions', p.owner, { projectId: p.project.id, address: suppressed })).status).toBe(201);
   const admin = await teammate(p.project.id, 'admin', p.owner);
 
   await signIn(page, p.owner);
@@ -525,17 +532,17 @@ test('SMSWA-185 composer test send refusals', async ({ page, browser, baseURL })
   const preview = card(page, 'Preview');
   const to = preview.getByPlaceholder('Send a test to +…');
   const testButton = preview.getByRole('button', { name: 'Test', exact: true });
-  await to.fill('+14155550199');
+  await to.fill(suppressed);
   // A problem in the content holds the button, and so does a number without a plus.
   await expect(testButton).toBeDisabled();
   await labelledInput(message, 'Template code name').fill('order_update');
   await expect(testButton).toBeEnabled();
-  await to.fill('14155550199');
+  await to.fill(digits(suppressed));
   await expect(testButton).toBeDisabled();
 
   const cases: Array<[string, string]> = [
-    ['+14155550199', SUPPRESSED],
-    [PEOPLE.S3.phone!, OPTED_OUT],
+    [suppressed, SUPPRESSED],
+    [optedOut, OPTED_OUT],
     ['+12', WA_BAD_TEST_NUMBER],
   ];
   for (const [number, error] of cases) {
@@ -543,8 +550,8 @@ test('SMSWA-185 composer test send refusals', async ({ page, browser, baseURL })
     await testButton.click();
     await expect(toastWith(page, 'Test failed', error), number).toBeVisible();
   }
-  expect(await providerCallsMentioning('interakt', '4155550199')).toHaveLength(0);
-  expect(await providerCallsMentioning('interakt', '7700900123')).toHaveLength(0);
+  expect(await providerCallsMentioning('interakt', national(suppressed))).toHaveLength(0);
+  expect(await providerCallsMentioning('interakt', national(optedOut))).toHaveLength(0);
 
   // An admin of a project whose billing owner is suspended.
   await suspendAccount(p.owner.userId);
@@ -554,7 +561,7 @@ test('SMSWA-185 composer test send refusals', async ({ page, browser, baseURL })
     await signIn(adminPage, admin);
     await openWaComposer(adminPage, p.project.id);
     await labelledInput(card(adminPage, 'Message'), 'Template code name').fill('order_update');
-    await card(adminPage, 'Preview').getByPlaceholder('Send a test to +…').fill('+14155550111');
+    await card(adminPage, 'Preview').getByPlaceholder('Send a test to +…').fill(suspendedTo);
     const [answered] = await Promise.all([
       adminPage.waitForResponse((r) => r.url().endsWith('/api/whatsapp/test-send')),
       card(adminPage, 'Preview').getByRole('button', { name: 'Test', exact: true }).click(),
@@ -564,7 +571,7 @@ test('SMSWA-185 composer test send refusals', async ({ page, browser, baseURL })
   } finally {
     await context.close();
   }
-  expect(await providerCallsMentioning('interakt', '4155550111')).toHaveLength(0);
+  expect(await providerCallsMentioning('interakt', national(suspendedTo))).toHaveLength(0);
 });
 
 // ------------------------------------------------------------ O. WhatsApp webhooks ---
@@ -637,6 +644,9 @@ test('SMSWA-203 Meta user_preferences stop and resume', async () => {
   const ignored = await metaPost(p.wa, preference(digits(other), 'other', 'stop'));
   expect([ignored.status, ignored.body]).toEqual([200, { recorded: 0 }]);
   expect(await suppressionRows(p.project.id, 'whatsapp')).toHaveLength(0);
+  // The marketing category from the same number does stop it.
+  expect((await metaPost(p.wa, preference(digits(other), 'marketing_messages', 'stop'))).status).toBe(200);
+  expect(Object.keys(await waSuppressed(p.project.id))).toEqual([other]);
 });
 
 test('SMSWA-204 keyword rules for WhatsApp replies', async () => {
@@ -890,6 +900,10 @@ test('SMSWA-219 cancel a scheduled SMS or WhatsApp campaign', async ({ page }) =
     await expect(dialog).toHaveCount(0);
     const viaApi = dataOf(await call('GET', `/api/push-notifications/campaign/${p.project.id}/${campaign.id}`, p.owner));
     expect([channel, viaApi.status]).toEqual([channel, 'cancelled']);
+    await page.reload();
+    const badges = page.getByRole('heading', { level: 1, name, exact: true }).locator('..').locator('[data-slot="badge"]');
+    await expect(badges.filter({ hasText: 'Cancelled' })).toHaveCount(1);
+    await expect(page.getByRole('button', { name: 'Cancel campaign' })).toHaveCount(0);
 
     if (channel === 'sms') await openSms(page, p.project.id, 'Campaigns');
     else await openWhatsApp(page, p.project.id, 'Campaigns');
@@ -1233,6 +1247,9 @@ test('SMSWA-246 WhatsApp quick replies and the WhatsApp keyword list', async () 
   await identifyPhone(meta, tw.owner.ip, { phone: known, smsOptIn: true, whatsappOptIn: true });
   expect((await metaPost(meta.wa, { messages: [metaReply(digits(known), 'REVOKE')] })).status).toBe(200);
   expect(await suppressionRows(meta.project.id, 'whatsapp')).toHaveLength(0);
+  // The same reply route takes a WhatsApp stop word from that number.
+  expect((await metaPost(meta.wa, { messages: [metaReply(digits(known), 'STOP')] })).status).toBe(200);
+  expect((await suppressionRows(meta.project.id, 'whatsapp')).map((row) => row.address)).toEqual([known]);
   expect((await twilioReply(meta.sms!, known, 'REVOKE')).status).toBe(200);
   expect((await suppressionRows(meta.project.id, 'sms')).map((row) => [row.address, row.reason])).toEqual([[known, 'unsubscribed']]);
 
@@ -1252,7 +1269,8 @@ test('SMSWA-247 test send ordering and refusals through the API', async () => {
   const blank = await smsProject('smswa-247-blank', {}, owner);
   const rowOnly = await smsProject('smswa-247-row', {}, owner);
   expect((await call('POST', '/api/whatsapp/settings', owner, { projectId: rowOnly.project.id })).status).toBe(201);
-  const number = '+14155550188';
+  // A number no other test draws (the provider stub's call log is shared by every test).
+  const number = uniquePhone();
   expect((await call('POST', '/api/whatsapp/suppressions', owner, { projectId: sms.project.id, address: number })).status).toBe(201);
   expect((await call('POST', '/api/sms/suppressions', owner, { projectId: wa.project.id, address: number })).status).toBe(201);
   const smsTest = (projectId: string, to: string, body = 'Test') => call('POST', '/api/sms/test-send', owner, { projectId, to, body });
@@ -1273,14 +1291,15 @@ test('SMSWA-247 test send ordering and refusals through the API', async () => {
   const waSent = await waTest(wa.project.id, number);
   expect(waSent.status).toBe(201);
   expect(dataOf(waSent).error).not.toBe(SUPPRESSED);
-  expect(await providerCallsMentioning('interakt', '4155550188')).not.toHaveLength(0);
+  expect(await providerCallsMentioning('interakt', national(number))).not.toHaveLength(0);
 
   // 3 and 4. The content is checked before anything is sent.
   const emptyBody = await smsTest(sms.project.id, '+14155550111', '');
   expect([emptyBody.status, messageOf(emptyBody)]).toEqual([400, 'body must be longer than or equal to 1 characters']);
-  const emptyValue = await waTest(wa.project.id, '+14155550111', handTyped('order_update', [' ']));
+  const untouched = uniquePhone();
+  const emptyValue = await waTest(wa.project.id, untouched, handTyped('order_update', [' ']));
   expect([emptyValue.status, messageOf(emptyValue)]).toEqual([400, EMPTY_VALUE]);
-  expect(await providerCallsMentioning('interakt', '4155550111')).toHaveLength(0);
+  expect(await providerCallsMentioning('interakt', national(untouched))).toHaveLength(0);
 
   // 5. WhatsApp set-up refusals, and the number checked first.
   const noProvider = await waTest(rowOnly.project.id, '+919876543210');
