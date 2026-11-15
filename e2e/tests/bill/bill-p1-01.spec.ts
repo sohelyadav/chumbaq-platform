@@ -30,7 +30,6 @@ import {
   postWebhook,
   query,
   rawApi,
-  rollupCoverage,
   routeApiTo,
   saveDetails,
   seedMau,
@@ -212,10 +211,22 @@ test.describe('billing off', () => {
     await expect(page.getByRole('menuitem', { name: 'Billing' })).toHaveCount(0);
     await page.keyboard.press('Escape');
 
-    await page.goto(`/projects/${project.id}`);
-    await page.locator('[data-sidebar="sidebar"]').getByRole('button', { name: tenant.email }).click();
-    await expect(page.getByRole('menuitem', { name: 'Account Settings' })).toBeVisible();
+    const sidebarMenu = async (billingEnabled: boolean) => {
+      const again = page.waitForResponse((r) => isPath('/api/auth/me')(r) && r.ok());
+      await page.goto(`/projects/${project.id}`);
+      expect(((await (await again).json()) as { data: { billingEnabled: boolean } }).data.billingEnabled).toBe(billingEnabled);
+      await page.locator('[data-sidebar="sidebar"]').getByRole('button', { name: tenant.email }).click();
+      await expect(page.getByRole('menuitem', { name: 'Account Settings' })).toBeVisible();
+    };
+    await sidebarMenu(false);
     await expect(page.getByRole('menuitem', { name: 'Billing' })).toHaveCount(0);
+    await page.keyboard.press('Escape');
+
+    // The same menu on the install with billing on does offer it, so its absence above
+    // is the install's setting.
+    await page.unrouteAll({ behavior: 'wait' });
+    await sidebarMenu(true);
+    await expect(page.getByRole('menuitem', { name: 'Billing' })).toBeVisible();
   });
 });
 
@@ -298,18 +309,17 @@ test('BILL-016 a new account: Free, "No paid plan", no schedule line', async ({ 
   await expect(page.getByRole('button', { name: 'Cancel plan' })).toHaveCount(0);
 
   // Active devices: "not counted yet" until the usage roll-up has counted a day. The
-  // roll-up's state is shared by the whole stack (the worker's hourly tick), so the
-  // line is checked against the state the page was given.
+  // roll-up's state is shared by the whole stack (the worker's hourly tick, other
+  // tests), so the line is checked against the coverage the page itself was given.
   const mau = ((await (await pageOverview).json()) as { data: typeof o }).data.usage.mau;
-  const coverage = await rollupCoverage();
   const line = card.locator('p').filter({ hasText: /active devices this month/i });
-  if (!coverage?.countedThrough || coverage.countedThrough < coverage.mauFrom) {
-    expect(mau).toEqual({ used: null, limit: null, month: null, countedThrough: null });
+  await expect(card.locator('[role="presentation"]')).toHaveCount(0);
+  if (mau.countedThrough === null) {
+    expect(mau).toStrictEqual({ used: null, limit: null, month: null, countedThrough: null });
     await expect(line).toHaveText('Active devices this month: not counted yet.');
-    await expect(card.locator('[role="presentation"]')).toHaveCount(0);
   } else {
-    expect(mau).toMatchObject({ used: 0, limit: null, countedThrough: coverage.countedThrough });
-    await expect(line).toHaveText(`0 active devices this month (no limit) (counted through ${longDate(`${coverage.countedThrough}T00:00:00Z`)})`);
+    expect(mau).toStrictEqual({ used: 0, limit: null, month: `${mau.countedThrough.slice(0, 7)}-01`, countedThrough: mau.countedThrough });
+    await expect(line).toHaveText(`0 active devices this month (no limit) (counted through ${longDate(`${mau.countedThrough}T00:00:00Z`)})`);
   }
 });
 
@@ -604,18 +614,26 @@ test('BILL-037 a taxed price line and the GST copy', async ({ page, clientIp }) 
     },
     yearly: null,
   };
+  type Option = { code: string; sortOrder: number; monthly: Record<string, unknown> | null };
+  let realKeys: { plan: string[]; price: string[] } | undefined;
   await page.route(
     (url) => url.pathname === '/api/billing',
     async (route) => {
       const response = await route.fetch();
-      const body = (await response.json()) as { data: { plans: unknown[] } };
-      body.data.plans.push(taxed);
+      const body = (await response.json()) as { data: { plans: Option[] } };
+      // Held to the API's own shape: the same keys as a real plan and price entry.
+      const real = body.data.plans.find((p) => p.code === G.code);
+      realKeys = { plan: Object.keys(real ?? {}).sort(), price: Object.keys(real?.monthly ?? {}).sort() };
+      // In sort order, where the API would list it.
+      const at = body.data.plans.findIndex((p) => p.code !== 'free' && p.sortOrder > taxed.sortOrder);
+      body.data.plans.splice(at === -1 ? body.data.plans.length : at, 0, taxed);
       await route.fulfill({ response, json: body });
     },
   );
 
   await signIn(page, tenant);
   await openBilling(page);
+  expect(realKeys).toStrictEqual({ plan: Object.keys(taxed).sort(), price: Object.keys(taxed.monthly).sort() });
   const card = planCard(page, T.name);
   await expect(card.getByText('₹999.00 + GST (₹179.82) a month', { exact: true })).toBeVisible();
   await expect(card.getByText('₹1,178.82 charged including GST', { exact: true })).toBeVisible();
@@ -724,11 +742,13 @@ test('BILL-044 the form is shown when there are no details yet (untaxed copy)', 
 
 test('BILL-046 saving details: the happy path', async ({ page, clientIp }) => {
   const tenant = await createAccount(clientIp, 'bill-046', 'Cara Customer');
-  // Held for a moment, so the busy label can be seen.
+  // Held until the busy label has been seen.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
   await page.route(
     (url) => url.pathname === '/api/billing/details',
     async (route) => {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await held;
       await route.continue();
     },
   );
@@ -740,6 +760,7 @@ test('BILL-046 saving details: the happy path', async ({ page, clientIp }) => {
   const reply = page.waitForResponse((r) => isPath('/api/billing/details', 'PUT')(r));
   await saveButton(page).click();
   await expect(detailsForm(page).getByRole('button', { name: 'Saving...' })).toBeDisabled();
+  release();
   expect((await request).postDataJSON()).toStrictEqual({
     legalName: 'Bela Buyer Labs',
     address: { line1: '1 Test Street', city: 'Bengaluru', postalCode: '560001', country: 'IN' },
@@ -820,7 +841,12 @@ test('BILL-049 a legal name too short or empty', async ({ page, clientIp }) => {
     await fillDetails(page, { legalName });
     const reply = page.waitForResponse((r) => isPath('/api/billing/details', 'PUT')(r));
     await saveButton(page).click();
-    expect((await reply).status()).toBe(400);
+    const answered = await reply;
+    expect(answered.status()).toBe(400);
+    // Each attempt's own refusal (the alert keeps the same text across attempts).
+    expect(((await answered.json()) as { message: string[] }).message, legalName).toEqual([
+      'legalName must be longer than or equal to 2 characters',
+    ]);
     await expect(detailsAlert(page)).toHaveText('legalName must be longer than or equal to 2 characters');
   }
   expect((await overview(tenant, clientIp)).details).toBeNull();
@@ -850,7 +876,9 @@ test('BILL-053 PIN code rules', async ({ page, clientIp }) => {
     await fillDetails(page, { pin });
     const reply = page.waitForResponse((r) => isPath('/api/billing/details', 'PUT')(r));
     await saveButton(page).click();
-    expect((await reply).status(), pin).toBe(400);
+    const answered = await reply;
+    expect(answered.status(), pin).toBe(400);
+    expect(((await answered.json()) as { message: string[] }).message, pin).toEqual(['address.postalCode must be a six-digit PIN code']);
     await expect(detailsAlert(page)).toHaveText('address.postalCode must be a six-digit PIN code');
   }
   expect((await overview(tenant, clientIp)).details).toBeNull();
