@@ -995,3 +995,236 @@ export function detailsForm(page: Page): Locator {
 export function detailsAlert(page: Page): Locator {
   return detailsForm(page).getByRole('alert');
 }
+
+// ------------------------------------------------------------------ P1: checkout, changes, webhooks, outbox
+
+/**
+ * An access token whose sign-in is 20 minutes old (past the 15-minute recent sign-in
+ * window): signs in, moves the session's `authenticated_at` back (where refresh reads
+ * `auth_time` from), and refreshes with the session's cookie.
+ */
+export async function staleToken(account: Account, ip: string): Promise<string> {
+  const headers = { 'Content-Type': 'application/json', 'X-Chumbaq-Client': 'web', 'X-Forwarded-For': ip };
+  const login = await fetch(apiUrl('/api/auth/login'), {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ email: account.email, password: account.password }),
+  });
+  if (!login.ok) throw new Error(`login answered ${login.status}: ${await login.text()}`);
+  const cookie = login.headers
+    .getSetCookie()
+    .map((c) => c.split(';')[0])
+    .join('; ');
+  await ageSignIns(account.userId);
+  const refresh = await fetch(apiUrl('/api/auth/refresh'), { method: 'POST', headers: { ...headers, Cookie: cookie } });
+  const text = await refresh.text();
+  if (!refresh.ok) throw new Error(`refresh answered ${refresh.status}: ${text}`);
+  return (JSON.parse(text) as { data: { accessToken: string } }).data.accessToken;
+}
+
+/** Moves every one of the account's sign-ins 20 minutes back. The next refresh carries the old time. */
+export async function ageSignIns(userId: string): Promise<void> {
+  await query(`UPDATE auth_sessions SET authenticated_at = now() - interval '20 minutes' WHERE user_id = $1`, [userId]);
+}
+
+/**
+ * Runs the worker's outbox now (as its once-a-minute cron does) until the mock has a
+ * cancel for this subscription; the stack's own worker may send it first, which is
+ * just as good. Falls back to waiting for the cron.
+ */
+export async function flushCancel(subscriptionId: string): Promise<MockCall> {
+  const { runJobNow } = await import('../jobs');
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const [call] = await cancelCalls(subscriptionId);
+    if (call) return call;
+    await runJobNow('billing-outbox', { allowErrors: true });
+  }
+  return waitForCancelCall(subscriptionId);
+}
+
+/** The provider ids of the subscriptions the mock was asked to create for this account. */
+export async function createdAtMock(userId: string): Promise<number> {
+  return (await mockCallsFor(userId)).filter((c) => c.method === 'POST' && c.path === '/v1/subscriptions').length;
+}
+
+/**
+ * A subscription row the mock has never heard of (a provider id it does not know), on
+ * `priceId`, as a provider-side record that only the database holds would be. With
+ * `current`, the account points at it as its current subscription.
+ */
+export async function seedUnknownSubscription(
+  userId: string,
+  plan: Plan,
+  fields: { current?: boolean; status?: string; cancelRequested?: boolean } = {},
+): Promise<{ id: string; providerId: string }> {
+  const providerId = `sub_unknown${randomBytes(6).toString('hex')}`;
+  const price = plan.prices.monthly!;
+  return withDb(async (db) => {
+    await db.query(`INSERT INTO billing_accounts (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [userId]);
+    const { rows } = await db.query(
+      `INSERT INTO billing_subscriptions
+         (user_id, provider_subscription_id, price_id, plan_code, interval, status, current_start, current_end, charge_at,
+          paid_count, was_current, last_event_at, last_event_rank, created_by,
+          cancel_requested_at, cancel_at_cycle_end)
+       VALUES ($1, $2, $3, $4, 'monthly', $5, now(), now() + interval '30 days', now() + interval '30 days',
+          1, $6, now(), 2, $1, $7, $8)
+       RETURNING id`,
+      [
+        userId,
+        providerId,
+        price.id,
+        plan.code,
+        fields.status ?? 'active',
+        fields.current ?? false,
+        fields.cancelRequested ? new Date() : null,
+        fields.cancelRequested ? false : null,
+      ],
+    );
+    const id = rows[0].id as string;
+    if (fields.current) {
+      await db.query(`UPDATE billing_accounts SET current_subscription_id = $2 WHERE user_id = $1`, [userId, id]);
+    }
+    return { id, providerId };
+  });
+}
+
+/**
+ * A price row naming a Razorpay plan the mock does not know, made current for the
+ * plan's monthly interval (staff could only add one the provider confirmed).
+ */
+export async function seedUnknownPrice(planCode: string, pricePaise: number): Promise<string> {
+  const razorpayPlanId = `plan_unknown${randomBytes(4).toString('hex')}`;
+  await query(
+    `INSERT INTO plan_prices (plan_code, interval, price_paise, tax_rate_bps, amount_paise, currency, razorpay_plan_id, is_current)
+     VALUES ($1, 'monthly', $2, 0, $2, 'INR', $3, true)`,
+    [planCode, pricePaise, razorpayPlanId],
+  );
+  return razorpayPlanId;
+}
+
+/**
+ * Another customer API on the lane's database and secrets with some environment
+ * changed (a stack variant), on the first free port from the API port + 96 down to
+ * + 92 (the other extra APIs search upwards from + 92).
+ */
+export async function startVariantApi(label: string, changes: Record<string, string>): Promise<BillingOffApi> {
+  const { portInUse } = await import('../processes');
+  const ports = stackPorts();
+  const taken = new Set(Object.values(ports));
+  let port = 0;
+  for (let candidate = ports.api + 96; candidate >= ports.api + 92; candidate--) {
+    if (!taken.has(candidate) && !(await portInUse(candidate))) {
+      port = candidate;
+      break;
+    }
+  }
+  if (!port) throw new Error('No free port for a variant customer API');
+  const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ...changes, API_PORT: String(port) };
+  const started = run(`api-${label}-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
+  try {
+    await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    throw error;
+  }
+  return { url: `http://localhost:${port}`, stop: () => stopAll([started]) };
+}
+
+/** Staff set an account's own project limit (null clears it). */
+export function setProjectLimit(staffToken: string, ip: string, tenantId: string, projectLimit: number | null): Promise<unknown> {
+  return adminApi('PATCH', `/api/admin/tenants/${tenantId}/project-limit`, { projectLimit, reason: 'E2E: limit under a plan' }, staffToken, ip);
+}
+
+/** Staff set an account's own seat limit (null clears it). */
+export function setSeatLimit(staffToken: string, ip: string, tenantId: string, seatLimit: number | null): Promise<unknown> {
+  return adminApi('PATCH', `/api/admin/tenants/${tenantId}/seat-limit`, { seatLimit, reason: 'E2E: limit under a plan' }, staffToken, ip);
+}
+
+export interface PaymentRow {
+  provider_payment_id: string;
+  user_id: string;
+  status: string;
+  amount_paise: number;
+  amount_refunded_paise: number;
+  failure_reason: string | null;
+  method: string | null;
+}
+
+export async function paymentRow(providerPaymentId: string): Promise<PaymentRow | undefined> {
+  const [row] = await query<PaymentRow>(`SELECT * FROM billing_payments WHERE provider_payment_id = $1`, [providerPaymentId]);
+  return row;
+}
+
+/** A Razorpay refund entity in the documented shape. */
+export function refundEntity(paymentId: string, amount: number): Record<string, unknown> {
+  return {
+    id: `rfnd_e2e${randomBytes(6).toString('hex')}`,
+    entity: 'refund',
+    amount,
+    currency: 'INR',
+    payment_id: paymentId,
+    notes: {},
+    receipt: null,
+    acquirer_data: { arn: null },
+    created_at: nowSeconds(),
+    batch_id: null,
+    status: 'processed',
+    speed_processed: 'normal',
+    speed_requested: 'optimum',
+  };
+}
+
+/** A Razorpay subscription entity in the documented shape, for ids the mock never made. */
+export function subscriptionEntity(fields: { id: string; planId: string; status: string; customerId?: string | null }): Record<string, unknown> {
+  const now = nowSeconds();
+  return {
+    id: fields.id,
+    entity: 'subscription',
+    plan_id: fields.planId,
+    customer_id: fields.customerId ?? null,
+    status: fields.status,
+    current_start: now,
+    current_end: now + 30 * DAY_SECONDS,
+    ended_at: null,
+    quantity: 1,
+    notes: [],
+    charge_at: now + 30 * DAY_SECONDS,
+    start_at: now,
+    end_at: null,
+    auth_attempts: 0,
+    total_count: 120,
+    paid_count: 1,
+    customer_notify: true,
+    created_at: now,
+    expire_by: null,
+    short_url: null,
+    has_scheduled_changes: false,
+    change_scheduled_at: null,
+    source: 'api',
+    remaining_count: 119,
+  };
+}
+
+/** Outbox columns of one subscription row. */
+export async function outboxRow(providerSubscriptionId: string): Promise<{
+  id: string;
+  cancel_sent_at: Date | null;
+  cancel_attempts: number;
+  cancel_error: string | null;
+  cancel_retry_at: Date | null;
+  updated_at: Date;
+}> {
+  const [row] = await query<{
+    id: string;
+    cancel_sent_at: Date | null;
+    cancel_attempts: number;
+    cancel_error: string | null;
+    cancel_retry_at: Date | null;
+    updated_at: Date;
+  }>(
+    `SELECT id, cancel_sent_at, cancel_attempts, cancel_error, cancel_retry_at, updated_at
+       FROM billing_subscriptions WHERE provider_subscription_id = $1`,
+    [providerSubscriptionId],
+  );
+  return row;
+}
