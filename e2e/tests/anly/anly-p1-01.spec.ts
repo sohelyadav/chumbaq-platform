@@ -392,10 +392,12 @@ test('ANLY-026 the range only changes Click Trends', async ({ page }) => {
   const figures = async () => {
     await expect(statValue(page, 'Total Clicks')).toHaveText('5');
     await expect(statValue(page, 'Unique Visitors')).toHaveText('5');
-    expect(await bodyRows(cardTitled(page, 'Geographic Distribution'))).toEqual([['IndiaIN', '5', '100.0%']]);
-    expect(await barRows(page, 'Operating System')).toEqual([['Mac OS', '5 (100%)']]);
+    await expect.poll(() => bodyRows(cardTitled(page, 'Geographic Distribution'))).toEqual([['IndiaIN', '5', '100.0%']]);
+    await expect(cardTitled(page, 'Devices & Browsers').locator('.recharts-legend-item-text')).toHaveText(['desktop']);
+    await expect.poll(() => barRows(page, 'Operating System')).toEqual([['Mac OS', '5 (100%)']]);
+    await expect.poll(() => barRows(page, 'Browser')).toEqual([['Chrome', '5 (100%)']]);
     await expect(cardTitled(page, 'Top Referrers').getByText('No referrer data')).toBeVisible();
-    expect(await bodyRows(cardTitled(page, 'Top Performing Links'))).toEqual([[`Link anly026${link.shortCode}`, '5']]);
+    await expect.poll(() => bodyRows(cardTitled(page, 'Top Performing Links'))).toEqual([[`Link anly026${link.shortCode}`, '5']]);
   };
   await figures();
 
@@ -441,9 +443,10 @@ test('ANLY-029 Devices & Browsers breakdown', async ({ page }) => {
     { name: 'iOS', count: 2 },
     { name: 'Android', count: 1 },
   ]);
-  const browserCounts = devices.browsers.map((b) => b.count);
-  expect(browserCounts.reduce((s, n) => s + n, 0)).toBe(6);
-  expect([...browserCounts].sort((a, b) => b - a)).toEqual(browserCounts);
+  expect(devices.browsers).toEqual([
+    { name: 'Chrome', count: 4 },
+    { name: 'Mobile Safari', count: 2 },
+  ]);
 
   await signIn(page, p.owner);
   await page.goto(`/projects/${p.project.id}/analytics`);
@@ -454,9 +457,10 @@ test('ANLY-029 Devices & Browsers breakdown', async ({ page }) => {
     ['iOS', '2 (33%)'],
     ['Android', '1 (17%)'],
   ]);
-  expect(await barRows(page, 'Browser')).toEqual(
-    devices.browsers.map((b) => [b.name, `${b.count} (${((b.count / 6) * 100).toFixed(0)}%)`]),
-  );
+  expect(await barRows(page, 'Browser')).toEqual([
+    ['Chrome', '4 (67%)'],
+    ['Mobile Safari', '2 (33%)'],
+  ]);
 });
 
 test('ANLY-031 Geographic Distribution table', async ({ page }) => {
@@ -683,12 +687,12 @@ test('ANLY-055 Linear model rounding', async ({ page }) => {
   ]);
   const card = cardTitled(page, 'Channel Attribution');
   await expect(card.getByText('using Linear model')).toBeVisible();
-  const rows = await bodyRows(card);
-  expect(rows).toEqual([
+  await expect.poll(() => bodyRows(card)).toEqual([
     ['google', '33.0%', '1'],
     ['facebook', '33.0%', '1'],
     ['newsletter', '33.0%', '1'],
   ]);
+  const rows = await bodyRows(card);
   expect(rows.reduce((sum, row) => sum + parseFloat(row[1]), 0)).toBeCloseTo(99, 5);
 });
 
@@ -712,7 +716,7 @@ test('ANLY-056 Time Decay model', async ({ page }) => {
   ]);
   const card = cardTitled(page, 'Channel Attribution');
   await expect(card.getByText('using Time Decay model')).toBeVisible();
-  expect(await bodyRows(card)).toEqual([
+  await expect.poll(() => bodyRows(card)).toEqual([
     ['push', '67.0%', '1'],
     ['email', '33.0%', '1'],
   ]);
@@ -750,7 +754,8 @@ test('ANLY-059 lookback window of 30 days before the conversion', async () => {
 });
 
 test('ANLY-062 the model select changes the channel and campaign tables only', async ({ page }) => {
-  const { p } = await threeTouchProject('anly062', 'u-3');
+  const { p, times } = await threeTouchProject('anly062', 'u-3');
+  const decay = timeDecayCredits(times).map(creditLabel);
   const comparePath = `/api/projects/${p.project.id}/attribution/compare`;
   const compareRequests: string[] = [];
   const campaignModels: string[] = [];
@@ -772,18 +777,19 @@ test('ANLY-062 the model select changes the channel and campaign tables only', a
   const baseline = compareRequests.length;
   expect(baseline).toBeGreaterThanOrEqual(1);
 
-  for (const [name, model, leader] of [
-    ['First Touch', 'first_touch', 'google'],
-    ['Linear', 'linear', 'google'],
-    ['Time Decay', 'time_decay', 'newsletter'],
-  ] as const) {
+  // [channel, credit] in the order each model's tables list them.
+  const steps: Array<[string, string, string[][]]> = [
+    ['First Touch', 'first_touch', [['google', '100.0%'], ['facebook', '0.0%'], ['newsletter', '0.0%']]],
+    ['Linear', 'linear', [['google', '33.0%'], ['facebook', '33.0%'], ['newsletter', '33.0%']]],
+    ['Time Decay', 'time_decay', [['newsletter', decay[2]], ['facebook', decay[1]], ['google', decay[0]]]],
+  ];
+  for (const [name, model, credits] of steps) {
     const request = channelRequestFor(page, p.project.id, model);
     await chooseModel(page, name);
     await request;
     await expect(channels.getByText(`using ${name} model`)).toBeVisible();
-    const first = await bodyRows(channels);
-    expect(first[0][0], name).toBe(leader);
-    await expect(campaigns.locator('tbody tr').first(), name).toContainText(leader);
+    await expect.poll(() => bodyRows(channels), name).toEqual(credits.map(([channel, credit]) => [channel, credit, '1']));
+    await expect.poll(() => bodyRows(campaigns), name).toEqual(credits.map(([channel, credit]) => ['none', channel, credit, '1']));
     expect(await bodyRows(comparison), name).toEqual(comparisonBefore);
   }
   expect(campaignModels).toEqual(expect.arrayContaining(['last_touch', 'first_touch', 'linear', 'time_decay']));
@@ -810,10 +816,9 @@ test('ANLY-063 the range filters by when attribution was computed', async ({ pag
 
   await page.getByRole('button', { name: '90d', exact: true }).click();
   expect(await isSelected(page.getByRole('button', { name: '90d', exact: true }))).toBe(true);
-  await expect(cardTitled(page, 'Channel Attribution').locator('tbody tr')).toHaveCount(1);
-  expect(await bodyRows(cardTitled(page, 'Channel Attribution'))).toEqual([['google', '100.0%', '1']]);
-  expect(await bodyRows(cardTitled(page, 'Campaign Attribution'))).toEqual([['autumn', 'google', '100.0%', '1']]);
-  expect(await bodyRows(cardTitled(page, 'Model Comparison'))).toEqual([['google', '100.0%', '100.0%', '100.0%', '100.0%']]);
+  await expect.poll(() => bodyRows(cardTitled(page, 'Channel Attribution'))).toEqual([['google', '100.0%', '1']]);
+  await expect.poll(() => bodyRows(cardTitled(page, 'Campaign Attribution'))).toEqual([['autumn', 'google', '100.0%', '1']]);
+  await expect.poll(() => bodyRows(cardTitled(page, 'Model Comparison'))).toEqual([['google', '100.0%', '100.0%', '100.0%', '100.0%']]);
 
   await page.getByRole('button', { name: '7d', exact: true }).click();
   await empty('7d');
