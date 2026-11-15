@@ -375,6 +375,18 @@ test('SMSWA-084 send now', async ({ page }) => {
   expect(rows).toHaveLength(1);
   expect(rows[0]).toMatchObject({ id: created.id, channel: 'sms', body: 'Flash sale today', target_type: 'project', total_tokens: 1, scheduled_at: null });
   expect(await activityRows(p.project.id, 'campaign.sent')).toHaveLength(1);
+
+  // The worker hands it to Twilio (the provider stub): the same record the "Twilio is
+  // never called" checks of the other cases read.
+  await expect
+    .poll(
+      async () =>
+        (await twilioCallsFor(p.sms!.credentials.accountSid))
+          .filter((c) => c.method === 'POST' && c.path.endsWith('/Messages.json'))
+          .map((c) => (c.body as Record<string, string>)?.To),
+      { timeout: 30_000 },
+    )
+    .toEqual([PEOPLE.S2.phone]);
 });
 
 test('SMSWA-086 schedule for later', async ({ page }) => {
@@ -536,7 +548,11 @@ test('SMSWA-106 view-as: SMS pages read-only with secrets hidden', async ({ page
   await expect(page.getByText(`Account ${HIDDEN}, auth token ending ${p.sms!.credentials.authToken.slice(-4)}.`)).toBeVisible();
 
   // 2. Save sender is refused.
-  await page.getByRole('button', { name: 'Save sender' }).click();
+  const [save] = await Promise.all([
+    page.waitForResponse((r) => r.request().method() === 'POST' && r.url().endsWith('/api/sms/settings')),
+    page.getByRole('button', { name: 'Save sender' }).click(),
+  ]);
+  expect(save.status()).toBe(403);
   await expect(page.getByText('Read-only session', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('Could not save', { exact: true })).toBeVisible();
   await expect(page.getByText(READ_ONLY, { exact: true }).first()).toBeVisible();
@@ -544,7 +560,11 @@ test('SMSWA-106 view-as: SMS pages read-only with secrets hidden', async ({ page
   // 3. Adding a suppression is refused (with the component's own toast too).
   await openSms(page, p.project.id, 'Suppressions');
   await page.getByPlaceholder('+14155550123').fill('+14155550177');
-  await page.getByRole('button', { name: 'Suppress', exact: true }).click();
+  const [suppress] = await Promise.all([
+    page.waitForResponse((r) => r.request().method() === 'POST' && r.url().endsWith('/api/sms/suppressions')),
+    page.getByRole('button', { name: 'Suppress', exact: true }).click(),
+  ]);
+  expect(suppress.status()).toBe(403);
   await expect(page.getByText('That is not a valid number', { exact: true })).toBeVisible();
   await expect(page.getByText('Read-only session', { exact: true }).first()).toBeVisible();
 
@@ -566,7 +586,11 @@ test('SMSWA-106 view-as: SMS pages read-only with secrets hidden', async ({ page
   expect(previewAnswer.status()).toBe(403);
   await expect(page.getByText('Read-only session', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('Choose an audience to see its reach.', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Send text' }).click();
+  const [send] = await Promise.all([
+    page.waitForResponse((r) => r.request().method() === 'POST' && r.url().endsWith('/api/sms/send')),
+    page.getByRole('button', { name: 'Send text' }).click(),
+  ]);
+  expect(send.status()).toBe(403);
   await expect(page.getByText('Could not create text', { exact: true })).toBeVisible();
 
   const after = await smsSettingsRow(p.project.id);
@@ -713,6 +737,14 @@ test("SMSWA-118 report for another project's campaign or identity is not recorde
   const foreignIdentity = await twilioStatus(p.sms!, report, { campaignId: myCampaign.id, identityId: theirs });
   expect([foreignCampaign.status, foreignIdentity.status]).toEqual([204, 204]);
   expect(await eventRows(p.project.id)).toHaveLength(0);
+  expect(await eventRows(other.project.id)).toHaveLength(0);
+
+  // The same report naming this project's own campaign and identity is recorded, so the
+  // two above were dropped for naming another project, not for their shape.
+  expect((await twilioStatus(p.sms!, report, { campaignId: myCampaign.id, identityId: mine })).status).toBe(204);
+  expect(await eventRows(p.project.id)).toEqual([
+    expect.objectContaining({ type: 'delivered', campaign_id: myCampaign.id, device_identity_id: mine }),
+  ]);
   expect(await eventRows(other.project.id)).toHaveLength(0);
 });
 
