@@ -2,7 +2,9 @@ import { createHash, randomBytes } from 'crypto';
 import type { Locator, Page } from '@playwright/test';
 import Redis from 'ioredis';
 import { Client } from 'pg';
-import { apiUrl, type Account } from '../api';
+import { adminApi, enrolAndSignInStaff } from '../admin';
+import { api, apiUrl, createAccount, newClientIp, uniqueEmail, type Account } from '../api';
+import { extractLink, waitForMail } from '../mailbox';
 import { nextTotpCode, recoveryCodeItems, settingsCard, totpCode, totpSetupKey, totpStep, type TotpEnrolment } from '../factors';
 import { assertE2eDatabase, assertE2eRedisDb, stackEnv } from '../stack';
 
@@ -28,17 +30,25 @@ export interface RawOptions {
   token?: string;
   /** Send X-Chumbaq-Client (default true). */
   clientHeader?: boolean;
+  /** A Cookie header to send as is (`chumbaq_refresh=<token>`). */
+  cookie?: string;
 }
 
-/** A JSON POST that never throws: status, body and Set-Cookie for the test to check. */
-export async function post<T = any>(path: string, body: unknown, { ip, token, clientHeader = true }: RawOptions): Promise<RawResponse<T>> {
+/** A JSON request that never throws: status, body and Set-Cookie for the test to check. */
+export async function call<T = any>(
+  method: string,
+  path: string,
+  body: unknown,
+  { ip, token, clientHeader = true, cookie }: RawOptions,
+): Promise<RawResponse<T>> {
   const response = await fetch(apiUrl(path), {
-    method: 'POST',
+    method,
     headers: {
-      'Content-Type': 'application/json',
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       'X-Forwarded-For': ip,
       ...(clientHeader ? { 'X-Chumbaq-Client': 'web' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(cookie ? { Cookie: cookie } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -56,6 +66,30 @@ export async function post<T = any>(path: string, body: unknown, { ip, token, cl
     text,
     setCookie: response.headers.get('set-cookie'),
   };
+}
+
+/** A JSON POST that never throws: status, body and Set-Cookie for the test to check. */
+export function post<T = any>(path: string, body: unknown, options: RawOptions): Promise<RawResponse<T>> {
+  return call<T>('POST', path, body, options);
+}
+
+/** The refresh token a Set-Cookie header sets, or null (none, or one that clears it). */
+export function refreshTokenIn(setCookie: string | null): string | null {
+  const match = /(?:^|,\s*)chumbaq_refresh=([^;]*)/.exec(setCookie ?? '');
+  return match && match[1] ? match[1] : null;
+}
+
+/** Whether a Set-Cookie header clears the refresh cookie (empty value, expired at the epoch). */
+export function clearsRefreshCookie(setCookie: string | null): boolean {
+  return /(?:^|,\s*)chumbaq_refresh=;/.test(setCookie ?? '') && /Expires=Thu, 01 Jan 1970/.test(setCookie ?? '');
+}
+
+/** `POST /api/auth/refresh` as the dashboard sends it, with the given refresh token as the cookie. */
+export function refreshWith(refreshToken: string | null, ip: string, body: unknown = {}) {
+  return post<any>('/api/auth/refresh', body, {
+    ip,
+    ...(refreshToken ? { cookie: `chumbaq_refresh=${refreshToken}` } : {}),
+  });
 }
 
 export function passwordStep(account: Pick<Account, 'email' | 'password'>, ip: string, password = account.password) {
@@ -180,6 +214,158 @@ export async function seedResetToken(userId: string): Promise<string> {
   return token;
 }
 
+export interface AccountTokenSeed {
+  purpose?: 'reset_password' | 'verify_email';
+  /** Postgres interval from now until it expires (negative: already expired). Default by purpose. */
+  expiresIn?: string;
+  /** A link support issued through the CLI (`staff_issued`). */
+  staffIssued?: boolean;
+  /** Postgres interval from now until a staff link becomes usable (`usable_after`). */
+  usableIn?: string;
+}
+
+/**
+ * An account link's token, stored as the API stores one (only its SHA-256): a mailed
+ * reset (30 minutes) or verify link (24 hours), or a staff-issued reset link with its
+ * wait. For tests about what the page and the route do with it, not the mail.
+ */
+export async function seedAccountToken(userId: string, seed: AccountTokenSeed = {}): Promise<string> {
+  const purpose = seed.purpose ?? 'reset_password';
+  const token = randomBytes(32).toString('base64url');
+  const expiresIn = seed.expiresIn ?? (purpose === 'reset_password' ? '30 minutes' : '24 hours');
+  await sql(
+    `INSERT INTO account_tokens (user_id, purpose, token_hash, expires_at, staff_issued, usable_after)
+     VALUES ($1, $2, $3, now() + $4::interval, $5, CASE WHEN $6::text IS NULL THEN NULL ELSE now() + $6::interval END)`,
+    [userId, purpose, createHash('sha256').update(token).digest('hex'), expiresIn, seed.staffIssued ?? false, seed.usableIn ?? null],
+  );
+  return token;
+}
+
+export interface AccountTokenRow {
+  purpose: string;
+  used_at: Date | null;
+  usable_after: Date | null;
+  expires_at: Date;
+}
+
+/** The stored row of a raw account token. */
+export async function tokenRow(token: string): Promise<AccountTokenRow> {
+  const [row] = await sql<AccountTokenRow>(
+    'SELECT purpose, used_at, usable_after, expires_at FROM account_tokens WHERE token_hash = $1',
+    [createHash('sha256').update(token).digest('hex')],
+  );
+  if (!row) throw new Error('No account_tokens row for that token');
+  return row;
+}
+
+export interface UserState {
+  name: string;
+  email: string;
+  password_hash: string;
+  session_version: number;
+  email_verified_at: Date | null;
+  password_reset_at: Date | null;
+  suspended_at: Date | null;
+}
+
+export async function userState(userId: string): Promise<UserState> {
+  const [row] = await sql<UserState>(
+    `SELECT name, email, password_hash, session_version, email_verified_at, password_reset_at, suspended_at
+       FROM users WHERE id = $1`,
+    [userId],
+  );
+  if (!row) throw new Error(`No users row ${userId}`);
+  return row;
+}
+
+export function usersWithEmail(email: string): Promise<Array<{ id: string }>> {
+  return sql<{ id: string }>('SELECT id FROM users WHERE email = lower($1)', [email]);
+}
+
+export async function markUnverified(userId: string): Promise<void> {
+  await sql('UPDATE users SET email_verified_at = NULL WHERE id = $1', [userId]);
+}
+
+/** As a staff factor reset `ago` (a Postgres interval) leaves the account. */
+export async function setFactorsResetAgo(userId: string, ago: string): Promise<void> {
+  await sql('UPDATE users SET factors_reset_at = now() - $2::interval WHERE id = $1', [userId, ago]);
+}
+
+export interface SessionState {
+  id: string;
+  current_jti: string;
+  revoked_at: Date | null;
+  created_at: Date;
+}
+
+/** Every auth_sessions row of the account, oldest first. */
+export function allSessions(userId: string): Promise<SessionState[]> {
+  return sql<SessionState>(
+    'SELECT id, current_jti, revoked_at, created_at FROM auth_sessions WHERE user_id = $1 ORDER BY created_at',
+    [userId],
+  );
+}
+
+/** Polls auth_events until one of `type` for the address appears since `since`; answers it. */
+export async function waitForAuthEvent(email: string, since: Date, type: string, timeoutMs = 10_000): Promise<AuthEventRow> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = (await authEventsFor(email, since)).find((event) => event.type === type);
+    if (found) return found;
+    if (Date.now() > deadline) throw new Error(`No ${type} auth event for ${email} within ${timeoutMs} ms`);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
+
+export interface AuditLogRow {
+  actor_id: string | null;
+  actor_email: string;
+  action: string;
+  target_id: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+export function auditLogsFor(targetId: string, action: string): Promise<AuditLogRow[]> {
+  return sql<AuditLogRow>(
+    'SELECT actor_id, actor_email, action, target_id, metadata FROM admin_audit_logs WHERE target_id = $1 AND action = $2 ORDER BY created_at',
+    [targetId, action],
+  );
+}
+
+// ---- Sign-up links and view-as
+
+/**
+ * Registers a new address through the API and answers the sign-up link it mailed,
+ * without completing it.
+ */
+export async function mailedSignupLink(ip: string, label: string, name: string): Promise<{ email: string; name: string; link: string }> {
+  const email = uniqueEmail(label);
+  await api('POST', '/api/auth/register', { email, name }, { ip });
+  const mail = await waitForMail(email, { subjectIncludes: 'Finish creating your Chumbaq account' });
+  return { email, name, link: extractLink(mail, '/complete-signup') };
+}
+
+/**
+ * A view-as access token for the tenant: a new super admin enrols a passkey and signs
+ * in to the admin app in `page` (its own tab), starts view-as, and the one-time code is
+ * spent on the customer API, as the /impersonate page would.
+ */
+export async function viewAsToken(page: Page, tenantId: string, ip: string): Promise<string> {
+  const staff = await createAccount(ip, 'staff', 'Sam Staff');
+  await makeSuperAdmin(staff.userId);
+  const staffToken = await enrolAndSignInStaff(page, staff);
+  const handoff = await adminApi<{ url: string }>(
+    'POST',
+    `/api/admin/tenants/${tenantId}/impersonate`,
+    { reason: 'E2E: checking a view-as session' },
+    staffToken,
+    ip,
+  );
+  const code = new URL(handoff.url).hash.replace(/^#code=/, '');
+  const session = await api<{ accessToken: string }>('POST', '/api/auth/impersonation/exchange', { code }, { ip: newClientIp() });
+  return session.accessToken;
+}
+
 // ---- Redis
 
 /**
@@ -262,6 +448,59 @@ export async function enrolTotpConfirmingWithPasskey(page: Page): Promise<TotpEn
 }
 
 // ---- Browser
+
+/** Holds every request to `path` until `release` is called, so a waiting state can be seen. */
+export async function holdRequests(page: Page, path: string): Promise<() => void> {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  await page.route(`**${path}`, async (route) => {
+    await gate;
+    await route.continue();
+  });
+  return release;
+}
+
+export interface CapturedResponse {
+  status: number;
+  text: string;
+  json: any;
+  setCookie: string | null;
+}
+
+/**
+ * Passes every request to `path` through and keeps each answer, body included. For
+ * answers the page navigates away from at once (a redirect after a refusal), whose body
+ * the browser would otherwise have dropped by the time a test reads it. With `holdUntil`,
+ * each request waits for it first, so a waiting state can be seen.
+ */
+export async function captureResponses(
+  page: Page,
+  path: string,
+  { holdUntil }: { holdUntil?: Promise<void> } = {},
+): Promise<CapturedResponse[]> {
+  const captured: CapturedResponse[] = [];
+  await page.route(`**${path}`, async (route) => {
+    if (holdUntil) await holdUntil;
+    const response = await route.fetch();
+    const text = await response.text();
+    let json: any = undefined;
+    try {
+      json = text ? JSON.parse(text) : undefined;
+    } catch {
+      json = undefined;
+    }
+    captured.push({ status: response.status(), text, json, setCookie: response.headers()['set-cookie'] ?? null });
+    await route.fulfill({ response });
+  });
+  return captured;
+}
+
+/** The Bearer token of the next API request the page sends with one. */
+export function nextBearer(page: Page): Promise<string> {
+  return page
+    .waitForRequest((request) => new URL(request.url()).pathname.startsWith('/api/') && Boolean(request.headers()['authorization']))
+    .then((request) => request.headers()['authorization'].replace(/^Bearer /, ''));
+}
 
 /** Fills the login form and clicks "Login". */
 export async function submitLogin(page: Page, email: string, password: string): Promise<void> {
