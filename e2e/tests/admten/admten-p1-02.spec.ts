@@ -224,12 +224,19 @@ test('ADMTEN-097 Account card facts', async ({ page, clientIp }) => {
   await inviteAndAccept(tenant, project.id, member, 'member', clientIp);
   await inviteAddress(tenant, project.id, clientIp);
   // A complete sign-in records the event the card reads.
+  const signIns = () =>
+    sql<{ at: Date }>(`SELECT created_at AS at FROM auth_events WHERE user_id = $1 AND type = 'login.succeeded' ORDER BY created_at`, [
+      tenant.userId,
+    ]);
+  const earlier = (await signIns()).length;
   const login = await customerRequest('POST', '/api/auth/login', { ip: clientIp, body: { email: tenant.email, password: tenant.password } });
   expect(login.status).toBe(200);
+  const events = await signIns();
+  expect(events).toHaveLength(earlier + 1);
+  const latest = events[events.length - 1].at;
 
   const detail = await detailOf(staff, tenant.userId, clientIp);
-  expect(detail.lastSignInAt).not.toBeNull();
-  expect(Math.abs(Date.now() - new Date(detail.lastSignInAt!).getTime())).toBeLessThan(5 * 60_000);
+  expect(detail.lastSignInAt).toBe(new Date(latest).toISOString());
 
   await openTenantPage(page, tenant);
   const card = cardTitled(page, 'Account');
@@ -414,6 +421,9 @@ test('ADMTEN-111 usage chart and month comparison', async ({ page, clientIp }) =
     row(through, 'events', 40),
     row(through, 'mau_month_to_date', 8),
     row(lastMonthEnd, 'push_sent', 3),
+    // Another account's project on the same day: none of it is T's.
+    { projectId: randomUUID(), ownerId: randomUUID(), day: through, metric: 'push_sent', value: 100 },
+    { projectId: randomUUID(), ownerId: randomUUID(), day: through, metric: 'mau_month_to_date', value: 50 },
   ];
   // Partial while the month has days after the last counted one.
   const nextMonthStart = new Date(`${thisMonth}-01T00:00:00Z`);
@@ -465,8 +475,9 @@ test('ADMTEN-111 usage chart and month comparison', async ({ page, clientIp }) =
 test('ADMTEN-114 by-project table, deleted projects and naming', async ({ page, clientIp }) => {
   await signedInStaff(page, clientIp);
   const tenant = await createAccount(newClientIp(), 'tenant', 'Tess Tenant');
-  const beta = await createProject(tenant, clientIp, 'Beta');
+  // Alpha is older and has the smaller counts, so only an order by name puts it first.
   const alpha = await createProject(tenant, clientIp, 'Alpha');
+  const beta = await createProject(tenant, clientIp, 'Beta');
   const gone = randomUUID();
   const state = COUNTED_STATE();
   const through = state.lastClosedDay;
@@ -479,13 +490,13 @@ test('ADMTEN-114 by-project table, deleted projects and naming', async ({ page, 
     value,
   });
   const rows = [
-    row(alpha.id, through, 'mau_month_to_date', 3),
-    row(alpha.id, earlier, 'push_sent', 7),
-    row(alpha.id, through, 'sms_sent', 2),
-    row(alpha.id, earlier, 'events', 11),
-    row(alpha.id, through, 'clicks', 5),
-    row(beta.id, earlier, 'email_sent', 4),
-    row(beta.id, through, 'clicks', 1),
+    row(beta.id, through, 'mau_month_to_date', 3),
+    row(beta.id, earlier, 'push_sent', 7),
+    row(beta.id, through, 'sms_sent', 2),
+    row(beta.id, earlier, 'events', 11),
+    row(beta.id, through, 'clicks', 5),
+    row(alpha.id, earlier, 'email_sent', 4),
+    row(alpha.id, through, 'clicks', 1),
     row(gone, through, 'mau_month_to_date', 1),
     row(gone, earlier, 'whatsapp_sent', 6),
     row(gone, earlier, 'events', 2),
@@ -498,8 +509,8 @@ test('ADMTEN-114 by-project table, deleted projects and naming', async ({ page, 
     await expect(table.getByRole('columnheader')).toHaveText(['Project', 'Monthly active devices', 'Messages (90d)', 'Events', 'Link clicks']);
     const body = table.locator('tbody tr');
     await expect(body).toHaveCount(3);
-    await expect(body.nth(0).getByRole('cell')).toHaveText(['Alpha', '3', '9', '11', '5']);
-    await expect(body.nth(1).getByRole('cell')).toHaveText(['Beta', '0', '4', '0', '1']);
+    await expect(body.nth(0).getByRole('cell')).toHaveText(['Alpha', '0', '4', '0', '1']);
+    await expect(body.nth(1).getByRole('cell')).toHaveText(['Beta', '3', '9', '11', '5']);
     await expect(body.nth(2).getByRole('cell')).toHaveText(['Deleted project', '1', '6', '2', '0']);
     await expect(body.nth(2).getByRole('cell').first().locator('span.italic')).toHaveText('Deleted project');
   });
