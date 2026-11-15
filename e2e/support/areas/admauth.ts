@@ -770,3 +770,114 @@ export async function enrolPasskeyByApi(page: Page, token: string, name = 'E2E s
   const response = await browserAttestation(page, options.data.options);
   return staffApi('POST', '/api/staff/auth/passkeys', { response, name }, { token, ip });
 }
+
+// ---- P1 chunk 2: support links, attempt counters, audit trails, second keys by API
+
+/**
+ * A reset link support issued through the CLI, unused and still waiting out its delay,
+ * stored as the API stores one (only its SHA-256). Answers the row's id.
+ */
+export async function seedStaffResetLink(userId: string): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO account_tokens (user_id, purpose, token_hash, expires_at, staff_issued, usable_after)
+     VALUES ($1, 'reset_password', $2, now() + interval '48 hours', true, now() + interval '24 hours') RETURNING id`,
+    [userId, createHash('sha256').update(randomUUID()).digest('hex')],
+  );
+  return row.id;
+}
+
+export async function accountTokenUsedAt(id: string): Promise<Date | null> {
+  const [row] = await sql<{ used_at: Date | null }>(`SELECT used_at FROM account_tokens WHERE id = $1`, [id]);
+  return row.used_at;
+}
+
+/** Sets the account's second-factor attempt count (`second-factor` in the address's sign-in attempts hash) for 15 minutes. */
+export function seedSecondFactorAttempts(email: string, count: number): Promise<unknown> {
+  const key = `chumbaq:signin-attempts:${createHash('sha256').update(email.trim().toLowerCase()).digest('hex')}`;
+  return withRedis(async (redis) => {
+    await redis.hset(key, 'second-factor', String(count));
+    await redis.expire(key, 900);
+  });
+}
+
+export interface AuditTrailRow {
+  action: string;
+  actor_id: string | null;
+  actor_email: string;
+  ip_address: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+/** Every admin_audit_logs row targeting a user since `since`, oldest first, with actor and address. */
+export function auditTrail(userId: string, since: Date): Promise<AuditTrailRow[]> {
+  return sql<AuditTrailRow>(
+    `SELECT action, actor_id, actor_email, ip_address, metadata FROM admin_audit_logs
+      WHERE target_id = $1 AND created_at >= $2 ORDER BY created_at, id`,
+    [userId, since],
+  );
+}
+
+export async function recoveryCodeCount(userId: string): Promise<number> {
+  const [row] = await sql<{ n: string }>(`SELECT count(*) AS n FROM recovery_codes WHERE user_id = $1`, [userId]);
+  return Number(row.n);
+}
+
+/** A recovery code row with a placeholder hash (it can never be used), to see it removed. */
+export async function seedRecoveryCodeRow(userId: string): Promise<void> {
+  await sql(`INSERT INTO recovery_codes (user_id, code_hash) VALUES ($1, $2)`, [userId, createHash('sha256').update(randomUUID()).digest('hex')]);
+}
+
+/**
+ * A staff member with one staff passkey (held by the tab's authenticator) and a confirmed
+ * authenticator app, both added through the real routes. The page is left on /sign-in,
+ * signed out of the admin app (the app's confirm ended the API session it used).
+ */
+export async function staffWithPasskeyAndApp(
+  page: Page,
+  ip: string,
+): Promise<{ staff: Account; authenticator: VirtualAuthenticator; enrolment: TotpEnrolment }> {
+  const staff = await makeStaff(ip);
+  const authenticator = await enrolStaffPasskey(page, staff);
+  const signedIn = await staffPasskeySignIn(page);
+  const enrolment = await enrolStaffTotpInFullSession(page, signedIn.accessToken);
+  return { staff, authenticator, enrolment };
+}
+
+/**
+ * Another staff passkey through the admin API for a session holding a fresh proof: the
+ * tab's authenticator sets its keys aside (registration lists them in
+ * `excludeCredentials`), makes the new one, and gets the old ones back (non-discoverable,
+ * still answering when asked for by id).
+ */
+export async function addPasskeyByApi(
+  page: Page,
+  authenticator: VirtualAuthenticator,
+  token: string,
+  name: string,
+  ip = newClientIp(),
+): Promise<StaffResponse> {
+  const options = await staffApi('POST', '/api/staff/auth/passkeys/options', {}, { token, ip });
+  if (options.status !== 200) throw new Error(`passkeys/options answered ${options.status}: ${JSON.stringify(options.body)}`);
+  const response = await attestWithKeysAside(page, authenticator, options.data.options);
+  return staffApi('POST', '/api/staff/auth/passkeys', { response, name }, { token, ip });
+}
+
+/**
+ * A registration from the tab's authenticator for options listing its own keys in
+ * `excludeCredentials`: the keys are set aside while the new one is made, then put back
+ * (non-discoverable, still answering when asked for by id).
+ */
+export async function attestWithKeysAside(page: Page, authenticator: VirtualAuthenticator, options: any): Promise<any> {
+  const saved = (await authenticator.cdp.send('WebAuthn.getCredentials', { authenticatorId: authenticator.authenticatorId })).credentials;
+  await authenticator.clearCredentials();
+  try {
+    return await browserAttestation(page, options);
+  } finally {
+    for (const credential of saved) {
+      await authenticator.cdp.send('WebAuthn.addCredential', {
+        authenticatorId: authenticator.authenticatorId,
+        credential: { ...credential, isResidentCredential: false },
+      });
+    }
+  }
+}
