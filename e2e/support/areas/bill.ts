@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'crypto';
+import { createHash, createHmac, hkdfSync, randomBytes } from 'crypto';
 import path from 'path';
 import { Client } from 'pg';
 import { expect, type Locator, type Page } from '@playwright/test';
@@ -59,7 +59,8 @@ export async function waitForCancelCall(subscriptionId: string, timeoutMs = 100_
   throw new Error(`No cancel for ${subscriptionId} reached the mock within ${timeoutMs / 1000}s`);
 }
 
-async function registerMockPlan(period: 'monthly' | 'yearly', amount: number): Promise<string> {
+/** A plan at the mock (as staff would create one in Razorpay first); answers its id. */
+export async function registerMockPlan(period: 'monthly' | 'yearly', amount: number): Promise<string> {
   const id = `plan_${randomBytes(7).toString('hex')}`;
   const response = await fetch(mockUrl('/__mock/plans'), {
     method: 'POST',
@@ -476,4 +477,388 @@ export async function startBillingOffApi(): Promise<BillingOffApi> {
     throw error;
   }
   return { url: `http://localhost:${port}`, stop: () => stopAll([started]) };
+}
+
+// ------------------------------------------------------------------ webhooks with full control
+
+/** The webhook endpoint with these bytes and headers; the signature defaults to the right one. */
+export async function postWebhook(
+  rawBody: string,
+  options: { eventId?: string | null; signature?: string | null; ip?: string } = {},
+): Promise<Raw & { eventId: string | null }> {
+  const eventId = options.eventId === undefined ? newEventId() : options.eventId;
+  const signature =
+    options.signature === undefined
+      ? createHmac('sha256', runSecrets().razorpayWebhookSecret).update(rawBody).digest('hex')
+      : options.signature;
+  const response = await fetch(apiUrl('/api/billing/webhooks/razorpay'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(signature === null ? {} : { 'X-Razorpay-Signature': signature }),
+      ...(eventId === null ? {} : { 'x-razorpay-event-id': eventId }),
+      ...(options.ip ? { 'X-Forwarded-For': options.ip } : {}),
+    },
+    body: rawBody,
+  });
+  const text = await response.text();
+  let parsed: unknown = text;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    // keep text
+  }
+  return { status: response.status, body: parsed, eventId };
+}
+
+export const newEventId = () => `evt_e2e${randomBytes(6).toString('hex')}`;
+
+export interface SentEvent extends Raw {
+  eventId: string;
+  rawBody: string;
+}
+
+/**
+ * Moves a subscription at the mock and sends its webhook with a chosen `created_at`
+ * (default now) and, optionally, a payment entity beside it, as `subscription.charged`
+ * carries. Never throws: the caller reads the answer.
+ */
+export async function sendEvent(
+  event: string,
+  subscriptionId: string,
+  changes: Record<string, unknown>,
+  options: { createdAt?: number; payment?: Record<string, unknown> } = {},
+): Promise<SentEvent> {
+  const entity = await (
+    await fetch(mockUrl(`/__mock/subscriptions/${subscriptionId}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(changes),
+    })
+  ).json();
+  const rawBody = JSON.stringify({
+    entity: 'event',
+    account_id: 'acc_e2eMockOnly01',
+    event,
+    contains: options.payment ? ['subscription', 'payment'] : ['subscription'],
+    payload: { subscription: { entity }, ...(options.payment ? { payment: { entity: options.payment } } : {}) },
+    created_at: options.createdAt ?? nowSeconds(),
+  });
+  const eventId = newEventId();
+  const reply = await postWebhook(rawBody, { eventId });
+  return { ...reply, eventId, rawBody };
+}
+
+/** A Razorpay payment entity in the documented shape, with the fields a person's payment carries. */
+export function paymentEntity(fields: {
+  id?: string;
+  amount: number;
+  status: 'captured' | 'failed' | 'refunded';
+  customerId?: string | null;
+  invoiceId?: string | null;
+  method?: string;
+  createdAt?: number;
+  errorReason?: string | null;
+  email?: string;
+  contact?: string;
+}): Record<string, unknown> {
+  return {
+    id: fields.id ?? `pay_e2e${randomBytes(6).toString('hex')}`,
+    entity: 'payment',
+    amount: fields.amount,
+    currency: 'INR',
+    status: fields.status,
+    order_id: null,
+    invoice_id: fields.invoiceId ?? null,
+    international: false,
+    method: fields.method ?? 'upi',
+    amount_refunded: 0,
+    refund_status: null,
+    captured: fields.status === 'captured',
+    description: 'E2E payment',
+    card_id: 'card_E2eCard0000001',
+    card: { id: 'card_E2eCard0000001', entity: 'card', name: 'Bela Buyer', last4: '1111', network: 'Visa' },
+    bank: 'HDFC',
+    wallet: null,
+    vpa: 'bela.buyer@okhdfc',
+    email: fields.email ?? 'bela.buyer@e2e.example.test',
+    contact: fields.contact ?? '+919000012345',
+    customer_id: fields.customerId ?? null,
+    notes: { address: '1 Test Street', person: 'Bela Buyer' },
+    fee: 0,
+    tax: 0,
+    error_code: fields.status === 'failed' ? 'BAD_REQUEST_ERROR' : null,
+    error_description: fields.status === 'failed' ? 'Payment failed' : null,
+    error_source: fields.status === 'failed' ? 'customer' : null,
+    error_step: fields.status === 'failed' ? 'payment_authorization' : null,
+    error_reason: fields.status === 'failed' ? (fields.errorReason ?? 'payment_failed') : null,
+    acquirer_data: { rrn: '000000000000' },
+    created_at: fields.createdAt ?? nowSeconds(),
+  };
+}
+
+/** A signed event of any type carrying exactly these entities. */
+export async function sendEntities(
+  event: string,
+  entities: Record<string, Record<string, unknown>>,
+  createdAt = nowSeconds(),
+): Promise<SentEvent> {
+  const rawBody = JSON.stringify({
+    entity: 'event',
+    account_id: 'acc_e2eMockOnly01',
+    event,
+    contains: Object.keys(entities),
+    payload: Object.fromEntries(Object.entries(entities).map(([name, entity]) => [name, { entity }])),
+    created_at: createdAt,
+  });
+  const eventId = newEventId();
+  return { ...(await postWebhook(rawBody, { eventId })), eventId, rawBody };
+}
+
+/**
+ * Razorpay's `invoice.paid` fixture (the API's own test copy of the documented body)
+ * with the run's ids: the account's subscription and customer, a fresh invoice and
+ * payment id, and the given number, amount, period and short URL.
+ */
+export async function sendInvoicePaid(fields: {
+  subscriptionId: string;
+  customerId: string;
+  number: string;
+  amount: number;
+  billingStart: number;
+  billingEnd: number;
+  shortUrl: string | null;
+}): Promise<SentEvent & { invoiceId: string }> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fixture = JSON.parse(
+    JSON.stringify(require(path.join(REPO_ROOT, 'apps/api/src/modules/billing/providers/__fixtures__/razorpay/invoice.paid.json'))),
+  );
+  const invoiceId = `inv_e2e${randomBytes(6).toString('hex')}`;
+  const paymentId = `pay_e2e${randomBytes(6).toString('hex')}`;
+  const now = nowSeconds();
+  const invoice = fixture.payload.invoice.entity;
+  Object.assign(invoice, {
+    id: invoiceId,
+    subscription_id: fields.subscriptionId,
+    customer_id: fields.customerId,
+    payment_id: paymentId,
+    invoice_number: fields.number,
+    amount: fields.amount,
+    amount_paid: fields.amount,
+    gross_amount: fields.amount,
+    taxable_amount: fields.amount,
+    tax_amount: 0,
+    billing_start: fields.billingStart,
+    billing_end: fields.billingEnd,
+    issued_at: now,
+    paid_at: now,
+    short_url: fields.shortUrl,
+    status: 'paid',
+  });
+  Object.assign(fixture.payload.payment.entity, {
+    id: paymentId,
+    invoice_id: invoiceId,
+    order_id: null,
+    amount: fields.amount,
+    customer_id: fields.customerId,
+    created_at: now,
+  });
+  delete fixture.payload.order;
+  fixture.contains = ['payment', 'invoice'];
+  fixture.created_at = now;
+  const rawBody = JSON.stringify(fixture);
+  const eventId = newEventId();
+  return { ...(await postWebhook(rawBody, { eventId })), eventId, rawBody, invoiceId };
+}
+
+export interface BillingEventRow {
+  provider: string;
+  provider_event_id: string;
+  type: string;
+  outcome: string;
+  detail: string | null;
+  body_sha256: string | null;
+  attempts: number;
+  payload: Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+}
+
+export async function billingEvent(eventId: string): Promise<BillingEventRow | undefined> {
+  const [row] = await query<BillingEventRow>(`SELECT * FROM billing_events WHERE provider_event_id = $1`, [eventId]);
+  return row;
+}
+
+export async function billingEventsWithBody(rawBody: string): Promise<BillingEventRow[]> {
+  return query<BillingEventRow>(`SELECT * FROM billing_events WHERE body_sha256 = $1`, [sha256Hex(rawBody)]);
+}
+
+export async function billingAccountRow(userId: string): Promise<Record<string, any>> { // eslint-disable-line @typescript-eslint/no-explicit-any
+  const [row] = await query(`SELECT * FROM billing_accounts WHERE user_id = $1`, [userId]);
+  return row;
+}
+
+// ------------------------------------------------------------------ limits
+
+/** `n` projects owned by the account, through the real create. */
+export async function createProjects(account: Account, ip: string, n: number, label = 'Limit'): Promise<void> {
+  for (let i = 0; i < n; i += 1) {
+    await api('POST', '/api/projects', { name: `${label} ${i + 1} ${randomBytes(2).toString('hex')}`, domain: 'e2e.example.test' }, {
+      token: account.accessToken,
+      ip,
+    });
+  }
+}
+
+export function tryCreateProject(account: Account, ip: string): Promise<Raw> {
+  return rawApi('POST', '/api/projects', {
+    token: account.accessToken,
+    ip,
+    body: { name: `Over the limit ${randomBytes(2).toString('hex')}`, domain: 'e2e.example.test' },
+  });
+}
+
+export function invite(account: Account, ip: string, projectId: string, email: string, role = 'member'): Promise<Raw> {
+  return rawApi('POST', `/api/projects/${projectId}/invitations`, { token: account.accessToken, ip, body: { email, role } });
+}
+
+export async function projectCount(userId: string): Promise<number> {
+  const [row] = await query<{ n: number }>(`SELECT count(*)::int AS n FROM projects WHERE owner_id = $1`, [userId]);
+  return row.n;
+}
+
+// ------------------------------------------------------------------ staff
+
+/** A comp through the staff API. */
+export function compTenant(staffToken: string, ip: string, tenantId: string, planCode: string, until?: string): Promise<unknown> {
+  return adminApi(
+    'POST',
+    `/api/admin/tenants/${tenantId}/billing/comp`,
+    { planCode, reason: 'E2E: a complimentary plan', ...(until ? { until } : {}) },
+    staffToken,
+    ip,
+  );
+}
+
+export function endCompOf(staffToken: string, ip: string, tenantId: string): Promise<unknown> {
+  return adminApi('POST', `/api/admin/tenants/${tenantId}/billing/comp/end`, { reason: 'E2E: the comp is over' }, staffToken, ip);
+}
+
+/** A request to the admin API (or another base) that never throws. */
+export async function rawAdmin(
+  method: string,
+  p: string,
+  { token, ip, body, base }: { token?: string; ip: string; body?: unknown; base?: string },
+): Promise<Raw> {
+  const response = await fetch(`${base ?? process.env.E2E_ADMIN_API_URL}${p}`, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Forwarded-For': ip,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await response.text();
+  let parsed: unknown = text;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    // keep text
+  }
+  return { status: response.status, body: parsed };
+}
+
+/**
+ * The same staff access token (same session, version and claims) re-signed with an
+ * `auth_time` of `ageSeconds` ago, as the API would have issued it then: the staff key
+ * is HKDF-SHA256 of the run's JWT secret, as `staffAccessKey` derives it.
+ */
+export function agedStaffToken(token: string, ageSeconds: number): string {
+  const key = Buffer.from(hkdfSync('sha256', runSecrets().jwtSecret, 'chumbaq-staff-session', 'staff-access-token-v1', 32));
+  const [header, payload] = token.split('.');
+  const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+  claims.auth_time = Math.floor(Date.now() / 1000) - ageSeconds;
+  const body = Buffer.from(JSON.stringify(claims)).toString('base64url');
+  const signature = createHmac('sha256', key).update(`${header}.${body}`).digest('base64url');
+  return `${header}.${body}.${signature}`;
+}
+
+export async function auditRows(action: string, where: { targetId?: string; targetLabel?: string }): Promise<Array<Record<string, any>>> { // eslint-disable-line @typescript-eslint/no-explicit-any
+  if (where.targetId) {
+    return query(`SELECT * FROM admin_audit_logs WHERE action = $1 AND target_id = $2 ORDER BY created_at`, [action, where.targetId]);
+  }
+  return query(`SELECT * FROM admin_audit_logs WHERE action = $1 AND target_label = $2 ORDER BY created_at`, [action, where.targetLabel]);
+}
+
+/** A second admin API on the lane's database and secrets with BILLING_ENABLED=false, on the API port + 98. */
+export async function startBillingOffAdminApi(): Promise<BillingOffApi> {
+  const ports = stackPorts();
+  const port = ports.api + 98;
+  const env = {
+    ...process.env,
+    ...appEnvironment(runSecrets(), ports),
+    BILLING_ENABLED: 'false',
+    ADMIN_API_PORT: String(port),
+  };
+  const started = run('admin-api-billing-off', 'node', ['dist/main-admin'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
+  try {
+    await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    throw error;
+  }
+  return { url: `http://127.0.0.1:${port}`, stop: () => stopAll([started]) };
+}
+
+// ------------------------------------------------------------------ formatting and the admin app
+
+/** Integer paise as the apps print them: Indian grouping, two decimals. */
+export function rupees(paise: number): string {
+  const digits = String(Math.abs(paise)).padStart(3, '0');
+  let whole = digits.slice(0, -2);
+  if (whole.length > 3) {
+    const last = whole.slice(-3);
+    let rest = whole.slice(0, -3);
+    const pairs: string[] = [];
+    while (rest.length > 2) {
+      pairs.unshift(rest.slice(-2));
+      rest = rest.slice(0, -2);
+    }
+    pairs.unshift(rest);
+    whole = `${pairs.join(',')},${last}`;
+  }
+  return `${paise < 0 ? '-' : ''}₹${whole}.${digits.slice(-2)}`;
+}
+
+/** A day as the admin app writes it (en-GB, short month), in UTC (the staff context is pinned to UTC). */
+export function gbDate(at: number | string | Date): string {
+  const date = typeof at === 'number' ? new Date(at * 1000) : new Date(at);
+  return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+}
+
+/** A card in the admin app by its exact title. */
+export function adminCard(page: Page, title: string | RegExp): Locator {
+  return page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.locator('[data-slot="card-title"]').getByText(title, { exact: true }) });
+}
+
+/** The tenant page's Billing card. */
+export function tenantBillingCard(page: Page): Locator {
+  return adminCard(page, 'Billing');
+}
+
+/** A fact on the Billing card (its <dd>), by its label. */
+export function fact(card: Locator, label: string): Locator {
+  return card.locator(`dt:text-is("${label}") + dd`);
+}
+
+/** A plan's card on the admin Plans page, by its code. */
+export function adminPlanCard(page: Page, code: string): Locator {
+  return page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.locator('[data-slot="card-title"] span.font-mono').getByText(code, { exact: true }) });
+}
+
+export function adminToast(page: Page, title: string): Locator {
+  return page.getByText(title, { exact: true }).first();
 }
