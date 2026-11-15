@@ -629,9 +629,10 @@ test('SMSWA-130 ready project with no campaigns', async ({ page }) => {
   await page.goto(`/projects/${p.project.id}/whatsapp`);
 
   await expect(page.getByText('No WhatsApp campaigns yet.', { exact: true })).toBeVisible();
-  await expect(page.getByText('WhatsApp is not set up yet. Connect a provider under Settings.')).toHaveCount(0);
   const create = page.getByRole('link', { name: 'Create your first WhatsApp campaign' });
   await expect(create).toHaveAttribute('href', `/projects/${p.project.id}/whatsapp/new`);
+  // The link needs the settings to have loaded, so the warning's absence is now meaningful.
+  await expect(page.getByText('WhatsApp is not set up yet. Connect a provider under Settings.')).toHaveCount(0);
   await create.click();
   await expect(page).toHaveURL(new RegExp(`/projects/${p.project.id}/whatsapp/new$`));
   await expect(page.getByRole('heading', { name: 'New WhatsApp campaign', exact: true })).toBeVisible();
