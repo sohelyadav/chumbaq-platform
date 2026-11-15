@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import type { BrowserContext, Page, Response } from '@playwright/test';
 import { adminUrl } from '../../support/admin';
 import { createAccount } from '../../support/api';
+import { runSecrets } from '../../support/stack';
 import { decodeQrOnPage } from '../../support/browser-tools';
 import { addAuthenticator, totpCode } from '../../support/factors';
 import { expect, newPersonContext, test } from '../../support/fixtures';
@@ -62,18 +63,22 @@ const SYNCED_REFUSED =
   'Staff accounts need a device-bound key, such as a hardware security key. This one syncs between devices. To allow that, set SUPER_ADMIN_ALLOW_SYNCED_PASSKEYS.';
 const REFRESH = '/api/staff/auth/session/refresh';
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 const pathOf = (url: string) => new URL(url).pathname;
 const isStaffCall = (pathname: string, method?: string) => (response: Response) =>
   pathOf(response.url()) === pathname && (!method || response.request().method() === method);
 
-/** Holds a page's requests to one admin API path for a moment, so a busy state can be seen. */
-async function delay(page: Page, pathname: string, ms = 1000): Promise<void> {
+/**
+ * Holds a page's requests to one admin API path until the test releases them, so a busy
+ * state can be seen for as long as the assertion needs.
+ */
+async function hold(page: Page, pathname: string): Promise<{ release(): void }> {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
   await page.route(adminUrl(pathname), async (route) => {
-    await sleep(ms);
+    await released;
     await route.fallback();
   });
+  return { release };
 }
 
 interface Answer {
@@ -190,12 +195,13 @@ test('ADMAUTH-061 add the first passkey on /enrol', async ({ page, clientIp }) =
   await expect(page).toHaveURL(adminUrl('/enrol'));
   const since = new Date();
 
-  await delay(page, '/api/staff/auth/passkeys/options');
+  const held = await hold(page, '/api/staff/auth/passkeys/options');
   const optionsResponse = page.waitForResponse(isStaffCall('/api/staff/auth/passkeys/options'));
   const added = await recordAnswers(page, '/api/staff/auth/passkeys', 'POST');
   await page.getByLabel('Passkey name').fill('Work laptop');
   await page.getByRole('button', { name: 'Add a passkey' }).click();
   await expect(page.getByRole('button', { name: 'Waiting for your passkey...' })).toBeDisabled();
+  held.release();
 
   const options = ((await (await optionsResponse).json()) as { data: { options: any } }).data.options;
   expect(options.authenticatorSelection).toMatchObject({ residentKey: 'required', userVerification: 'required' });
@@ -272,14 +278,18 @@ test('ADMAUTH-069 add an authenticator app on /enrol', async ({ page, clientIp }
     const url = request.url();
     if (!url.startsWith(origin) && !url.startsWith('data:') && !url.startsWith('blob:')) elsewhere.push(url);
   });
+  // Another enrolment session of theirs, which the new factor ends too.
+  const other = await staffApi('POST', '/api/staff/auth/login', { email: staff.email, password: staff.password });
+  expect(other.data.step).toBe('enrol');
   const login = await passwordStep(page, staff.email, staff.password);
   const enrolling = ((await login.json()) as { data: { session: { id: string } } }).data.session.id;
   await expect(page).toHaveURL(adminUrl('/enrol'));
   const since = new Date();
 
-  await delay(page, '/api/staff/auth/totp/setup');
+  const held = await hold(page, '/api/staff/auth/totp/setup');
   await page.getByRole('button', { name: 'Use an authenticator app' }).click();
   await expect(page.getByRole('button', { name: 'Starting...' })).toBeDisabled();
+  held.release();
   await expect(page.getByText('Scan this with your authenticator app, or enter the key by hand. Then type the code it shows.')).toBeVisible();
   const secret = (await page.locator('code').textContent())?.trim() ?? '';
   expect(secret).toMatch(/^[A-Z2-7]{16,}=*$/);
@@ -296,6 +306,7 @@ test('ADMAUTH-069 add an authenticator app on /enrol', async ({ page, clientIp }
   const [secretRow] = await sql<{ confirmed_at: Date | null }>(`SELECT confirmed_at FROM totp_secrets WHERE user_id = $1`, [staff.userId]);
   expect(secretRow.confirmed_at).not.toBeNull();
   expect((await staffSession(enrolling)).revoked_reason).toBe('enrolled');
+  expect((await staffSession(other.data.session.id)).revoked_reason).toBe('factor_changed');
   expect(await authEvents({ userId: staff.userId }, since, 'totp.enabled')).toHaveLength(1);
   const [audit] = await auditRows(staff.userId, since, 'staff.factor_added');
   expect(audit.metadata).toEqual({ method: 'totp', sessionId: enrolling });
@@ -440,9 +451,11 @@ test('ADMAUTH-083 reload keeps the session', async ({ page, context, clientIp })
     const pathname = pathOf(request.url());
     if (pathname.startsWith('/api/')) order.push(pathname);
   });
-  await delay(page, REFRESH, 800);
+  const held = await hold(page, REFRESH);
   await page.reload();
   await expect(page.locator('.animate-spin')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign in with a passkey' })).toHaveCount(0);
+  held.release();
   await expect(heading(page, 'Tenants')).toBeVisible();
   await expect(page).toHaveURL(adminUrl('/tenants'));
 
@@ -568,9 +581,17 @@ test('ADMAUTH-095 revoking staff access ends the session at its next request', a
   await expect(heading(page, 'Overview')).toBeVisible();
 
   await revokeStaffWithCli(staff.email);
+  const tenants = await recordAnswers(page, '/api/admin/tenants');
+  const refreshes = await recordAnswers(page, REFRESH);
   await sidebarLink(page, 'Tenants').click();
   await expect(page).toHaveURL(adminUrl('/sign-in?reason=ended'));
   await expect(page.getByRole('status')).toHaveText(ENDED);
+  expect(tenants.length).toBeGreaterThanOrEqual(1);
+  expect(tenants[0].status).toBe(401);
+  expect(tenants[0].body.message).toBe(ENDED);
+  expect(refreshes).toHaveLength(1);
+  expect(refreshes[0].status).toBe(401);
+  expect(refreshes[0].body.message).toBe(ENDED);
   expect((await staffSession(signedIn.session.id)).revoked_reason).toBe('staff_revoked');
 
   const [passkey] = await Promise.all([
@@ -700,7 +721,7 @@ test('ADMAUTH-114 sign out from the sidebar', async ({ page, context, clientIp }
 test('ADMAUTH-118 an expired access token is refreshed once and the request resent', async ({ page, clientIp }) => {
   const staff = await makeStaff(clientIp);
   await enrolStaffPasskey(page, staff);
-  await signInStaffInPage(page);
+  const signedIn = await signInStaffInPage(page);
   await expect(heading(page, 'Overview')).toBeVisible();
 
   const bearers: string[] = [];
@@ -719,7 +740,8 @@ test('ADMAUTH-118 an expired access token is refreshed once and the request rese
   );
   const refreshes = watchResponses(page, REFRESH);
   // A token issued in the same second as the sign-in's would be the same token.
-  await sleep(1100);
+  const issuedAt = jwtClaims(signedIn.accessToken).iat as number;
+  await expect.poll(() => Math.floor(Date.now() / 1000)).toBeGreaterThan(issuedAt);
 
   await sidebarLink(page, 'Tenants').click();
   await expect(heading(page, 'Tenants')).toBeVisible();
@@ -913,6 +935,9 @@ test('ADMAUTH-139 remove a passkey that is not yours', async ({ page, clientIp }
   const customerKey = await staffApi('DELETE', `/api/staff/auth/passkeys/${aCustomerKey.id}`, undefined, { token });
   expect(customerKey.status).toBe(404);
   expect(customerKey.body.message).toBe('Passkey not found');
+  const spentAgain = await staffApi('DELETE', `/api/staff/auth/passkeys/${bKey}`, undefined, { token });
+  expect(spentAgain.status).toBe(403);
+  expect(spentAgain.body.message).toBe(REAUTH);
 
   const malformed = await staffApi('DELETE', '/api/staff/auth/passkeys/not-a-uuid', undefined, { token });
   expect(malformed.status).toBe(400);
@@ -956,7 +981,7 @@ test('ADMAUTH-156 tampered or mismatched staff tokens are refused', async ({ pag
   const flipped = body.slice(0, 10) + (body[10] === 'A' ? 'B' : 'A') + body.slice(11);
   const cases: Array<[string, string]> = [
     ['a payload byte changed', `${head}.${flipped}.${signature}`],
-    ['signed with the customer key', signHs256(claims, process.env.E2E_JWT_SECRET!)],
+    ['signed with the customer key', signHs256(claims, runSecrets().jwtSecret)],
     ['no audience', signHs256({ ...claims, aud: undefined }, runStaffKey())],
     ['expired', signHs256({ ...claims, iat: claims.exp - 700, exp: Math.floor(Date.now() / 1000) - 60 }, runStaffKey())],
   ];
