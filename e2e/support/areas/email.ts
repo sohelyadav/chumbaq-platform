@@ -1,5 +1,5 @@
 import { randomBytes } from 'crypto';
-import { expect, type Locator, type Page } from '@playwright/test';
+import { expect, type Browser, type Locator, type Page } from '@playwright/test';
 import { Client } from 'pg';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
 import {
@@ -9,7 +9,10 @@ import {
   type EmailSender,
   type SeededEmail,
 } from '../channels';
+import { adminApi, enrolAndSignInStaff } from '../admin';
+import { newPersonContext } from '../fixtures';
 import { stubCalls } from '../provider-stub';
+import { signSvix } from '../signing';
 import { assertE2eDatabase, stackEnv } from '../stack';
 
 /**
@@ -355,4 +358,207 @@ export function whenLabel(at: Date): string {
   const month = at.toLocaleString('en-US', { month: 'short' });
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${month} ${at.getDate()}, ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
+// ---- Second chunk: double opt-in, provider webhooks, view-as
+
+export const ROLE_REFUSAL = 'Your role in this project does not allow this.';
+export const READ_ONLY = 'Impersonation sessions are read-only';
+export const HIDDEN_VALUE = 'hidden while viewing as tenant';
+export const HIDDEN_FROM_ROLE = 'Only owners and admins can see this.';
+export const NOTHING_DELIVERED =
+  'Nothing was delivered: by the time this campaign ran, nobody in its audience could be emailed. People may have unsubscribed, bounced, withdrawn consent or reached the frequency cap since it was created.';
+
+/** One device through the SDK's identify route under a fingerprint the caller keeps (to report it again). */
+export async function identifyDevice(
+  p: Pick<EmailProject, 'project' | 'sdkKey'>,
+  ip: string,
+  fingerprint: string,
+  person: EmailPerson,
+): Promise<string> {
+  const identity = await api<{ id: string }>(
+    'POST',
+    '/api/identity/identify',
+    { projectId: p.project.id, deviceFingerprint: fingerprint, platform: 'web', ...person },
+    { apiKey: p.sdkKey, ip },
+  );
+  return identity.id;
+}
+
+/**
+ * Records a confirmation mail as sent to `address` at `at` (to the millisecond), on every
+ * row holding it, as the confirmation mailer's claim leaves them.
+ */
+export async function markConfirmSent(projectId: string, address: string, at: Date): Promise<void> {
+  const rows = await sql(
+    `UPDATE device_identities SET email_confirm_sent_at = $3 WHERE project_id = $1 AND email = $2 RETURNING id`,
+    [projectId, address, at],
+  );
+  if (rows.length === 0) throw new Error(`Nobody in ${projectId} holds ${address}`);
+}
+
+export async function identityRows(projectId: string, address: string): Promise<Array<Record<string, any>>> {
+  return sql(
+    `SELECT id, email, email_opt_in, email_confirmed_at, email_confirm_sent_at FROM device_identities
+      WHERE project_id = $1 AND email = $2 ORDER BY id`,
+    [projectId, address],
+  );
+}
+
+export async function eventRows(projectId: string): Promise<Array<Record<string, any>>> {
+  return sql(
+    `SELECT campaign_id, device_identity_id, type, platform, occurred_at FROM push_notification_events
+      WHERE project_id = $1 ORDER BY created_at, type`,
+    [projectId],
+  );
+}
+
+export async function projectActivity(projectId: string): Promise<string[]> {
+  return (await sql<{ action: string }>(`SELECT action FROM project_activity WHERE project_id = $1 ORDER BY occurred_at`, [projectId])).map(
+    (row) => row.action,
+  );
+}
+
+/** A copy of a campaign row under a new id in another channel (a push or SMS campaign of the same project). */
+export async function cloneCampaign(id: string, channel: 'push' | 'sms'): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO push_notification_logs
+     SELECT (jsonb_populate_record(NULL::push_notification_logs,
+               to_jsonb(l) || jsonb_build_object('id', gen_random_uuid(), 'channel', $2::text, 'email_content', NULL))).*
+       FROM push_notification_logs l WHERE l.id = $1
+     RETURNING id`,
+    [id, channel],
+  );
+  if (!row) throw new Error(`No campaign ${id}`);
+  return row.id;
+}
+
+/** The email campaign list as the Email page reads it. */
+export async function emailLogs(as: Caller, projectId: string): Promise<Array<Record<string, any>>> {
+  return dataOf<{ data: Array<Record<string, any>> }>(await call('GET', `/api/push-notifications/logs/${projectId}?channel=email`, as)).data;
+}
+
+/** A raw POST with no session, from an address of its own (a provider's webhook call). */
+export async function webhookPost(
+  path: string,
+  text: string,
+  { contentType = 'application/json', headers = {} }: { contentType?: string | null; headers?: Record<string, string> } = {},
+): Promise<RawResponse> {
+  const response = await fetch(apiUrl(path), {
+    method: 'POST',
+    headers: {
+      'X-Forwarded-For': newClientIp(),
+      ...(contentType ? { 'Content-Type': contentType } : {}),
+      ...headers,
+    },
+    body: text,
+  });
+  return rawOf(response);
+}
+
+/** A Resend event body: `type`, now, and `data` with recipients and tags. */
+export function resendEvent(
+  type: string,
+  to: string | string[],
+  tags: Record<string, string> = {},
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return { type, created_at: new Date().toISOString(), data: { to: Array.isArray(to) ? to : [to], tags, ...extra } };
+}
+
+export function chumbaqTags(campaignId?: string, identityId?: string): Record<string, string> {
+  return {
+    ...(campaignId ? { chumbaq_campaign_id: campaignId } : {}),
+    ...(identityId ? { chumbaq_identity_id: identityId } : {}),
+  };
+}
+
+/** A Resend webhook post signed with `secret` (Svix), as Resend sends it. */
+export async function postResend(
+  webhookToken: string,
+  secret: string,
+  body: unknown,
+  sign: { id?: string; timestamp?: number } = {},
+): Promise<RawResponse> {
+  const raw = typeof body === 'string' ? body : JSON.stringify(body);
+  return webhookPost(`/api/email/webhooks/resend/${webhookToken}`, raw, { headers: { ...signSvix(secret, raw, sign) } });
+}
+
+/** A Brevo event (Brevo signs nothing) with its tags as Chumbaq writes them. */
+export function brevoEvent(event: string, email: string, campaignId?: string, identityId?: string, extra: Record<string, unknown> = {}) {
+  return {
+    event,
+    email,
+    tags: [
+      ...(campaignId ? [`chumbaq_campaign_id:${campaignId}`] : []),
+      ...(identityId ? [`chumbaq_identity_id:${identityId}`] : []),
+    ],
+    ts_event: Math.floor(Date.now() / 1000),
+    ...extra,
+  };
+}
+
+export async function postBrevo(webhookToken: string, body: unknown): Promise<RawResponse> {
+  return webhookPost(`/api/email/webhooks/brevo/${webhookToken}`, JSON.stringify(body));
+}
+
+/** SNS's certificate URL form for a region. */
+export function snsCertUrl(region = 'ap-south-1', file = 'SimpleNotificationService-abc123.pem'): string {
+  return `https://sns.${region}.amazonaws.com/${file}`;
+}
+
+/** An SNS message in the shape SNS posts (the signature itself is made up). */
+export function snsMessage(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    Type: 'SubscriptionConfirmation',
+    MessageId: `e2e-${randomBytes(8).toString('hex')}`,
+    TopicArn: 'arn:aws:sns:ap-south-1:123456789012:t',
+    Message: 'You have chosen to subscribe to the topic.',
+    Timestamp: new Date().toISOString(),
+    SignatureVersion: '1',
+    Signature: Buffer.from('not a real signature').toString('base64'),
+    SigningCertURL: snsCertUrl(),
+    SubscribeURL: 'https://sns.ap-south-1.amazonaws.com/?Action=ConfirmSubscription&TopicArn=x&Token=y',
+    Token: 'e2e-token',
+    ...overrides,
+  };
+}
+
+/** Posts to the SES route as SNS does: the JSON as `text/plain`. */
+export async function postSes(webhookToken: string, body: unknown): Promise<RawResponse> {
+  return webhookPost(`/api/email/webhooks/ses/${webhookToken}`, typeof body === 'string' ? body : JSON.stringify(body), {
+    contentType: 'text/plain; charset=UTF-8',
+  });
+}
+
+/**
+ * Staff view-as of `tenant`: a new super admin (the flag set as `admin:grant` sets it)
+ * enrols a passkey and signs in to the admin app in a browser of their own, and starts
+ * view-as with a reason. Answers the one-time handoff link (`APP_URL/impersonate#code=`).
+ */
+export async function viewAsHandoff(browser: Browser, baseURL: string | undefined, tenant: Account): Promise<string> {
+  const ip = newClientIp();
+  const staff = await createAccount(ip, 'email-staff', 'Sid Staff');
+  await sql(`UPDATE users SET is_super_admin = true WHERE id = $1`, [staff.userId]);
+  const { context } = await newPersonContext(browser, baseURL);
+  try {
+    const staffPage = await context.newPage();
+    const staffToken = await enrolAndSignInStaff(staffPage, staff);
+    const handoff = await adminApi<{ url: string }>(
+      'POST',
+      `/api/admin/tenants/${tenant.userId}/impersonate`,
+      { reason: 'E2E: checking email pages read-only' },
+      staffToken,
+      ip,
+    );
+    return handoff.url;
+  } finally {
+    await context.close();
+  }
+}
+
+/** Opens a view-as handoff link in this tab and waits for the read-only banner. */
+export async function openViewAs(page: Page, url: string): Promise<void> {
+  await page.goto(url);
+  await page.getByRole('region', { name: 'Impersonation session' }).waitFor();
 }
