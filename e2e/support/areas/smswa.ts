@@ -620,3 +620,64 @@ export function userHashOf(secret: string, externalUserId: string): string {
 export function uniquePhone(): string {
   return `+9198${Array.from(randomBytes(8), (b) => String(b % 10)).join('')}`;
 }
+
+// ---- P1: campaign list, sender and Twilio cards, suppressions
+
+export interface ListRowSeed {
+  title?: string;
+  status?: string;
+  totalTokens?: number;
+  successCount?: number;
+  processedTokens?: number;
+}
+
+/**
+ * A campaign row of any channel written straight into the table, with the counters the
+ * campaign lists read, as a send of that channel leaves one.
+ */
+export async function seedListRow(
+  projectId: string,
+  channel: 'sms' | 'whatsapp' | 'push' | 'email',
+  { title = `E2E ${channel} ${randomBytes(3).toString('hex')}`, status = 'sent', totalTokens = 1, successCount = 1, processedTokens }: ListRowSeed = {},
+): Promise<{ id: string; title: string }> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO push_notification_logs (project_id, title, channel, status, total_tokens, success_count, processed_tokens)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+    [projectId, title, channel, status, totalTokens, successCount, processedTokens ?? totalTokens],
+  );
+  return { id: row.id, title };
+}
+
+/** Switches the project's stored credential for `provider` off, as a connection the API can no longer read. */
+export async function deactivateCredential(projectId: string, provider: string): Promise<void> {
+  const rows = await sql(
+    `UPDATE push_channel_credentials SET is_active = false WHERE project_id = $1 AND provider = $2 RETURNING id`,
+    [projectId, provider],
+  );
+  if (rows.length !== 1) throw new Error(`No ${provider} credential row for ${projectId}`);
+}
+
+/** The Sender card's opt-in switch (its label has no htmlFor). */
+export function smsOptInSwitch(page: Page): Locator {
+  return page.getByText('Only text people who opted in', { exact: true }).locator('../..').getByRole('switch');
+}
+
+/** Records the requests the page makes whose method and URL match. */
+export function recordRequests(page: Page, method: string, url: RegExp): string[] {
+  const seen: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() === method && url.test(request.url())) seen.push(request.url());
+  });
+  return seen;
+}
+
+/** A campaign row of the SMS list by its title (exact cell text). */
+export function campaignRow(page: Page, title: string): Locator {
+  return page.getByRole('row').filter({ has: page.getByRole('cell', { name: title, exact: true }) });
+}
+
+/** The project's activity rows of `action` as (actor id, details) pairs. */
+export async function activityOf(projectId: string, action: string): Promise<Array<{ actor: string | null; details: any }>> {
+  const rows = await activityRows(projectId, action);
+  return rows.map((row) => ({ actor: row.actor_user_id, details: row.details }));
+}
