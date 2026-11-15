@@ -59,6 +59,13 @@ function recordAuditListRequests(page: Page): URL[] {
   return seen;
 }
 
+/** Opens the audit log and waits for its first list answer, so later requests are the test's own. */
+async function openAuditLogSettled(page: Page): Promise<void> {
+  const first = page.waitForResponse((response) => isAuditList(response.request()));
+  await openAdminPage(page, '/audit-log', 'Audit log');
+  await first;
+}
+
 /** Clicks "Apply filters" and answers the list request it sent. */
 async function applyFilters(page: Page): Promise<URL> {
   const [request] = await Promise.all([page.waitForRequest(isAuditList), page.getByRole('button', { name: 'Apply filters' }).click()]);
@@ -152,7 +159,7 @@ test('ADMOPS-003 reload and deep links keep the operations pages', async ({ page
 test('ADMOPS-007 passkey requirement on: operations pages show "Set up your passkeys to continue"', async ({ page, clientIp }) => {
   test.slow();
   const staff = await signedInStaff(page, clientIp);
-  const strict = await startAdminApiWith({ SUPER_ADMIN_PASSKEY_REQUIRED: 'true' }, 'passkey-required');
+  const strict = await startAdminApiWith({ SUPER_ADMIN_PASSKEY_REQUIRED: 'true' }, 'passkey-required', 70);
   try {
     // The lane's own admin API lets this one-passkey session through; the strict one refuses it.
     expect((await adminRequest('GET', '/api/admin/health', { token: staff.token, ip: clientIp })).status).toBe(200);
@@ -173,22 +180,27 @@ test('ADMOPS-007 passkey requirement on: operations pages show "Set up your pass
       await expect(state.getByRole('link', { name: 'Go to your account' })).toHaveAttribute('href', '/account');
     };
 
-    const listCalls: number[] = [];
+    const answered: Record<string, number[]> = {};
     page.on('response', (r) => {
-      if (new URL(r.url()).pathname === '/api/admin/audit-logs') listCalls.push(r.status());
+      const pathname = new URL(r.url()).pathname;
+      (answered[pathname] ??= []).push(r.status());
     });
     await openAdminPage(page, '/audit-log', 'Audit log');
     await checkState(page.locator('main'));
     // A 403 is not retried.
-    expect(listCalls).toEqual([403]);
+    expect(answered['/api/admin/audit-logs']).toEqual([403]);
 
     await openAdminPage(page, '/health', 'Platform health');
     await checkState(page.locator('main'));
+    expect(answered['/api/admin/health']).toEqual([403]);
     await expect(page.getByText('Operational', { exact: true })).toHaveCount(0);
 
     await openAdminPage(page, '/incidents', 'Incidents');
     await checkState(cardTitled(page, 'Incidents'));
     await checkState(cardTitled(page, 'Recent alarms'));
+    // Only once their own requests were refused does an empty Traps list or a missing contact card mean anything.
+    await expect.poll(() => answered['/api/admin/tripwires']?.[0]).toBe(403);
+    await expect.poll(() => answered['/api/admin/security-contact']?.[0]).toBe(403);
     await expect(passkeyState(cardTitled(page, 'Traps'))).toHaveCount(0);
     await expect(cardTitled(page, 'Traps').locator('li')).toHaveCount(0);
     await expect(cardTitled(page, 'Security contact')).toHaveCount(0);
@@ -202,7 +214,7 @@ test('ADMOPS-007 passkey requirement on: operations pages show "Set up your pass
 
 // ---------------------------------------------------------------- Audit log page: rows
 
-test('ADMOPS-011 actor shows "CLI" for command-line rows', async ({ page, clientIp }) => {
+test('ADMOPS-011 actor shows "CLI" for command-line rows and a missing actor email', async ({ page, clientIp }) => {
   const account = await createAccount(clientIp, 'cli-staff', 'Cleo Cli');
   await grantSuperAdmin(account.email);
   await enrolAndSignInStaff(page, account);
@@ -224,6 +236,22 @@ test('ADMOPS-011 actor shows "CLI" for command-line rows', async ({ page, client
   await expect(row.locator('td').nth(3)).toHaveText(account.email);
   // A user target, not a tenant one: plain text.
   await expect(row.locator('td').nth(3).getByRole('link')).toHaveCount(0);
+
+  // A row with no actor email (unreachable from the database, where the column is NOT
+  // NULL): the API's own answer for this row, with the actor email taken out.
+  await page.route(
+    (url) => url.pathname === '/api/admin/audit-logs',
+    async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      for (const log of body.data) log.actorEmail = null;
+      await route.fulfill({ response, json: body });
+    },
+  );
+  await page.reload();
+  await expect(auditTableRows(page)).toHaveCount(1);
+  await expect(auditTableRows(page).first().locator('td').nth(1)).toHaveText('CLI');
+  await expect(auditTableRows(page).first().locator('td').nth(2)).toHaveText('Super admin granted');
 });
 
 test('ADMOPS-013 target cell: tenant link, plain text for other targets, dash for none', async ({ page, clientIp }) => {
@@ -409,20 +437,20 @@ test('ADMOPS-027 tenant ID filter refuses anything but a full UUID', async ({ pa
   const actor = uniqueEmail('seed-027');
   await seedAuditRows([{ actorEmail: actor, targetType: 'tenant', targetId, targetLabel: `t-${hex()}@e2e.example.test`, reason: 'E2E 027 row' }]);
 
-  await openAdminPage(page, '/audit-log', 'Audit log');
+  await openAuditLogSettled(page);
   const seen = recordAuditListRequests(page);
   const apply = page.getByRole('button', { name: 'Apply filters' });
   await page.getByLabel('Tenant ID').fill('1234');
   await expect(page.getByRole('alert')).toHaveText(TENANT_ID_ERROR);
   await expect(apply).toBeDisabled();
   await page.getByLabel('Tenant ID').press('Enter');
-  await page.waitForTimeout(500);
-  expect(seen).toEqual([]);
 
   await page.getByLabel('Tenant ID').fill(targetId);
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(apply).toBeEnabled();
   const sent = await applyFilters(page);
+  // The apply's request is the only one since the page settled: the refused Enter sent nothing.
+  expect(seen.map(String)).toEqual([sent.toString()]);
   expect(sent.searchParams.get('targetId')).toBe(targetId);
   await expect(auditTableRows(page)).toHaveCount(1);
   await expect(auditTableRows(page).first()).toContainText('E2E 027 row');
@@ -430,7 +458,7 @@ test('ADMOPS-027 tenant ID filter refuses anything but a full UUID', async ({ pa
 
 test('ADMOPS-030 end date before start date is refused before sending', async ({ page, clientIp }) => {
   await signedInStaff(page, clientIp);
-  await openAdminPage(page, '/audit-log', 'Audit log');
+  await openAuditLogSettled(page);
   const seen = recordAuditListRequests(page);
   const apply = page.getByRole('button', { name: 'Apply filters' });
 
@@ -439,14 +467,14 @@ test('ADMOPS-030 end date before start date is refused before sending', async ({
   await expect(page.getByRole('alert')).toHaveText(DATE_ORDER_ERROR);
   await expect(apply).toBeDisabled();
   await page.getByLabel('To (inclusive)').press('Enter');
-  await page.waitForTimeout(500);
-  expect(seen).toEqual([]);
   expect(new URL(page.url()).searchParams.get('from')).toBeNull();
 
   await page.getByLabel('To (inclusive)').fill('2026-11-10');
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(apply).toBeEnabled();
   const sent = await applyFilters(page);
+  // The apply's request is the only one since the page settled: the refused Enter sent nothing.
+  expect(seen.map(String)).toEqual([sent.toString()]);
   expect(new URL(page.url()).searchParams.get('from')).toBe('2026-11-10');
   expect(new URL(page.url()).searchParams.get('to')).toBe('2026-11-10');
   expect(Date.parse(sent.searchParams.get('to')!) - Date.parse(sent.searchParams.get('from')!)).toBe(24 * 3600_000);
@@ -876,18 +904,34 @@ test('ADMOPS-065 failed jobs are counted and highlighted', async ({ page, client
 });
 
 test('ADMOPS-069 account email not configured: explanation and disabled test button', async ({ page, clientIp }) => {
-  await signedInStaff(page, clientIp);
-  // The e2e stack has account email set up, so the unconfigured answer is served.
+  test.slow();
+  const staff = await signedInStaff(page, clientIp);
+  // Control: the lane's stack has account email set up (against the provider stub).
   await openAdminPage(page, '/health', 'Platform health');
   const card = cardTitled(page, 'Account email');
   await expect(card.getByText(/^Sending through Brevo from .+@.+\.$/)).toBeVisible();
   await expect(card.getByRole('button', { name: 'Send test email' })).toBeEnabled();
 
-  await serveHealth(page, healthBody({ platformEmail: { configured: false, from: null } }));
-  await page.reload();
-  await expect(page.getByRole('heading', { name: 'Platform health', level: 1 })).toBeVisible();
-  await expect(card.getByText('Not configured. Set PLATFORM_BREVO_API_KEY and PLATFORM_EMAIL_FROM, then restart the API.', { exact: true })).toBeVisible();
-  await expect(card.getByRole('button', { name: 'Send test email' })).toBeDisabled();
+  // An admin API with account email off, as a default install runs.
+  const off = await startAdminApiWith({ PLATFORM_BREVO_API_KEY: '', PLATFORM_EMAIL_FROM: '' }, 'email-off', 75);
+  try {
+    const health = await rawRequest(`${off.url}/api/admin/health`, 'GET', undefined, {
+      Authorization: `Bearer ${staff.token}`,
+      'X-Forwarded-For': clientIp,
+    });
+    expect(health.status).toBe(200);
+    expect(health.json.data.platformEmail).toEqual({ configured: false, from: null });
+
+    await forwardAdminPrefix(page, off.url, '/api/admin/health');
+    const answered = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/admin/health');
+    await page.reload();
+    expect((await (await answered).json()).data.platformEmail).toEqual({ configured: false, from: null });
+    await expect(page.getByRole('heading', { name: 'Platform health', level: 1 })).toBeVisible();
+    await expect(card.getByText('Not configured. Set PLATFORM_BREVO_API_KEY and PLATFORM_EMAIL_FROM, then restart the API.', { exact: true })).toBeVisible();
+    await expect(card.getByRole('button', { name: 'Send test email' })).toBeDisabled();
+  } finally {
+    await off.stop();
+  }
 });
 
 // ---------------------------------------------------------------- Recording incidents

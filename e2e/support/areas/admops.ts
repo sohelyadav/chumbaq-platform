@@ -527,12 +527,19 @@ export async function seedBulkAuditRows(
 
 /**
  * Another admin API process on the lane's database and Redis with extra environment, on
- * a free port of its own (a range no other ADMOPS helper uses).
+ * a free port of its own, from `firstOffset` to `firstOffset + 4` above the lane's admin
+ * API (70..79 is no other ADMOPS helper's). Tests that run at the same time pass ranges
+ * that do not overlap, so neither can find the other's process at "its" port.
  */
-export async function startAdminApiWith(extra: Record<string, string>, label: string): Promise<{ url: string; stop(): Promise<void> }> {
+export async function startAdminApiWith(
+  extra: Record<string, string>,
+  label: string,
+  firstOffset = 70,
+): Promise<{ url: string; stop(): Promise<void> }> {
+  if (firstOffset < 70 || firstOffset + 5 > 80) throw new Error(`Offset ${firstOffset} is outside 70..79`);
   const ports = stackPorts();
   let port = 0;
-  for (let candidate = ports.adminApi + 70; candidate < ports.adminApi + 80; candidate++) {
+  for (let candidate = ports.adminApi + firstOffset; candidate < ports.adminApi + firstOffset + 5; candidate++) {
     if (!(await portInUse(candidate))) {
       port = candidate;
       break;
