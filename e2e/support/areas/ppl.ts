@@ -341,11 +341,15 @@ export async function seedSegmentMembers(projectId: string, personKeys: string[]
   return segment.id;
 }
 
-/** An email campaign row and a per-recipient event of it for a device (address history). */
-export async function seedEmailEvent(projectId: string, deviceIdentityId: string): Promise<string> {
+/**
+ * A campaign row of this channel and a per-recipient `delivered` event of it for a
+ * device. Email, SMS and WhatsApp events are address history; push events are the
+ * device's own.
+ */
+export async function seedCampaignEvent(projectId: string, deviceIdentityId: string, channel: 'push' | 'email' | 'sms' | 'whatsapp'): Promise<string> {
   const [campaign] = await sql<{ id: string }>(
-    `INSERT INTO push_notification_logs (project_id, title, channel, status) VALUES ($1, 'E2E email', 'email', 'sent') RETURNING id`,
-    [projectId],
+    `INSERT INTO push_notification_logs (project_id, title, channel, status) VALUES ($1, $2, $3, 'sent') RETURNING id`,
+    [projectId, `E2E ${channel}`, channel],
   );
   const [event] = await sql<{ id: string }>(
     `INSERT INTO push_notification_events (project_id, campaign_id, device_identity_id, type, occurred_at)

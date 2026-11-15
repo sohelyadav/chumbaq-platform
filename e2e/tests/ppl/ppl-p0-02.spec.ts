@@ -24,7 +24,7 @@ import {
   raw,
   revokeKey,
   rowsNamingDevices,
-  seedEmailEvent,
+  seedCampaignEvent,
   seedPushToken,
   seedSegmentMembers,
   seedSuppression,
@@ -246,13 +246,17 @@ test('PPL-123 Export contains no secrets or other people\'s ids', async ({ clien
     externalUserId: asha.externalUserId,
     distinctId: legacyId,
   });
+  // An event on her iOS device sent under a distinct id that is neither her id nor a fingerprint of hers.
+  const eventId = uniqueId('event-anon');
+  expect((await trackEvent(p, clientIp, { eventName: 'browsed', deviceFingerprint: asha.ios.deviceFingerprint, distinctId: eventId })).status).toBe(201);
   // Someone else's device, whose id an alias then claims for her.
   const otherId = uniqueId('anon-other');
   const other = await identify(p, clientIp, { deviceFingerprint: fingerprint('fp-other'), distinctId: otherId });
   await api('POST', '/api/identity/merge', { projectId: p.project.id, anonymousId: otherId, identifiedId: asha.externalUserId }, { apiKey: p.sdkKey, ip: clientIp });
-  // Address history: an opt-out and an email delivery event.
+  // Address history: an opt-out and an email delivery event; beside them a push delivery, which is hers.
   await seedSuppression(p.project.id, 'email', asha.email);
-  const emailEvent = await seedEmailEvent(p.project.id, asha.ios.id);
+  const emailEvent = await seedCampaignEvent(p.project.id, asha.ios.id, 'email');
+  const pushEvent = await seedCampaignEvent(p.project.id, asha.ios.id, 'push');
   // The same external id in another project.
   const q = await peopleProject(clientIp, 'ppl-outsider');
   const qDevice = await identify(q, clientIp, { deviceFingerprint: fingerprint('fp-q-asha'), externalUserId: asha.externalUserId });
@@ -272,11 +276,13 @@ test('PPL-123 Export contains no secrets or other people\'s ids', async ({ clien
   expect(devices.find((d) => d.id === legacy.id)!.distinctId).toBe(WITHHELD);
   expect(devices.filter((d) => d.id !== legacy.id).map((d) => d.distinctId)).toEqual([asha.externalUserId, asha.externalUserId]);
   expect(doc.sections.identity_aliases.rows).toEqual([expect.objectContaining({ anonymousId: WITHHELD, identifiedId: asha.externalUserId })]);
-  for (const foreign of [legacyId, otherId, other.id, other.deviceFingerprint]) expect(text).not.toContain(foreign);
+  expect(doc.sections.user_events.rows.map((r: { eventName: string }) => r.eventName).sort()).toEqual(['browsed', 'purchase']);
+  for (const foreign of [legacyId, eventId, otherId, other.id, other.deviceFingerprint]) expect(text).not.toContain(foreign);
 
   expect(doc.sections).not.toHaveProperty('channel_suppressions');
   expect(text).not.toContain('unsubscribed');
-  expect(doc.sections.push_notification_events).toEqual({ total: 0, truncated: false, rows: [] });
+  expect(doc.sections.push_notification_events).toMatchObject({ total: 1, truncated: false });
+  expect(doc.sections.push_notification_events.rows).toEqual([expect.objectContaining({ id: pushEvent, type: 'delivered' })]);
   expect(text).not.toContain(emailEvent);
   expect(await sql(`SELECT id FROM push_notification_events WHERE id = $1`, [emailEvent])).toHaveLength(1);
 
@@ -366,7 +372,7 @@ test('PPL-133 Owner erases a signed-in person (recent sign-in)', async ({ page, 
   await expect(page).toHaveURL(new RegExp(`/projects/${p.project.id}/users$`));
   await expect(page.getByRole('row').filter({ hasText: 'Pre Login' })).toBeVisible();
   await expect(page.getByRole('row').filter({ hasText: 'Asha Rao' })).toHaveCount(0);
-  await expect(page.locator('[data-slot="card"]').filter({ hasText: 'Total Users' })).toContainText('1');
+  await expect(page.locator('[data-slot="card"]').filter({ hasText: 'Total Users' })).toHaveText(/^\s*Total Users\s*1\s*$/);
 
   expect(await sql(`SELECT id FROM device_identities WHERE project_id = $1 AND external_user_id = $2`, [p.project.id, asha.externalUserId])).toEqual([]);
   for (const table of ['consent_events', 'push_tokens', 'user_events']) {
