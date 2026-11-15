@@ -92,6 +92,18 @@ function recordDialogs(page: import('@playwright/test').Page, accept: (type: str
   return seen;
 }
 
+/**
+ * A write attempted in view-as raises its own `Read-only session` toast. Earlier toasts
+ * (4 s each) are waited out first, so the toast seen is this write's and not a leftover.
+ */
+async function expectReadOnlyToast(page: import('@playwright/test').Page, attempt: () => Promise<unknown>): Promise<void> {
+  const readOnly = toastBehindDialog(page, 'Read-only session');
+  await expect(readOnly).toHaveCount(0, { timeout: 10_000 });
+  await attempt();
+  await expect(readOnly.first()).toBeVisible();
+  await expect(readOnly.first()).toContainText(READ_ONLY);
+}
+
 // ------------------------------------------------------- M. Campaign detail ---
 
 test('PUSH-192 campaign copy and failure text are inert', async ({ page }) => {
@@ -168,6 +180,7 @@ test('PUSH-200 cancel a scheduled campaign', async ({ page }) => {
   expect(viaApi.completedAt).toBeTruthy();
   // Only the list query is refreshed by the cancel: this page keeps its loaded state.
   await expect(page.getByText('Scheduled', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Cancel campaign' })).toBeVisible();
 
   await openPush(page, p.project.id);
   await page.getByRole('tab', { name: 'Failed', exact: true }).click();
@@ -244,6 +257,8 @@ test('PUSH-221 template text is inert', async ({ page }) => {
   await expect(row.getByRole('cell').nth(0)).toHaveText(HTML_TITLE);
   await expect(row.getByRole('cell').nth(1)).toHaveText(HTML_TITLE);
   await expect(row.getByRole('cell').nth(2)).toHaveText('<b>bold</b>');
+  await expect(page.locator('img[src="x"]')).toHaveCount(0);
+  await expect(page.locator('main b', { hasText: 'bold' })).toHaveCount(0);
 
   await row.getByRole('button', { name: 'Edit' }).click();
   const editor = page.getByRole('dialog');
@@ -251,6 +266,7 @@ test('PUSH-221 template text is inert', async ({ page }) => {
   await expect(field(editor, 'Name *').getByRole('textbox')).toHaveValue(HTML_TITLE);
   await expect(field(editor, 'Description').getByRole('textbox')).toHaveValue(HTML_TITLE);
   await expect(field(editor, 'Title *').getByRole('textbox')).toHaveValue('<b>bold</b>');
+  await expect(page.locator('img[src="x"]')).toHaveCount(0);
   await editor.getByRole('button', { name: 'Cancel' }).click();
   await expect(editor).toHaveCount(0);
 
@@ -345,19 +361,18 @@ test('PUSH-226 templates: member and view-as', async ({ page, browser, baseURL }
   editor = viewAsPage.getByRole('dialog');
   await field(editor, 'Name *').getByRole('textbox').fill('View-as template');
   await field(editor, 'Title *').getByRole('textbox').fill('Should not save');
-  await editor.getByRole('button', { name: 'Create template' }).click();
-  await expect(toastBehindDialog(viewAsPage, 'Read-only session').first()).toContainText(READ_ONLY);
+  await expectReadOnlyToast(viewAsPage, () => editor.getByRole('button', { name: 'Create template' }).click());
   await expect(toastBehindDialog(viewAsPage, 'Could not create template')).toContainText(READ_ONLY);
   await editor.getByRole('button', { name: 'Cancel' }).click();
 
   await ownerRow.getByRole('button', { name: 'Edit' }).click();
   editor = viewAsPage.getByRole('dialog');
   await field(editor, 'Title *').getByRole('textbox').fill('Changed in view-as');
-  await editor.getByRole('button', { name: 'Save changes' }).click();
+  await expectReadOnlyToast(viewAsPage, () => editor.getByRole('button', { name: 'Save changes' }).click());
   await expect(toastBehindDialog(viewAsPage, 'Could not update template')).toContainText(READ_ONLY);
   await editor.getByRole('button', { name: 'Cancel' }).click();
 
-  await ownerRow.getByRole('button', { name: 'Delete' }).click();
+  await expectReadOnlyToast(viewAsPage, () => ownerRow.getByRole('button', { name: 'Delete' }).click());
   await expect(toastTitled(viewAsPage, 'Could not delete template')).toContainText(READ_ONLY);
   await expect(ownerRow).toBeVisible();
 
@@ -685,8 +700,7 @@ test('PUSH-244 view-as is read-only across push', async ({ page, browser, baseUR
   await page.getByRole('row').filter({ hasText: 'Scheduled in view-as' }).click();
   await expect(page.getByRole('heading', { level: 1, name: 'Scheduled in view-as', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Cancel campaign' }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Cancel campaign' }).click();
-  await expect(toastBehindDialog(page, 'Read-only session').first()).toContainText(READ_ONLY);
+  await expectReadOnlyToast(page, () => page.getByRole('dialog').getByRole('button', { name: 'Cancel campaign' }).click());
   await expect(toastBehindDialog(page, 'Error')).toContainText(READ_ONLY);
   await page.goto(`/projects/${p.project.id}/push-notifications/${sentId}`);
   await expect(page.getByRole('heading', { level: 1, name: 'Sent in view-as', exact: true })).toBeVisible();
@@ -700,10 +714,10 @@ test('PUSH-244 view-as is read-only across push', async ({ page, browser, baseUR
   const editor = page.getByRole('dialog');
   await field(editor, 'Name *').getByRole('textbox').fill('Made in view-as');
   await field(editor, 'Title *').getByRole('textbox').fill('Made in view-as');
-  await editor.getByRole('button', { name: 'Create template' }).click();
+  await expectReadOnlyToast(page, () => editor.getByRole('button', { name: 'Create template' }).click());
   await expect(toastBehindDialog(page, 'Could not create template')).toContainText(READ_ONLY);
   await editor.getByRole('button', { name: 'Cancel' }).click();
-  await templateRowLocator.getByRole('button', { name: 'Delete' }).click();
+  await expectReadOnlyToast(page, () => templateRowLocator.getByRole('button', { name: 'Delete' }).click());
   await expect(toastTitled(page, 'Could not delete template')).toContainText(READ_ONLY);
 
   // Settings: status, guardrails, Mi Push, FCM replacement and test send.
@@ -711,30 +725,33 @@ test('PUSH-244 view-as is read-only across push', async ({ page, browser, baseUR
   await expect(statusValue(page, 'Service account')).toHaveText(HIDDEN);
   const guardrails = card(page, 'Delivery guardrails');
   await field(guardrails, 'Maximum campaigns per device, per day').getByRole('spinbutton').fill('7');
-  await guardrails.getByRole('button', { name: 'Save', exact: true }).click();
+  await expectReadOnlyToast(page, () => guardrails.getByRole('button', { name: 'Save', exact: true }).click());
   await expect(toastTitled(page, 'Could not save')).toContainText(READ_ONLY);
 
   const channels = card(page, 'Delivery channels');
   await field(channels, 'App secret').locator('input').fill('view-as-secret');
   await field(channels, 'Package name').getByRole('textbox').fill('com.example.viewas');
-  await channels.getByRole('button', { name: 'Save Mi Push credentials' }).click();
+  await expectReadOnlyToast(page, () => channels.getByRole('button', { name: 'Save Mi Push credentials' }).click());
   await expect(channels.getByText(READ_ONLY, { exact: true })).toBeVisible();
 
   const replace = card(page, 'Replace credentials');
   await field(replace, 'Service account JSON').getByRole('textbox').fill(JSON.stringify(fakeServiceAccount()));
-  await replace.getByRole('button', { name: 'Save and replace' }).click();
+  await expectReadOnlyToast(page, () => replace.getByRole('button', { name: 'Save and replace' }).click());
   await expect(replace.getByText(READ_ONLY, { exact: true })).toBeVisible();
 
   const testSend = card(page, 'Test send');
   await field(testSend, 'Device registration token').getByRole('textbox').fill(device.tokens[0]);
-  await testSend.getByRole('button', { name: 'Deliver' }).click();
+  await expectReadOnlyToast(page, () => testSend.getByRole('button', { name: 'Deliver' }).click());
   await expect(testSend.getByText(READ_ONLY, { exact: true })).toBeVisible();
 
   // Composer: the reach preview is a write, so it is refused too.
-  const [preview] = await Promise.all([
-    page.waitForResponse((r) => r.url().endsWith('/api/push-notifications/audience-preview')),
-    page.goto(`/projects/${p.project.id}/push-notifications/new`),
-  ]);
+  let preview!: import('@playwright/test').Response;
+  await expectReadOnlyToast(page, async () => {
+    [preview] = await Promise.all([
+      page.waitForResponse((r) => r.url().endsWith('/api/push-notifications/audience-preview')),
+      page.goto(`/projects/${p.project.id}/push-notifications/new`),
+    ]);
+  });
   expect(preview.status()).toBe(403);
   await expect(page.getByRole('button', { name: 'Next' })).toBeDisabled();
 
