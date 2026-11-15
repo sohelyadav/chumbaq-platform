@@ -682,3 +682,102 @@ export function datetimeLocal(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
+
+// ---- Redirect edges, deferred match races, suspension and expiry zones (link-p1-03)
+
+/** Touchpoints for a person, as the SDK's touchpoint ingest leaves them, `minutesAgo` each. */
+export async function seedTouchpoints(projectId: string, distinctId: string, minutesAgo: number[]): Promise<void> {
+  for (const minutes of minutesAgo) {
+    await sql(
+      `INSERT INTO touchpoints (project_id, distinct_id, touchpoint_type, channel, utm_source, touched_at)
+       VALUES ($1, $2, 'link_click', 'newsletter', 'newsletter', now() - make_interval(mins => $3))`,
+      [projectId, distinctId, minutes],
+    );
+  }
+}
+
+/** A click row written straight to the table, for fields no real request produces (a city without coordinates). */
+export async function seedClickRow(linkId: string, fields: Record<string, string | number | null>): Promise<void> {
+  const row: Record<string, string | number | null> = { platform: 'windows', device_type: 'desktop', redirect_type: 'web_fallback', ...fields };
+  const columns = Object.keys(row);
+  await sql(
+    `INSERT INTO click_events (link_id, ${columns.join(', ')}) VALUES ($1, ${columns.map((_, i) => `$${i + 2}`).join(', ')})`,
+    [linkId, ...columns.map((column) => row[column])],
+  );
+}
+
+export interface ExtraApi {
+  url: string;
+  stop(): Promise<void>;
+}
+
+/**
+ * A second customer API on the lane's database and secrets with `TZ` set, for the cases
+ * about how a zone-less expiry is read. On the first free port from the API port + 20 to
+ * + 29 (nothing else in the harness uses that range); a process that could not bind its
+ * port is not taken for the answer of another.
+ */
+export async function startApiInZone(timeZone: string): Promise<ExtraApi> {
+  const { portInUse, run, stopAll, waitForUrl } = await import('../processes');
+  const { appEnvironment, runSecrets, stackPorts } = await import('../stack');
+  const ports = stackPorts();
+  for (let port = ports.api + 20; port <= ports.api + 29; port++) {
+    if (await portInUse(port)) continue;
+    const env = { ...process.env, ...appEnvironment(runSecrets(), ports), API_PORT: String(port), TZ: timeZone };
+    const started = run(`api-tz-${timeZone.replace(/\W+/g, '-')}-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
+    try {
+      await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
+    } catch {
+      await stopAll([started]);
+      continue;
+    }
+    if (started.child.exitCode !== null || started.child.signalCode !== null) continue;
+    return { url: `http://localhost:${port}`, stop: () => stopAll([started]) };
+  }
+  throw new Error(`No free port for an API in ${timeZone}`);
+}
+
+/** Sends every API request the page makes to another API, as the dev server's proxy would. */
+export async function routeApiTo(target: Page | BrowserContext, base: string): Promise<void> {
+  await target.route(
+    (url) => url.pathname.startsWith('/api/'),
+    async (route) => {
+      const url = new URL(route.request().url());
+      const response = await route.fetch({ url: `${base}${url.pathname}${url.search}` });
+      await route.fulfill({ response });
+    },
+  );
+}
+
+/** `GET <base>/api/<code>` on another API, as a desktop browser, without following the redirect. */
+export async function openShortLinkOn(base: string, code: string, ip: string): Promise<{ status: number; location: string | null; body: any }> {
+  const response = await fetch(`${base}/api/${code}`, { redirect: 'manual', headers: { 'User-Agent': DESKTOP_UA, 'X-Forwarded-For': ip } });
+  const text = await response.text();
+  let body: unknown = text;
+  try {
+    body = text ? JSON.parse(text) : undefined;
+  } catch {
+    // not JSON: keep the text
+  }
+  return { status: response.status, location: response.headers.get('location'), body };
+}
+
+/**
+ * Creates a link with a custom code another spec may hold for a moment (a word it also
+ * tries, then gives back): retries while the code is taken, for up to `timeoutMs`.
+ */
+export async function claimCustomCode(account: Account, projectId: string, ip: string, body: Record<string, unknown>, timeoutMs = 30_000): Promise<RawResponse> {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const answer = await rawApi('POST', `/api/projects/${projectId}/links`, body, { token: account.accessToken, ip });
+    const taken = answer.status === 409 && /is already taken$/.test(String(answer.body?.message));
+    if (!taken || Date.now() > until) return answer;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+/** Removes a project's links and their released codes, so a shared word is free again for other specs. */
+export async function giveBackCodes(projectId: string): Promise<void> {
+  await sql('DELETE FROM links WHERE project_id = $1', [projectId]);
+  await sql('DELETE FROM released_short_codes WHERE project_id = $1', [projectId]);
+}
