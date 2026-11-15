@@ -720,6 +720,24 @@ test('PUSH-073 quiet hours move timezone waves', async () => {
     await addDevice(p, quiet.owner.ip, { timezone: 'Europe/London' });
   }
 
+  // Ordinary scheduled sends, made before the timezone sends so the worker ticks that
+  // expand those pass over these too. Tomorrow 03:30 UTC is 09:00 in Kolkata; 08:30 UTC
+  // is inside 08:00-10:00 in UTC and in London (GMT or BST).
+  const ordinary: Array<{ id: string; at: Date }> = [];
+  for (const utcHour of [3, 8]) {
+    const at = new Date(Date.now() + 86_400_000);
+    at.setUTCHours(utcHour, 30, 0, 0);
+    const created = await call('POST', '/api/push-notifications/send', quiet.owner, {
+      projectId: quiet.project.id,
+      title: `Ordinary send ${utcHour}`,
+      scheduledAt: at.toISOString(),
+    });
+    expect(created.status).toBe(201);
+    expect(dataOf(created).status).toBe('scheduled');
+    expect(new Date(dataOf(created).scheduledAt).toISOString()).toBe(at.toISOString());
+    ordinary.push({ id: dataOf(created).id, at });
+  }
+
   const parents: Record<string, string> = {};
   for (const p of [quiet, plain]) {
     const sent = await call('POST', '/api/push-notifications/send', quiet.owner, {
@@ -763,19 +781,15 @@ test('PUSH-073 quiet hours move timezone waves', async () => {
     }
   }
 
-  // An ordinary scheduled send is not moved: quiet hours apply to timezone waves only.
-  const tomorrowNine = new Date(Date.now() + 86_400_000);
-  tomorrowNine.setUTCHours(3, 30, 0, 0); // 09:00 in Kolkata
-  const ordinary = await call('POST', '/api/push-notifications/send', quiet.owner, {
-    projectId: quiet.project.id,
-    title: 'Ordinary send',
-    scheduledAt: tomorrowNine.toISOString(),
-  });
-  expect(ordinary.status).toBe(201);
-  expect(dataOf(ordinary).status).toBe('scheduled');
-  expect(new Date(dataOf(ordinary).scheduledAt).toISOString()).toBe(tomorrowNine.toISOString());
-  expect(localClock(dataOf(ordinary).scheduledAt, 'Asia/Kolkata')).toBe('09:00');
-  expect((await campaignRows(quiet.project.id)).filter((row) => row.parent_campaign_id === dataOf(ordinary).id)).toHaveLength(0);
+  // The ordinary sends are not moved: quiet hours apply to timezone waves only.
+  expect(localClock(ordinary[0].at, 'Asia/Kolkata')).toBe('09:00');
+  const rows = await campaignRows(quiet.project.id);
+  for (const { id, at } of ordinary) {
+    const row = rows.find((r) => r.id === id);
+    expect(row?.status, id).toBe('scheduled');
+    expect(new Date(row!.scheduled_at).toISOString(), id).toBe(at.toISOString());
+    expect(rows.filter((r) => r.parent_campaign_id === id), id).toHaveLength(0);
+  }
 });
 
 /** The reported timezone of a device identity. */
@@ -872,6 +886,7 @@ test('PUSH-080 test send card for every role', async ({ browser, baseURL }) => {
         await expect(t.validate, label).toBeDisabled();
         await expect(t.deliver, label).toBeDisabled();
         await t.token.fill('   ');
+        await expect(t.validate, label).toBeDisabled();
         await expect(t.deliver, label).toBeDisabled();
         await t.token.fill('some-token');
         await expect(t.validate, label).toBeEnabled();
@@ -896,7 +911,9 @@ test('PUSH-081 test send before configure', async ({ page }) => {
   ]);
   expect(answer.status()).toBe(404);
   expect((await answer.json()).message).toBe(NOT_CONFIGURED);
-  await expect(t.testSend.getByText(NOT_CONFIGURED, { exact: true })).toBeVisible();
+  const box = t.testSend.getByText(NOT_CONFIGURED, { exact: true });
+  await expect(box).toBeVisible();
+  await expect(box.locator('..')).toHaveClass(/border-destructive/);
   await expect(t.testSend.getByText('Rejected by Firebase')).toHaveCount(0);
 });
 
@@ -917,7 +934,9 @@ test('PUSH-084 provider failure is reported, not thrown', async ({ page }) => {
   const result = (await answer.json()).data;
   expect(result).toEqual({ delivered: false, dryRun: true, error: 'Token exchange failed (HTTP 400, invalid_grant)' });
   await expect(t.testSend.getByText('Rejected by Firebase', { exact: true })).toBeVisible();
-  await expect(t.testSend.getByText(result.error, { exact: true })).toBeVisible();
+  const errorLine = t.testSend.getByText(result.error, { exact: true });
+  await expect(errorLine).toBeVisible();
+  await expect(errorLine.locator('..')).toHaveClass(/border-destructive/);
   await expect(t.testSend.locator('code')).toHaveCount(0);
   await expect(toastTitled(page, 'Rejected by Firebase')).toContainText(result.error);
   // The exchange was tried (and refused); nothing reached FCM's send endpoint.
