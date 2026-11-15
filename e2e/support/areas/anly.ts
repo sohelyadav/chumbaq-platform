@@ -1,10 +1,12 @@
-import { createHmac, randomBytes } from 'crypto';
+import { createHash, createHmac, randomBytes } from 'crypto';
+import { readFileSync } from 'fs';
+import path from 'path';
 import { devices, type Browser, type Locator, type Page, type Response as PageResponse } from '@playwright/test';
 import { Client } from 'pg';
 import { adminApi, enrolAndSignInStaff, grantSuperAdmin } from '../admin';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
 import { newPersonContext } from '../fixtures';
-import { assertE2eDatabase, stackEnv } from '../stack';
+import { LOG_DIR, assertE2eDatabase, stackEnv } from '../stack';
 
 /**
  * Helpers for the analytics specs (ANLY): the Analytics, Attribution, Touchpoints and
@@ -173,17 +175,31 @@ export async function seedLink(owner: Person, projectId: string, label: string):
 }
 
 /** Opens a short link on the API's root redirect as a browser would, without following it. */
-export async function click(code: string, ip: string, extra: { userAgent?: string; referer?: string; query?: string } = {}): Promise<number> {
+export async function click(code: string, ip: string, extra: ClickExtra = {}): Promise<number> {
+  return (await clickResponse(code, ip, extra)).status;
+}
+
+export interface ClickExtra {
+  userAgent?: string;
+  referer?: string;
+  query?: string;
+  /** A Cookie header, such as the JS SDK's `chumbaq_did=<fingerprint>`. */
+  cookie?: string;
+}
+
+/** As `click`, answering the status and the redirect's Location. */
+export async function clickResponse(code: string, ip: string, extra: ClickExtra = {}): Promise<{ status: number; location: string | null }> {
   const response = await fetch(apiUrl(`/${code}${extra.query ?? ''}`), {
     redirect: 'manual',
     headers: {
       'User-Agent': extra.userAgent ?? DESKTOP_UA,
       'X-Forwarded-For': ip,
       ...(extra.referer ? { Referer: extra.referer } : {}),
+      ...(extra.cookie ? { Cookie: extra.cookie } : {}),
     },
   });
   await response.text();
-  return response.status;
+  return { status: response.status, location: response.headers.get('location') };
 }
 
 /** Clicks are written after the redirect answers: waits until the link has `expected` of them. */
@@ -209,6 +225,7 @@ export interface TouchpointSeed {
   utmSource?: string | null;
   utmMedium?: string | null;
   platform?: string | null;
+  deviceFingerprint?: string | null;
   /** When it happened; the column has no time zone, so the API's local time is what it holds. */
   touchedAt: Date;
 }
@@ -219,8 +236,8 @@ export async function seedTouchpoints(projectId: string, seeds: TouchpointSeed[]
     const ids: string[] = [];
     for (const seed of seeds) {
       const { rows } = await db.query<{ id: string }>(
-        `INSERT INTO touchpoints (project_id, distinct_id, touchpoint_type, channel, campaign, utm_source, utm_medium, platform, touched_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+        `INSERT INTO touchpoints (project_id, distinct_id, touchpoint_type, channel, campaign, utm_source, utm_medium, platform, touched_at, device_fingerprint)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
         [
           projectId,
           seed.distinctId,
@@ -231,6 +248,7 @@ export async function seedTouchpoints(projectId: string, seeds: TouchpointSeed[]
           seed.utmMedium ?? null,
           seed.platform ?? null,
           seed.touchedAt,
+          seed.deviceFingerprint ?? null,
         ],
       );
       ids.push(rows[0].id);
@@ -501,4 +519,141 @@ export function timeDecayCredits(times: Date[]): number[] {
 /** A channel's credit as the attribution tables show it: rounded to 2 decimals server-side, then shown as a percent. */
 export function creditLabel(credit: number): string {
   return `${((Math.round(credit * 100) / 100) * 100).toFixed(1)}%`;
+}
+
+// ---- P1 helpers (anly-p1-02): touchpoints, the event explorer, ingest and erasure
+
+/** The Touchpoints page's User Journey card. */
+export function journeyCard(page: Page): Locator {
+  return cardTitled(page, 'User Journey');
+}
+
+/** The entries of the journey timeline, oldest first as the page lists them. */
+export function journeyEntries(page: Page): Locator {
+  return journeyCard(page).locator('div.relative.flex.items-start');
+}
+
+/** Types a distinct id into the journey search and presses its button. */
+export async function searchJourney(page: Page, distinctId: string, how: 'button' | 'enter' = 'button'): Promise<void> {
+  const input = journeyCard(page).getByPlaceholder('Enter distinct ID...');
+  await input.fill(distinctId);
+  if (how === 'enter') await input.press('Enter');
+  else await journeyCard(page).getByRole('button', { name: 'Search', exact: true }).click();
+}
+
+/** date-fns `MMM d, yyyy HH:mm:ss` in this machine's zone (the browser's, here). */
+export function journeyTimeLabel(at: Date): string {
+  return `${MONTHS[at.getMonth()]} ${at.getDate()}, ${at.getFullYear()} ${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`;
+}
+
+/** A time on a whole second, so the page's seconds and the seed agree. */
+export function wholeSecond(at: Date): Date {
+  return new Date(Math.floor(at.getTime() / 1000) * 1000);
+}
+
+export interface EventSeed {
+  eventName: string;
+  distinctId?: string | null;
+  properties?: Record<string, unknown> | null;
+  timestamp: Date;
+}
+
+/**
+ * Inserts SDK events directly, for the cases that need many and are about reading
+ * them, not ingest. The column has no time zone: a Date is written as this machine's
+ * wall-clock time, which is how the API (on the same machine) writes and reads it.
+ */
+export async function insertEvents(projectId: string, seeds: EventSeed[]): Promise<string[]> {
+  return withDb(async (db) => {
+    const ids: string[] = [];
+    for (const seed of seeds) {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO user_events (project_id, distinct_id, event_name, properties, source_type, timestamp, created_at)
+         VALUES ($1, $2, $3, $4, 'sdk', $5, $5) RETURNING id`,
+        [projectId, seed.distinctId ?? null, seed.eventName, seed.properties ? JSON.stringify(seed.properties) : null, seed.timestamp],
+      );
+      ids.push(rows[0].id);
+    }
+    return ids;
+  });
+}
+
+/** The Event Log's event-name badges, top to bottom. */
+export async function logEventNames(page: Page): Promise<string[]> {
+  return cardTitled(page, 'Event Log')
+    .locator('tbody tr td:nth-child(2) [data-slot="badge"]')
+    .evaluateAll((badges) => badges.map((badge) => (badge.textContent ?? '').trim()));
+}
+
+/** Names and counts in Top Events, top to bottom. */
+export async function topEvents(page: Page): Promise<string[][]> {
+  return cardTitled(page, 'Top Events')
+    .locator('.space-y-2 > div')
+    .evaluateAll((rows) => rows.map((row) => Array.from(row.querySelectorAll(':scope > div:first-child > span')).map((span) => (span.textContent ?? '').trim())));
+}
+
+/** The options the event-name select offers (opens it, reads them, closes it). */
+export async function eventSelectOptions(page: Page): Promise<string[]> {
+  await page.getByRole('combobox').click();
+  const options = page.getByRole('option');
+  await options.first().waitFor();
+  const names = (await options.allTextContents()).map((text) => text.trim());
+  await page.keyboard.press('Escape');
+  await options.first().waitFor({ state: 'detached' });
+  return names;
+}
+
+/** Picks an attribution model in the Attribution page's select. */
+export async function chooseAttributionModel(page: Page, name: string): Promise<void> {
+  await page.getByRole('combobox').click();
+  await page.getByRole('option', { name, exact: true }).click();
+  await page.getByRole('combobox').filter({ hasText: name }).waitFor();
+}
+
+/** Every request the page makes to `path` (query ignored), as full URLs. */
+export function recordRequests(page: Page, path: string): string[] {
+  const urls: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === path) urls.push(request.url());
+  });
+  return urls;
+}
+
+/** A trap key row as staff making one leaves it: only the key's sha256 is stored. */
+export async function seedTrapKey(label: string): Promise<{ id: string; key: string }> {
+  const key = `chumbaq_${randomBytes(32).toString('hex')}`;
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO security_tripwires (kind, value_hash, label) VALUES ('api_key', $1, $2) RETURNING id`,
+    [createHash('sha256').update(key).digest('hex'), label],
+  );
+  return { id: row.id, key };
+}
+
+/** How many lines of the stack's API log contain `text` so far. */
+export function apiLogCount(text: string): number {
+  try {
+    return readFileSync(path.join(LOG_DIR, 'api.log'), 'utf8').split('\n').filter((line) => line.includes(text)).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** Staff suspension as it is stored: `suspended_at` set. Answers a function that reactivates. */
+export async function suspendAccount(userId: string): Promise<() => Promise<void>> {
+  const rows = await sql('UPDATE users SET suspended_at = now() WHERE id = $1 RETURNING id', [userId]);
+  if (rows.length !== 1) throw new Error(`No users row ${userId}`);
+  return async () => {
+    await sql('UPDATE users SET suspended_at = NULL WHERE id = $1', [userId]);
+  };
+}
+
+/** The channel rows of `GET /touchpoints/channels` (no range), as [channel, count]. */
+export async function channelCounts(owner: Person, projectId: string): Promise<Array<[string, number]>> {
+  const answer = await getAs(owner, `/api/projects/${projectId}/touchpoints/channels`);
+  if (answer.status !== 200) throw new Error(`channels answered ${answer.status}`);
+  return (answer.body.data as Array<{ channel: string; count: number }>).map((row) => [row.channel, row.count]);
+}
+
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
