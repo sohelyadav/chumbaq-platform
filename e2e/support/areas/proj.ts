@@ -356,3 +356,72 @@ export async function openViewAs(page: Page, viewAs: ViewAs, tenant: Account): P
     .getByText(`Viewing ${tenant.email} as Super Admin · read-only`)
     .waitFor();
 }
+
+// ---- Selector, shell and dashboard (P1)
+
+/** A card on the project selector, by the project's name. */
+export function projectCard(page: Page, name: string) {
+  return page.locator('[data-slot="card"]').filter({ has: page.getByText(name, { exact: true }) });
+}
+
+/** A stat card on the project dashboard, by the line under its number. */
+export function statCard(page: Page, description: string) {
+  return page.locator('[data-slot="card"]').filter({ has: page.getByText(description, { exact: true }) });
+}
+
+/** The project switcher's trigger, the first menu button in the sidebar header. */
+export function switcherTrigger(page: Page) {
+  return page.locator('[data-sidebar="header"] [data-sidebar="menu-button"]').first();
+}
+
+/** Opens the project switcher and answers its menu. */
+export async function openSwitcher(page: Page) {
+  await switcherTrigger(page).click();
+  const menu = page.getByRole('menu');
+  await menu.waitFor();
+  return menu;
+}
+
+/** The selector's create dialog. */
+export function createDialog(page: Page) {
+  return page.getByRole('dialog', { name: 'New Project' });
+}
+
+/** Counts the page's `POST /api/projects` requests from now on. */
+export function countProjectCreates(page: Page): { count(): number } {
+  let n = 0;
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/projects') n += 1;
+  });
+  return { count: () => n };
+}
+
+export interface ProjectStats {
+  totalLinks: number;
+  clicks24h: number;
+  clicks7d: number;
+  clicks30d: number;
+  totalConversions: number;
+  topLinks: { id: string; title: string | null; shortCode: string; clicks: number }[];
+}
+
+export async function projectStats(account: Pick<Account, 'accessToken'>, ip: string, projectId: string): Promise<RawResponse<{ data: ProjectStats }>> {
+  return rawApi<{ data: ProjectStats }>('GET', `/api/projects/${projectId}/stats`, { token: account.accessToken, ip });
+}
+
+export const DESKTOP_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+
+/** A desktop browser opening a short link on the API's root redirect; redirects are not followed. */
+export async function openShortLink(shortCode: string, ip: string): Promise<{ status: number; contentType: string; body: string }> {
+  const response = await fetch(apiUrl(`/${shortCode}`), {
+    redirect: 'manual',
+    headers: { 'User-Agent': DESKTOP_UA, 'X-Forwarded-For': ip, Accept: 'text/html' },
+  });
+  return { status: response.status, contentType: response.headers.get('content-type') ?? '', body: await response.text() };
+}
+
+/** Sets an account's display name directly, for the header's fallbacks. */
+export async function setUserName(userId: string, name: string): Promise<void> {
+  await withDatabase((db) => db.query(`UPDATE users SET name = $2 WHERE id = $1`, [userId, name]));
+}
