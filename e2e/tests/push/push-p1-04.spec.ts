@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import type { Page } from '@playwright/test';
+import { apiUrl, newClientIp } from '../../support/api';
 import { seedUnreadableFcmConfig } from '../../support/channels';
 import { expect, signIn, test } from '../../support/fixtures';
 import {
@@ -436,7 +437,7 @@ test('PUSH-252 event for a device outside the campaign’s audience is counted',
   const title = `Only D1 ${hex()}`;
   const campaignId = await seedLogRow(p.project.id, { title, status: 'sent', target_type: 'devices', target_device_ids: [inside.id] });
 
-  // Current behaviour: the report is not checked against the campaign's audience.
+  // Current behaviour as the case states it.
   for (const type of ['delivered', 'click']) {
     const reported = await event(p, campaignId, outside, type);
     expect([reported.status, dataOf(reported)], type).toEqual([201, { recorded: true }]);
@@ -464,7 +465,7 @@ test('PUSH-253 event naming an email or SMS campaign is accepted', async ({ page
   });
   const sms = await seedLogRow(p.project.id, { title: 'SMS S', channel: 'sms', body: 'Hello by text' });
 
-  // Current behaviour: the push event route takes a campaign of any channel.
+  // Current behaviour as the case states it.
   for (const campaignId of [email, sms]) {
     for (const type of ['delivered', 'click']) {
       const reported = await event(p, campaignId, device, type);
@@ -498,7 +499,7 @@ test('PUSH-256 the global throttle reaches SDK event reports', async () => {
   const p = await pushProject('push-256', { fcm: true });
   const device = await addDevice(p, p.owner.ip);
   const campaignId = await seedSentCampaign(p.project.id);
-  const ip = `10.${randomBytes(1)[0]}.${randomBytes(1)[0]}.${1 + (randomBytes(1)[0] % 250)}`;
+  const ip = newClientIp();
 
   const first = await event(p, campaignId, device, 'delivered', ip);
   expect([first.status, dataOf(first)]).toEqual([201, { recorded: true }]);
@@ -510,7 +511,7 @@ test('PUSH-256 the global throttle reaches SDK event reports', async () => {
   for (const repeat of repeats) expect([repeat.status, repeat.body?.data]).toEqual([201, { recorded: false }]);
 
   // The 101st request in the minute, a click this time, is refused and not stored.
-  const response = await fetch(`${process.env.E2E_API_URL}${EVENTS}`, {
+  const response = await fetch(apiUrl(EVENTS), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ip, 'X-API-Key': p.sdkKey },
     body: JSON.stringify({ projectId: p.project.id, campaignId, deviceFingerprint: device.fingerprint, type: 'click', platform: 'android' }),
@@ -645,11 +646,17 @@ test('PUSH-264 a recurring campaign behind its schedule sends every missed occur
   );
   expect(new Date(created.scheduledAt).getTime()).toBe(S - 3 * DAY);
 
-  // One tick spawns one occurrence and steps the template one day on.
+  // One tick spawns one occurrence and steps the template one day on (the stack's
+  // worker may tick once in the same moment, so at most two).
   await runPushJob('push-schedule-tick');
-  const afterOne = await childRows(created.id);
-  expect(afterOne.length).toBeGreaterThanOrEqual(1);
-  expect(new Date(afterOne[0].scheduled_at).getTime()).toBe(S - 3 * DAY);
+  await expect
+    .poll(async () => {
+      const spawned = (await childRows(created.id)).length;
+      const stepped = (new Date((await campaignRow(created.id))!.scheduled_at).getTime() - (S - 3 * DAY)) / DAY;
+      return spawned >= 1 && spawned <= 2 && stepped === spawned;
+    }, { timeout: 10_000 })
+    .toBe(true);
+  expect(new Date((await childRows(created.id))[0].scheduled_at).getTime()).toBe(S - 3 * DAY);
   await tickUntil(async () => new Date((await campaignRow(created.id))!.scheduled_at).getTime() > Date.now());
 
   // Current behaviour: every missed day is sent, back to back.
@@ -965,6 +972,7 @@ test('PUSH-293 due experiment and timezone parents are cancelled during a suspen
     }
     const children = await sql(`SELECT id FROM push_notification_logs WHERE parent_campaign_id = ANY($1::uuid[])`, [ids]);
     expect(children).toHaveLength(0);
+    expect(await fcmSendsFor(p.fcm!.project_id)).toHaveLength(0);
   } finally {
     await reactivateAccount(p.owner.userId);
   }
@@ -973,4 +981,5 @@ test('PUSH-293 due experiment and timezone parents are cancelled during a suspen
   for (const id of ids) expect((await campaignRow(id))?.status).toBe('cancelled');
   expect(await sql(`SELECT id FROM push_notification_logs WHERE parent_campaign_id = ANY($1::uuid[])`, [ids])).toHaveLength(0);
   expect((await campaignRows(p.project.id)).map((row) => row.id).sort()).toEqual([...ids].sort());
+  expect(await fcmSendsFor(p.fcm!.project_id)).toHaveLength(0);
 });
