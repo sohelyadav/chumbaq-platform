@@ -89,6 +89,18 @@ async function submitPasswordStep(page: Page): Promise<Response> {
 
 const fullSessions = async (userId: string) => (await staffSessions(userId)).filter((row) => !row.enrolment_only);
 
+/**
+ * That the staff log holds no sign-in failure for this person since `since` other than a
+ * wrong password sent now as a marker. A wrong password's row is written after the
+ * answer, so once it is there anything written for the earlier requests is too.
+ */
+async function expectOnlyMarkerFailure(staff: { email: string; userId: string }, since: Date): Promise<void> {
+  expect((await staffApi('POST', '/api/staff/auth/login', { email: staff.email, password: 'marker-wrong-password' })).status).toBe(401);
+  await expect
+    .poll(async () => (await auditRows(staff.userId, since, 'staff.sign_in_failed')).map((row) => row.metadata?.reason))
+    .toEqual(['wrong_password']);
+}
+
 // ---- API split
 
 test('ADMAUTH-001 customer API answers 404 for every admin and staff path', async ({ clientIp, request }) => {
@@ -203,6 +215,11 @@ test('ADMAUTH-015 wrong password, unknown address, non-staff and suspended staff
     .toEqual(['wrong_password']);
   expect(await auditRows(customer.userId, since)).toHaveLength(0);
   expect(await auditRows(suspended.userId, since)).toHaveLength(0);
+  const unknownRows = await sql(
+    `SELECT id FROM admin_audit_logs WHERE created_at >= $1 AND (lower(actor_email) = lower($2) OR lower(target_label) = lower($2))`,
+    [since, unknown],
+  );
+  expect(unknownRows).toHaveLength(0);
   expect(refreshes).toEqual([]);
 });
 
@@ -212,13 +229,18 @@ test('ADMAUTH-018 login without the client header is refused', async ({ clientIp
   const refused = await staffApi('POST', '/api/staff/auth/login', { email: staff.email, password: staff.password }, { client: false });
   expect(refused.status).toBe(403);
   expect(refused.body.message).toBe('Missing client header');
-  await sleep(500);
-  expect(await authEvents({ email: staff.email }, since)).toHaveLength(0);
   expect(await staffSessions(staff.userId)).toHaveLength(0);
 
   // With the header the same request is checked (and starts enrolment for this person).
+  // Its rows are written before it answers, so they are all there is: the refused
+  // request before it wrote none.
   const accepted = await staffApi('POST', '/api/staff/auth/login', { email: staff.email, password: staff.password });
   expect(accepted.status).toBe(200);
+  expect(accepted.data.step).toBe('enrol');
+  expect((await authEvents({ email: staff.email }, since)).map((row) => [row.type, row.reason])).toEqual([
+    ['login.password_accepted', 'staff_enrolment'],
+  ]);
+  expect(await staffSessions(staff.userId)).toHaveLength(1);
 });
 
 test('ADMAUTH-019 client header is required on every route that sets or reads the staff cookie', async ({ page, clientIp }) => {
@@ -265,7 +287,8 @@ test('ADMAUTH-020 correct password with a staff passkey asks for the second fact
   await enrolStaffPasskey(page, staff);
   // One wrong guess from this network first: the right password must not add to it.
   expect((await staffApi('POST', '/api/staff/auth/login', { email: staff.email, password: 'wrong-password-1' }, { ip: clientIp })).status).toBe(401);
-  expect((await signInAttempts(staff.email))[`net:${clientIp}`]).toBe('1');
+  const attemptsBefore = await signInAttempts(staff.email);
+  expect(attemptsBefore).toEqual({ [`net:${clientIp}`]: '1', total: '1' });
   const since = new Date();
 
   await delay(page, '/api/staff/auth/login');
@@ -289,7 +312,7 @@ test('ADMAUTH-020 correct password with a staff passkey asks for the second fact
 
   expect((await authEvents({ userId: staff.userId }, since)).map((row) => [row.type, row.reason])).toEqual([['login.password_accepted', null]]);
   expect(await authEvents({ userId: staff.userId }, new Date(0), 'login.succeeded')).toHaveLength(0);
-  expect((await signInAttempts(staff.email))[`net:${clientIp}`]).toBe('1');
+  expect(await signInAttempts(staff.email)).toEqual(attemptsBefore);
 });
 
 test('ADMAUTH-021 a password alone never signs in', async ({ page, clientIp }) => {
@@ -505,6 +528,9 @@ test('ADMAUTH-034 a customer-app handle is refused by the staff routes, and the 
   const reverse = await staffApi('POST', '/api/auth/login/passkey/options', { handle: staffSideHandle }, { base: customerApi() });
   expect(reverse.status).toBe(401);
   expect(reverse.body.message).toBe(HANDLE_EXPIRED);
+  // The same option routes answer each handle in its own app.
+  expect((await staffApi('POST', '/api/staff/auth/login/passkey/options', { handle: staffSideHandle })).status).toBe(200);
+  expect((await staffApi('POST', '/api/auth/login/passkey/options', { handle: customerHandle }, { base: customerApi() })).status).toBe(200);
 
   // Each still works in its own app.
   const customerSignedIn = await staffApi(
@@ -707,9 +733,8 @@ test('ADMAUTH-050 a staff member holding any passkey needs a code', async ({ pag
   expect((await authEvents({ userId: staff.userId }, since)).map((row) => [row.type, row.reason])).toEqual([
     ['login.password_accepted', 'staff_enrolment_blocked'],
   ]);
-  await sleep(500);
-  expect(await auditRows(staff.userId, since, 'staff.sign_in_failed')).toHaveLength(0);
   expect(await staffSessions(staff.userId)).toHaveLength(0);
+  await expectOnlyMarkerFailure(staff, since);
 });
 
 test('ADMAUTH-052 right code opens an enrolment session', async ({ page, clientIp }) => {
@@ -907,9 +932,8 @@ test.describe('with passkeys required for staff', () => {
     expect((await authEvents({ userId: staff.userId }, since)).map((row) => [row.type, row.reason])).toEqual([
       ['login.password_accepted', 'staff_enrolment_blocked'],
     ]);
-    await sleep(500);
-    expect(await auditRows(staff.userId, since, 'staff.sign_in_failed')).toHaveLength(0);
     expect(await staffSessions(staff.userId)).toHaveLength(0);
+    await expectOnlyMarkerFailure(staff, since);
   });
 
   test('ADMAUTH-055 spent, expired, replaced and voided codes all get the same answer', async ({ clientIp }) => {
