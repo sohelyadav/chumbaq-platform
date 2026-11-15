@@ -575,6 +575,15 @@ export function waWebhookBlock(page: Page): Locator {
   return page.locator('div.rounded-md.border').filter({ has: page.getByText('Webhook', { exact: true }) });
 }
 
+/** A toast (its Radix root) by its exact title, so its description is read from that toast only. */
+export function toastTitled(page: Page, title: string): Locator {
+  const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return page
+    .getByRole('region', { name: /Notifications/ })
+    .locator('li')
+    .filter({ has: page.locator('div.text-sm.font-semibold', { hasText: new RegExp(`^${escaped}$`) }) });
+}
+
 /** The green summary line of a provider tab with stored credentials. */
 export function waSummaryLine(page: Page): Locator {
   return page.locator('p').filter({ hasText: 'secret ending' });

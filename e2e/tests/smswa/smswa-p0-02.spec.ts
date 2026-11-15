@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
 import { api, apiUrl, newClientIp } from '../../support/api';
 import { allowClipboard, readClipboard } from '../../support/browser-tools';
 import { connectFakeWhatsAppProvider, fakeTwilioCredentials, fakeWhatsAppCredentials } from '../../support/channels';
@@ -23,6 +23,7 @@ import {
   interaktPost,
   interaktReceived,
   messageOf,
+  metaBody,
   metaPost,
   metaReply,
   metaStatus,
@@ -49,6 +50,7 @@ import {
   suppressionRows,
   suspendAccount,
   teammate,
+  toastTitled,
   twilioCallsFor,
   twilioReply,
   twilioStatus,
@@ -92,7 +94,6 @@ const AUDIENCE_OPT_IN = 'People with a phone number in international form who ha
 const AUDIENCE_NO_OPT_IN = 'People with a phone number in international form who have not opted out of WhatsApp.';
 const S1_WA = '919876543210';
 const later = () => new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
-const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ------------------------------------------------------------ J. Provider card ---
 
@@ -470,9 +471,8 @@ test('SMSWA-191 view-as on the WhatsApp pages', async ({ page, browser, baseURL 
     waConsentSwitch(page).click(),
   ]);
   expect(toggled.status()).toBe(403);
-  await expect(page.getByText('Read-only session', { exact: true }).first()).toBeVisible();
-  await expect(page.getByText('Could not save', { exact: true })).toBeVisible();
-  await expect(page.getByText(READ_ONLY, { exact: true }).first()).toBeVisible();
+  await expect(toastTitled(page, 'Read-only session').first()).toBeVisible();
+  await expect(toastTitled(page, 'Could not save')).toContainText(READ_ONLY);
   await expect(waConsentSwitch(page)).toHaveAttribute('aria-checked', 'true');
 
   // 3. Connect refused whatever was typed.
@@ -484,7 +484,7 @@ test('SMSWA-191 view-as on the WhatsApp pages', async ({ page, browser, baseURL 
     page.getByRole('button', { name: 'Replace and use Meta Cloud API' }).click(),
   ]);
   expect(connect.status()).toBe(403);
-  await expect(page.getByText('Could not connect', { exact: true })).toBeVisible();
+  await expect(toastTitled(page, 'Could not connect')).toContainText(READ_ONLY);
 
   // 4. Adding a suppression refused.
   await openWhatsApp(page, id, 'Suppressions');
@@ -603,12 +603,15 @@ test('SMSWA-198 Meta bad signature', async () => {
     messages: [metaReply(S1_WA, 'STOP')],
   };
   const secret = p.wa.credentials.appSecret!;
+  const right = hubSignature(secret, metaBody(value));
   const attempts = [
     await metaPost(p.wa, value, null),
     await metaPost(p.wa, value, hubSignature(secret, JSON.stringify({ entry: [] }))),
-    await metaPost(p.wa, value, hubSignature(secret, 'x').replace('sha256=', 'sha1=')),
+    // The right digest of the exact body, under another scheme's name.
+    await metaPost(p.wa, value, right.replace('sha256=', 'sha1=')),
+    await metaPost(p.wa, value, `sha1=${createHmac('sha1', secret).update(metaBody(value), 'utf8').digest('hex')}`),
   ];
-  expect(attempts.map((a) => [a.status, messageOf(a)])).toEqual(Array(3).fill([401, SIGNATURE_REFUSED]));
+  expect(attempts.map((a) => [a.status, messageOf(a)])).toEqual(Array(4).fill([401, SIGNATURE_REFUSED]));
   expect(await suppressionRows(p.project.id, 'whatsapp')).toHaveLength(0);
   expect(await eventRows(p.project.id)).toHaveLength(0);
   // Signed over the bytes sent, the same body is taken.
@@ -651,7 +654,7 @@ test('SMSWA-201 Meta replies: STOP and START (signed)', async () => {
   expect((await consentRows(S1)).at(-1)).toEqual({ channel: 'whatsapp', granted: false, source: 'stop_reply' });
   expect(await waPreview(p.owner, p.project.id)).toBe(0);
 
-  await pause(1_100);
+  // No timestamp: the START is read at the API's own time, after the STOP was stored.
   const start = await metaPost(p.wa, { messages: [metaReply(S1_WA, 'START')] });
   expect(start.status).toBe(200);
   expect(await suppressionRows(p.project.id, 'whatsapp')).toHaveLength(0);
@@ -672,7 +675,6 @@ test('SMSWA-205 Meta without app secret: unsigned and corroborated', async () =>
   expect((await suppressionRows(p.project.id, 'whatsapp')).map((row) => [row.address, row.reason])).toEqual([['+919876543210', 'unsubscribed']]);
   expect((await consentRows(S1)).at(-1)).toEqual({ channel: 'whatsapp', granted: false, source: 'stop_reply_unsigned' });
 
-  await pause(1_100);
   expect((await metaPost(p.wa, { messages: [metaReply(S1_WA, 'START')] })).status).toBe(200);
   expect((await suppressionRows(p.project.id, 'whatsapp')).map((row) => row.address)).toEqual(['+919876543210']);
 
@@ -725,7 +727,6 @@ test('SMSWA-208 Gupshup: unsigned, corroborated, attributed by recency', async (
   expect((await suppressionRows(p.project.id, 'whatsapp')).map((row) => [row.address, row.reason])).toEqual([['+919876543210', 'unsubscribed']]);
   expect((await consentRows(S1)).at(-1)).toEqual({ channel: 'whatsapp', granted: false, source: 'stop_reply_unsigned' });
 
-  await pause(1_100);
   const start = await gupshupPost(p.wa.webhookToken, { type: 'message', payload: { sender: { phone: S1_WA }, payload: { text: 'START' } } });
   expect(start.status).toBe(200);
   expect((await suppressionRows(p.project.id, 'whatsapp')).map((row) => row.address)).toEqual(['+919876543210']);
@@ -751,9 +752,14 @@ test('SMSWA-210 Interakt signed and unsigned', async () => {
   expect(event).toMatchObject({ type: 'delivered', campaign_id: c, device_identity_id: S1 });
   expect(new Date(event.occurred_at).toISOString()).toBe('2026-11-15T10:00:00.000Z');
 
-  const forged = await interaktPost(p.wa, interaktReceived(S1_WA, 'STOP'), interaktSignature(randomBytes(16).toString('hex'), 'x'));
+  // A bad signature: the exact bytes sent, under a secret that is not the stored one.
+  const stopBody = interaktReceived(S1_WA, 'STOP');
+  const forged = await interaktPost(p.wa, stopBody, interaktSignature(randomBytes(16).toString('hex'), JSON.stringify(stopBody)));
+  const unsignedAtSigned = await interaktPost(p.wa, stopBody, null);
   expect([forged.status, messageOf(forged)]).toEqual([401, SIGNATURE_REFUSED]);
+  expect([unsignedAtSigned.status, messageOf(unsignedAtSigned)]).toEqual([401, SIGNATURE_REFUSED]);
   expect(await suppressionRows(p.project.id, 'whatsapp')).toHaveLength(0);
+  expect(await eventRows(p.project.id)).toHaveLength(1);
 
   expect((await interaktPost(p.wa, interaktReceived(S1_WA, 'STOP'))).status).toBe(200);
   const failed = await interaktPost(p.wa, {
@@ -769,7 +775,6 @@ test('SMSWA-210 Interakt signed and unsigned', async () => {
   const unsigned = await waProject('smswa-210-unsigned', 'interakt', { signed: false }, p.owner);
   await seedPeople(unsigned, p.owner.ip, ['S1']);
   expect((await interaktPost(unsigned.wa, interaktReceived(S1_WA, 'STOP'))).status).toBe(200);
-  await pause(1_100);
   expect((await interaktPost(unsigned.wa, interaktReceived(S1_WA, 'START'))).status).toBe(200);
   expect((await suppressionRows(unsigned.project.id, 'whatsapp')).map((row) => [row.address, row.reason])).toEqual([['+919876543210', 'unsubscribed']]);
 });
@@ -907,7 +912,6 @@ test('SMSWA-226 signed START lifts a WhatsApp STOP on Twilio WhatsApp and Intera
   expect(await waPreview(tw.owner, tw.project.id)).toBe(0);
   const otherHistory = { manual: (await consentRows(twIds.manual)).length, bounced: (await consentRows(twIds.bounced)).length };
 
-  await pause(1_100);
   const start = await twilioWhatsAppPost(tw.wa, { From: 'whatsapp:+919876543210', Body: 'START', AccountSid: sid });
   expect([start.status, start.text]).toEqual([200, EMPTY_TWIML]);
   for (const from of ['+14155550122', '+14155550133']) {
@@ -929,8 +933,10 @@ test('SMSWA-226 signed START lifts a WhatsApp STOP on Twilio WhatsApp and Intera
     expect.objectContaining({ address: '+919876543210', reason: 'unsubscribed', source: 'interakt', detail: 'Replied "STOP"' }),
   );
   expect((await consentRows(ikIds.S1)).at(-1)).toEqual({ channel: 'whatsapp', granted: false, source: 'stop_reply' });
+  expect(await waPreview(ik.owner, ik.project.id)).toBe(0);
+  const ikOtherHistory = { manual: (await consentRows(ikIds.manual)).length, bounced: (await consentRows(ikIds.bounced)).length };
 
-  await pause(1_100);
+  // No timestamp: the START is read at the API's own time, after the STOP was stored.
   const ikStart = await interaktPost(ik.wa, interaktReceived(S1_WA, 'START'));
   expect([ikStart.status, ikStart.body]).toEqual([200, { recorded: 0 }]);
   for (const number of ['14155550122', '14155550133']) {
@@ -938,7 +944,10 @@ test('SMSWA-226 signed START lifts a WhatsApp STOP on Twilio WhatsApp and Intera
   }
   expect((await suppressionRows(ik.project.id, 'whatsapp')).map((row) => [row.address, row.reason])).toEqual(kept);
   expect((await consentRows(ikIds.S1)).at(-1)).toEqual({ channel: 'whatsapp', granted: true, source: 'start_reply' });
+  expect((await consentRows(ikIds.manual)).length).toBe(ikOtherHistory.manual);
+  expect((await consentRows(ikIds.bounced)).length).toBe(ikOtherHistory.bounced);
   expect(await waPreview(ik.owner, ik.project.id)).toBe(1);
+  expect(await suppressionRows(ik.project.id, 'sms')).toHaveLength(0);
 });
 
 test('SMSWA-230 send with people from another project in deviceIdentityIds', async () => {
@@ -982,10 +991,11 @@ test('SMSWA-230 send with people from another project in deviceIdentityIds', asy
 
 test('SMSWA-232 delivery reports for an erased person are dropped', async () => {
   const sms = await smsProject('smswa-232-sms', { twilio: true });
-  const { S2 } = await seedPeople(sms, sms.owner.ip, ['S2']);
+  const { S2, S1 } = await seedPeople(sms, sms.owner.ip, ['S2', 'S1']);
   const c = await scheduleSmsCampaign(sms.owner, sms.project.id);
   const wa = await waProject('smswa-232-wa', 'meta', {}, sms.owner);
   const person = await identifyPhone(wa, sms.owner.ip, { phone: '+14155550177', whatsappOptIn: true });
+  const live = await identifyPhone(wa, sms.owner.ip, { phone: '+14155550178', whatsappOptIn: true });
   const cw = await seedCampaignRow(wa.project.id, 'whatsapp');
   const counters = () => sql(`SELECT id, success_count, failure_count FROM push_notification_logs WHERE id = ANY($1::uuid[]) ORDER BY id`, [[c.id, cw]]);
   const before = await counters();
@@ -1010,6 +1020,13 @@ test('SMSWA-232 delivery reports for an erased person are dropped', async () => 
   expect(await eventRows(wa.project.id)).toHaveLength(0);
   expect(await sql(`SELECT 1 FROM push_notification_events WHERE metadata::text LIKE '%14155550177%' AND project_id = $1`, [wa.project.id])).toHaveLength(0);
   expect(await counters()).toEqual(before);
+
+  // The same reports for someone not erased are taken, so the drops above are the erasure's.
+  const liveSms = await twilioStatus(sms.sms!, { MessageStatus: 'delivered', To: '+919876543210' }, { campaignId: c.id, identityId: S1 });
+  expect(liveSms.status).toBe(204);
+  expect((await eventRows(sms.project.id)).map((e) => [e.type, e.device_identity_id])).toEqual([['delivered', S1]]);
+  const liveWa = await metaPost(wa.wa, { statuses: [metaStatus('14155550178', 'delivered', { c: cw, i: live })] });
+  expect([liveWa.status, liveWa.body]).toEqual([200, { recorded: 1 }]);
 });
 
 test("SMSWA-233 a STOP for an erased person's number that nobody holds is kept only as a hash", async ({ page }) => {
