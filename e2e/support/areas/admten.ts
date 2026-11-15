@@ -1,5 +1,5 @@
 import { execFile } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, createHmac, randomUUID } from 'crypto';
 import path from 'path';
 import { promisify } from 'util';
 import { expect, type Page } from '@playwright/test';
@@ -559,4 +559,294 @@ export async function factorResetRows(userId: string) {
   }>(`SELECT id, status, cancelled_at, cancelled_by, requested_by_id FROM factor_resets WHERE user_id = $1 ORDER BY requested_at`, [
     userId,
   ]);
+}
+
+// ---- Overview and tenants list (P1 chunk)
+
+export interface RollupStateSeed {
+  startedOn: string;
+  firstDay: string;
+  lastClosedDay: string;
+}
+
+/**
+ * Puts the roll-up's state row exactly as given (or removes it, for `null`), and answers
+ * a function that puts back the row that was there before, every column of it.
+ */
+export async function setRollupState(state: RollupStateSeed | null): Promise<() => Promise<void>> {
+  const [before] = await sql<{ started_on: string; first_day: string; last_closed_day: string; devices_through: Date | null }>(
+    `SELECT to_char(started_on, 'YYYY-MM-DD') AS started_on, to_char(first_day, 'YYYY-MM-DD') AS first_day,
+            to_char(last_closed_day, 'YYYY-MM-DD') AS last_closed_day, devices_through
+       FROM usage_rollup_state WHERE id = 1`,
+  );
+  if (state === null) {
+    await sql(`DELETE FROM usage_rollup_state WHERE id = 1`);
+  } else {
+    await sql(
+      `INSERT INTO usage_rollup_state (id, started_on, first_day, last_closed_day, devices_through)
+       VALUES (1, $1::date, $2::date, $3::date, now())
+       ON CONFLICT (id) DO UPDATE SET started_on = EXCLUDED.started_on, first_day = EXCLUDED.first_day,
+                                      last_closed_day = EXCLUDED.last_closed_day`,
+      [state.startedOn, state.firstDay, state.lastClosedDay],
+    );
+  }
+  return async () => {
+    if (!before) {
+      await sql(`DELETE FROM usage_rollup_state WHERE id = 1`);
+      return;
+    }
+    await sql(
+      `INSERT INTO usage_rollup_state (id, started_on, first_day, last_closed_day, devices_through)
+       VALUES (1, $1::date, $2::date, $3::date, $4)
+       ON CONFLICT (id) DO UPDATE SET started_on = EXCLUDED.started_on, first_day = EXCLUDED.first_day,
+                                      last_closed_day = EXCLUDED.last_closed_day, devices_through = EXCLUDED.devices_through`,
+      [before.started_on, before.first_day, before.last_closed_day, before.devices_through],
+    );
+  };
+}
+
+/** The roll-up counted through yesterday, 90 days back, started in an earlier month than yesterday's. */
+export const COUNTED_STATE = (): RollupStateSeed => ({ startedOn: utcDay(-75), firstDay: utcDay(-90), lastClosedDay: utcDay(-1) });
+
+/** As COUNTED_STATE, but counting started in the month of the last counted day. */
+export const FIRST_MONTH_STATE = (): RollupStateSeed => ({ startedOn: utcDay(-1), firstDay: utcDay(-90), lastClosedDay: utcDay(-1) });
+
+export interface InsertedTenant {
+  id: string;
+  email: string;
+  name: string;
+}
+
+/**
+ * Accounts written straight into `users`, for lists that need many of them or exact
+ * names, newest first in the order given (each a second older than the one before).
+ * They have no usable password: nothing signs in as them.
+ */
+export async function insertTenants(specs: { label: string; name: string; ageSeconds?: number }[]): Promise<InsertedTenant[]> {
+  const out: InsertedTenant[] = [];
+  for (const [index, spec] of specs.entries()) {
+    const email = `${spec.label}-${randomUUID().slice(0, 8)}@e2e.example.test`.toLowerCase();
+    const [row] = await sql<{ id: string }>(
+      `INSERT INTO users (email, name, password_hash, created_at)
+       VALUES ($1, $2, 'e2e-no-password', now() - make_interval(secs => $3::int))
+       RETURNING id`,
+      [email, spec.name, spec.ageSeconds ?? index],
+    );
+    out.push({ id: row.id, email, name: spec.name });
+  }
+  return out;
+}
+
+const WINDOW_START_SQL = `((date_trunc('day', now() AT TIME ZONE 'UTC') - INTERVAL '29 days') AT TIME ZONE 'UTC')::timestamp`;
+
+export interface TenantCounts {
+  total: number;
+  suspended: number;
+  new30d: number;
+  today: number;
+}
+
+/** The overview's tenant figures counted in SQL, leaving out the given accounts. */
+export async function tenantCounts(exclude: string[] = []): Promise<TenantCounts> {
+  const [row] = await sql<{ total: number; suspended: number; new30d: number; today: number }>(
+    `SELECT count(*)::int AS total,
+            count(*) FILTER (WHERE suspended_at IS NOT NULL)::int AS suspended,
+            count(*) FILTER (WHERE created_at >= ${WINDOW_START_SQL})::int AS new30d,
+            count(*) FILTER (WHERE (created_at::timestamptz AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date)::int AS today
+       FROM users WHERE NOT (id = ANY($1::uuid[]))`,
+    [exclude],
+  );
+  return row;
+}
+
+export interface OverviewBody {
+  tenants: { total: number; active: number; suspended: number; newLast30d: number };
+  projects: number;
+  links: number;
+  identities: number;
+  clicksLast30d: number;
+  signupsByDay: { date: string; count: number }[];
+  usageCoverage: { startedOn: string; countedFrom: string; countedThrough: string | null; mauFrom: string } | null;
+  usage30d: Record<string, number | null> | null;
+  usageTrend: { date: string; values: Record<string, number | null> }[];
+  topTenants: { id: string; email: string; name: string; mauThisMonth: number; messagesSent30d: number; lastUsageDay: string | null }[];
+  quietTenants: { count: number; tenants: OverviewBody['topTenants'] };
+}
+
+const overviewCaptures = new WeakMap<Page, OverviewBody[]>();
+
+/**
+ * Every overview body the page receives from now on, read as it passes through
+ * `page.route` (a body read from the response itself is lost when the page navigates
+ * away first, and a request already in flight when this starts is never counted).
+ */
+async function overviewBodies(page: Page): Promise<OverviewBody[]> {
+  let bodies = overviewCaptures.get(page);
+  if (!bodies) {
+    const list: OverviewBody[] = [];
+    bodies = list;
+    overviewCaptures.set(page, list);
+    await page.route(
+      (url) => url.pathname === '/api/admin/overview',
+      async (route) => {
+        const response = await route.fetch();
+        if (route.request().method() === 'GET' && response.status() === 200) {
+          list.push(((await response.json()) as { data: OverviewBody }).data);
+        }
+        await route.fulfill({ response });
+      },
+    );
+  }
+  return bodies;
+}
+
+/** Runs `trigger` and answers the first overview body the page receives after it. */
+async function nextOverview(page: Page, trigger: () => Promise<unknown>): Promise<OverviewBody> {
+  const bodies = await overviewBodies(page);
+  const seen = bodies.length;
+  await trigger();
+  await expect.poll(() => bodies.length, { message: 'the page fetched the overview' }).toBeGreaterThan(seen);
+  return bodies[seen];
+}
+
+/**
+ * Loads the overview by `open` and answers the body the page received, together with
+ * what `measure` read just before and just after. Other tests share the database, so
+ * when the two readings differ the page is reloaded and read again, until a body was
+ * served while nothing measured moved.
+ */
+export async function stableOverview<T>(
+  page: Page,
+  open: () => Promise<unknown>,
+  measure: () => Promise<T>,
+): Promise<{ body: OverviewBody; measured: T }> {
+  let trigger = open;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const before = await measure();
+    const body = await nextOverview(page, trigger);
+    const after = await measure();
+    if (JSON.stringify(before) === JSON.stringify(after)) {
+      await expect(page.getByText('Signups per day', { exact: true })).toBeVisible();
+      return { body, measured: before };
+    }
+    trigger = () => page.reload();
+  }
+  throw new Error('The shared database kept changing while the overview loaded');
+}
+
+/** Opens the overview and answers the body the page painted. */
+export async function openOverview(page: Page): Promise<OverviewBody> {
+  const body = await nextOverview(page, () => page.goto(adminUrl('/')));
+  await expect(page.getByText('Signups per day', { exact: true })).toBeVisible();
+  return body;
+}
+
+/** A card on an admin page by its exact title. */
+export function cardTitled(page: Page, title: string) {
+  return page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.locator('[data-slot="card-title"]').getByText(title, { exact: true }) });
+}
+
+/** The big number of a stat card on the overview. */
+export function statValue(page: Page, title: string) {
+  return cardTitled(page, title).locator('[data-slot="card-content"] > div').first();
+}
+
+/** The caption under a stat card's number. */
+export function statCaption(page: Page, title: string) {
+  return cardTitled(page, title).locator('[data-slot="card-content"] > p').first();
+}
+
+/** Sums of `usage_daily` per metric over `[from, through]`, leaving out the given owners. */
+export async function usageSums(from: string, through: string, excludeOwners: string[]): Promise<Record<string, number>> {
+  const rows = await sql<{ metric: string; total: string }>(
+    `SELECT metric, sum(value)::text AS total FROM usage_daily
+      WHERE day >= $1::date AND day <= $2::date AND NOT (owner_id = ANY($3::uuid[]))
+      GROUP BY metric`,
+    [from, through, excludeOwners],
+  );
+  return Object.fromEntries(rows.map((row) => [row.metric, Number(row.total)]));
+}
+
+/** `'2026-11-13'` as the admin app writes a usage day: "13 Nov 2026". */
+export function usageDay(day: string): string {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const [year, month, date] = day.split('-');
+  return `${Number(date)} ${months[Number(month) - 1]} ${year}`;
+}
+
+/** `'2026-11-13'` as "13 Nov". */
+export function usageShortDay(day: string): string {
+  return usageDay(day).split(' ').slice(0, 2).join(' ');
+}
+
+/** The tenants list's requests, as their query parameters, recorded from now on. */
+export function recordTenantListRequests(page: Page): URLSearchParams[] {
+  const seen: URLSearchParams[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === '/api/admin/tenants' && request.method() === 'GET') seen.push(url.searchParams);
+  });
+  return seen;
+}
+
+/** The rows of the tenants table (not its header). */
+export function tenantRows(page: Page) {
+  return page.getByRole('main').locator('tbody tr');
+}
+
+/** The email shown in each row of the tenants table, in order. */
+export async function listedEmails(page: Page): Promise<string[]> {
+  return tenantRows(page).locator('td:first-child a').allInnerTexts();
+}
+
+/** A plan staff make on the Plans page (no price: enough to comp). */
+export async function createCompPlan(staffToken: string, ip: string, label: string): Promise<{ code: string; name: string }> {
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 6);
+  const plan = { code: `e2e_${label}_${suffix}`, name: `E2E ${label} ${suffix}` };
+  const response = await adminRequest('POST', '/api/admin/plans', {
+    token: staffToken,
+    ip,
+    body: { ...plan, mauLimit: 1000, projectLimit: 20, seatLimit: 10, sortOrder: 20, reason: 'E2E: a plan to comp' },
+  });
+  if (response.status !== 201 && response.status !== 200) throw new Error(`create plan answered ${response.status}: ${response.text}`);
+  return plan;
+}
+
+export async function compTenant(staffToken: string, ip: string, tenantId: string, planCode: string): Promise<void> {
+  const response = await adminRequest('POST', `/api/admin/tenants/${tenantId}/billing/comp`, {
+    token: staffToken,
+    ip,
+    body: { planCode, reason: 'E2E: comped for the list' },
+  });
+  if (response.status !== 201 && response.status !== 200) throw new Error(`comp answered ${response.status}: ${response.text}`);
+}
+
+/** One SDK identify with a verified external id (its userHash made with the project's identity secret). */
+export async function identifyKnownPerson(
+  owner: Account,
+  projectId: string,
+  sdkKey: string,
+  ip: string,
+  person: { externalUserId: string; email: string },
+): Promise<void> {
+  const { secret } = await api<{ secret: string }>('GET', `/api/projects/${projectId}/identity-secret`, undefined, {
+    token: owner.accessToken,
+    ip,
+  });
+  await api(
+    'POST',
+    '/api/identity/identify',
+    {
+      projectId,
+      platform: 'web',
+      deviceFingerprint: `admten-device-${randomUUID()}`,
+      externalUserId: person.externalUserId,
+      distinctId: person.externalUserId,
+      userHash: createHmac('sha256', secret).update(person.externalUserId, 'utf8').digest('hex'),
+      email: person.email,
+    },
+    { apiKey: sdkKey, ip },
+  );
 }
