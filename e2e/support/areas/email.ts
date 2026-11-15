@@ -243,6 +243,7 @@ export interface EmailPerson {
   email?: string;
   emailOptIn?: boolean;
   firstName?: string;
+  traits?: Record<string, unknown>;
 }
 
 /** One device through the SDK's identify route; answers its device identity id. */
@@ -575,6 +576,11 @@ export interface SeedCampaign {
   successCount?: number;
   processedTokens?: number;
   scheduledAt?: Date | null;
+  failureCount?: number;
+  failureDetails?: Array<{ token: string; error: string }> | null;
+  errorMessage?: string | null;
+  preheader?: string | null;
+  html?: string;
 }
 
 /**
@@ -586,8 +592,9 @@ export async function seedCampaign(projectId: string, c: SeedCampaign): Promise<
   const channel = c.channel ?? 'email';
   const [row] = await sql<{ id: string }>(
     `INSERT INTO push_notification_logs
-       (project_id, title, channel, status, total_tokens, success_count, processed_tokens, scheduled_at, email_content)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+       (project_id, title, channel, status, total_tokens, success_count, processed_tokens, scheduled_at, email_content,
+        failure_count, failure_details, error_message)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
     [
       projectId,
       c.subject,
@@ -597,7 +604,12 @@ export async function seedCampaign(projectId: string, c: SeedCampaign): Promise<
       c.successCount ?? 1,
       c.processedTokens ?? c.totalTokens ?? 1,
       c.scheduledAt ?? null,
-      channel === 'email' ? JSON.stringify({ subject: c.subject, html: `<p>${c.subject}</p>`, text: null, preheader: null }) : null,
+      channel === 'email'
+        ? JSON.stringify({ subject: c.subject, html: c.html ?? `<p>${c.subject}</p>`, text: null, preheader: c.preheader ?? null })
+        : null,
+      c.failureCount ?? 0,
+      c.failureDetails ? JSON.stringify(c.failureDetails) : null,
+      c.errorMessage ?? null,
     ],
   );
   return row.id;
@@ -650,4 +662,56 @@ export function toastWith(page: Page, title: string, description: string): Locat
     .locator('li')
     .filter({ has: page.getByText(title, { exact: true }) })
     .filter({ has: page.getByText(description, { exact: true }) });
+}
+
+// ---- Second P1 chunk: composer, campaign page, delivery, unsubscribe and confirmation pages
+
+/** A live segment through the API, answering its id. */
+export async function createLiveSegment(as: Caller, projectId: string, name: string, definition: Record<string, unknown>): Promise<string> {
+  return dataOf<{ id: string }>(
+    await call('POST', `/api/projects/${projectId}/segments`, as, { name, definition, evaluationMode: 'live', status: 'active' }),
+  ).id;
+}
+
+/** A segment definition matching people whose `traits.plan` equals `plan`. */
+export function planIs(plan: string): Record<string, unknown> {
+  return { type: 'group', operator: 'and', children: [{ type: 'attribute', field: 'traits.plan', op: 'eq', value: plan }] };
+}
+
+/** One arm's box in the composer's A/B test card. */
+export function armBox(page: Page, key: string): Locator {
+  return page.locator('div.rounded-md.border.p-3').filter({ has: page.getByText(`Arm ${key}`, { exact: true }) });
+}
+
+/** The figure of a stat tile ("Delivered", "Failed", ...) inside a card of the campaign page. */
+export function statTile(container: Locator, label: string): Locator {
+  return container
+    .locator('div.rounded-lg.border.p-4')
+    .filter({ has: container.page().locator('div.text-xs', { hasText: new RegExp(`^\\s*${label}\\s*$`) }) })
+    .locator('p.text-2xl');
+}
+
+/** Holds POSTs whose path ends with `suffix` until the returned function is called. */
+export async function holdPosts(page: Page, suffix: string): Promise<() => void> {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  await page.route(
+    (url) => url.pathname.endsWith(suffix),
+    async (route) => {
+      if (route.request().method() === 'POST') await gate;
+      await route.continue();
+    },
+  );
+  return release;
+}
+
+/** The bodies of the POSTs the page sends to a path ending with `suffix`. */
+export function recordPosts(page: Page, suffix: string): Array<Record<string, any>> {
+  const seen: Array<Record<string, any>> = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith(suffix)) {
+      seen.push((request.postDataJSON() ?? {}) as Record<string, any>);
+    }
+  });
+  return seen;
 }
