@@ -213,6 +213,8 @@ export interface DeviceOptions {
   distinctId?: string;
   /** IANA zone the SDK reports (timezone waves). */
   timezone?: string;
+  /** Custom traits, as the SDK's identify sends them (segment rules on `traits.*`). */
+  traits?: Record<string, unknown>;
 }
 
 /** A fresh FCM-looking registration token. */
@@ -233,6 +235,7 @@ export async function addDevice(p: Pick<PushProject, 'project' | 'sdkKey'>, ip: 
       ...(options.pushOptIn === undefined ? {} : { pushOptIn: options.pushOptIn }),
       ...(options.distinctId ? { distinctId: options.distinctId } : {}),
       ...(options.timezone ? { timezone: options.timezone } : {}),
+      ...(options.traits ? { traits: options.traits } : {}),
     },
     { apiKey: p.sdkKey, ip },
   );
@@ -611,4 +614,129 @@ export async function refuseTokenExchange(account: Pick<FakeServiceAccount, 'cli
 /** The wall-clock `HH:MM` of an instant in `timezone`. */
 export function localClock(instant: Date | string, timezone: string): string {
   return new Intl.DateTimeFormat('en-GB', { timeZone: timezone, hour12: false, hour: '2-digit', minute: '2-digit' }).format(new Date(instant));
+}
+
+// ---- P1: the composer (steps, action bar, date pickers, the send request)
+
+/** Opens the composer for a project and waits for its heading. */
+export async function openComposer(page: Page, projectId: string): Promise<void> {
+  await page.goto(`/projects/${projectId}/push-notifications/new`);
+  await page.getByRole('heading', { name: 'New push campaign' }).waitFor();
+}
+
+/** The composer's stepper (`nav` named Campaign steps). */
+export function composerSteps(page: Page): Locator {
+  return page.getByRole('navigation', { name: 'Campaign steps' });
+}
+
+/** One stepper button by its step label (Audience, Message, Delivery, Review). */
+export function stepButton(page: Page, label: 'Audience' | 'Message' | 'Delivery' | 'Review'): Locator {
+  return composerSteps(page).getByRole('button').filter({ has: page.locator('span.font-medium', { hasText: new RegExp(`^${label}$`) }) });
+}
+
+/** The message in the composer's sticky action bar. */
+export function actionBar(page: Page): Locator {
+  return page.locator('div.sticky.bottom-0 p').first();
+}
+
+/** The composer's Next button, in its action bar (not the preview's or a calendar's). */
+export function nextButton(page: Page): Locator {
+  return page.locator('div.sticky.bottom-0').getByRole('button', { name: 'Next', exact: true });
+}
+
+/** The switch in a bordered row whose shadcn Label is `label`. */
+export function switchFor(scope: Page | Locator, label: string): Locator {
+  return scope.getByText(label, { exact: true }).locator('../..').getByRole('switch');
+}
+
+/** The value cell of one Review row. */
+export function reviewValue(page: Page, label: string): Locator {
+  return page.locator('dl div').filter({ has: page.locator('dt', { hasText: new RegExp(`^${label}$`) }) }).locator('dd');
+}
+
+/** Year, month (1-12), day and weekday (0 = Sunday) of an instant on a zone's calendar. */
+export function zonedParts(instant: Date, timezone: string): { y: number; m: number; d: number; weekday: number } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    weekday: 'short',
+  }).formatToParts(instant);
+  const get = (type: string) => parts.find((p) => p.type === type)!.value;
+  return {
+    y: Number(get('year')),
+    m: Number(get('month')),
+    d: Number(get('day')),
+    weekday: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(get('weekday')),
+  };
+}
+
+/** The instant a wall-clock `HH:MM` on `y-m-d` is in `timezone`. */
+export function zonedInstant(y: number, m: number, d: number, hhmm: string, timezone: string): Date {
+  const [hh, mm] = hhmm.split(':').map(Number);
+  const guess = Date.UTC(y, m - 1, d, hh, mm);
+  const wall = (instant: number) => {
+    const { y: wy, m: wm, d: wd } = zonedParts(new Date(instant), timezone);
+    const [wh, wmin] = localClock(new Date(instant), timezone).split(':').map(Number);
+    return Date.UTC(wy, wm - 1, wd, wh, wmin);
+  };
+  let instant = guess - (wall(guess) - guess);
+  instant -= wall(instant) - guess;
+  return new Date(instant);
+}
+
+/**
+ * Picks a day (and optionally a time) in a DateTimePicker opened from `trigger`. The
+ * day is found by its `data-day` (en-US `M/D/YYYY`), paging forward month by month;
+ * `timezone` is the page's, to turn `day` into the calendar's date.
+ */
+export async function pickDateTime(page: Page, trigger: Locator, day: Date, timezone: string, time?: string): Promise<void> {
+  await trigger.click();
+  const popover = page.locator('[data-slot="popover-content"]');
+  await popover.waitFor();
+  const { y, m, d } = zonedParts(day, timezone);
+  const cell = popover.locator(`button[data-day="${m}/${d}/${y}"]`);
+  for (let i = 0; i < 24 && (await cell.count()) === 0; i++) {
+    await popover.getByRole('button', { name: /next month/i }).click();
+  }
+  await cell.first().click();
+  if (time) await popover.locator('input[type="time"]').fill(time);
+  await page.keyboard.press('Escape');
+  await expect(popover).toHaveCount(0);
+}
+
+export interface SentCampaign {
+  body: Record<string, any>;
+  status: number;
+  data: Record<string, any>;
+}
+
+/** Clicks the composer's send button and answers the request body and the API's answer. */
+export async function submitCampaign(page: Page, buttonName: string): Promise<SentCampaign> {
+  const isSend = (url: string) => new URL(url).pathname.endsWith('/api/push-notifications/send');
+  const [request, response] = await Promise.all([
+    page.waitForRequest((r) => isSend(r.url()) && r.method() === 'POST'),
+    page.waitForResponse((r) => isSend(r.url()) && r.request().method() === 'POST'),
+    page.getByRole('button', { name: buttonName, exact: true }).click(),
+  ]);
+  const json = await response.json().catch(() => ({}));
+  return { body: request.postDataJSON(), status: response.status(), data: json?.data };
+}
+
+/**
+ * Answers the next send with a 400 instead of reaching the API, and hands back the
+ * body the page posted: a payload check that creates nothing.
+ */
+export async function captureRefusedSend(page: Page, buttonName: string): Promise<Record<string, any>> {
+  const pattern = (url: URL) => url.pathname.endsWith('/api/push-notifications/send');
+  let captured: Record<string, any> | undefined;
+  await page.route(pattern, async (route) => {
+    captured = route.request().postDataJSON();
+    await route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ statusCode: 400, message: 'Held by the test' }) });
+  });
+  await page.getByRole('button', { name: buttonName, exact: true }).click();
+  await expect.poll(() => captured !== undefined).toBe(true);
+  await page.unroute(pattern);
+  return captured!;
 }
