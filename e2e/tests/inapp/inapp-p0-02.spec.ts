@@ -69,6 +69,8 @@ import {
 
 const MESSAGES = (projectId: string) => `/api/projects/${projectId}/in-app-messages`;
 const IMAGE = 'https://example.com/banner.jpg';
+/** The user agent of calls that must record nothing, so their rows would stand out. */
+const REFUSED_UA = 'E2E refused call';
 const isBannerPost = (r: Response) => /\/api\/banner-categories\/[0-9a-f-]{36}\/banners$/.test(new URL(r.url()).pathname) && r.request().method() === 'POST';
 
 function waitFor(page: Page, method: string, suffix: string | RegExp): Promise<Response> {
@@ -416,28 +418,28 @@ test('INAPP-272 serve key and scope errors', async () => {
   const privacyKey = await createPrivacyKey(p);
   const { widget } = await carouselWith(p, 'Guarded', [{ title: 'Only' }], 'active');
 
-  const none = await serveWidget(widget.id, undefined);
+  const none = await serveWidget(widget.id, undefined, REFUSED_UA);
   expect(none.status).toBe(401);
   expect(messageOf(none)).toBe(API_KEY_REQUIRED);
-  const foreign = await serveWidget(widget.id, other.sdkKey);
+  const foreign = await serveWidget(widget.id, other.sdkKey, REFUSED_UA);
   expect(foreign.status).toBe(404);
   expect(messageOf(foreign)).toBe(WIDGET_NOT_ACTIVE);
   expect(foreign.text).not.toContain('Guarded');
-  const privacy = await serveWidget(widget.id, privacyKey);
+  const privacy = await serveWidget(widget.id, privacyKey, REFUSED_UA);
   expect(privacy.status).toBe(403);
   expect(messageOf(privacy)).toBe(PRIVACY_KEY_REFUSED);
-  const malformed = await serveWidget('not-a-uuid', p.sdkKey);
+  const malformed = await serveWidget('not-a-uuid', p.sdkKey, REFUSED_UA);
   expect(malformed.status).toBe(400);
   expect(messageOf(malformed)).toBe(UUID_EXPECTED);
-
-  // Impressions are written after the answer: give them a moment, then none is there.
-  await new Promise((resolve) => setTimeout(resolve, 1000));
   expect(await widgetEventRows(widget.id)).toEqual([]);
-  expect((await widgetItemRows(widget.id))[0].impressions).toBe(0);
 
-  // Control: the project's own key is served and counted.
+  // Control: the project's own key is served and counted. Impressions are written
+  // after the answer, so once the control's has landed, any from the refused calls
+  // (made earlier, with their own user agent) would have too.
   expect((await serveWidget(widget.id, p.sdkKey)).status).toBe(200);
-  await expect.poll(async () => (await widgetEventRows(widget.id)).length).toBe(1);
+  await expect.poll(async () => (await widgetEventRows(widget.id)).filter((e) => e.user_agent === ANDROID_CHROME_UA).length).toBe(1);
+  expect((await widgetEventRows(widget.id)).map((e) => e.user_agent)).toEqual([ANDROID_CHROME_UA]);
+  await expect.poll(async () => (await widgetItemRows(widget.id))[0].impressions).toBe(1);
 });
 
 test('INAPP-275 serve during suspension', async () => {
@@ -446,11 +448,10 @@ test('INAPP-275 serve during suspension', async () => {
 
   await suspendAccount(p.owner.userId);
   try {
-    const served = await serveWidget(widget.id, p.sdkKey);
+    const served = await serveWidget(widget.id, p.sdkKey, REFUSED_UA);
     expect(served.status).toBe(200);
     expect(dataOf(served).category).toMatchObject({ id: widget.id, status: 'active' });
     expect(dataOf(served).banners).toEqual([]);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
     expect(await widgetEventRows(widget.id)).toEqual([]);
   } finally {
     await reactivateAccount(p.owner.userId);
@@ -459,7 +460,10 @@ test('INAPP-275 serve during suspension', async () => {
   const after = await serveWidget(widget.id, p.sdkKey);
   expect(after.status).toBe(200);
   expect(dataOf(after).banners.map((b: { id: string }) => b.id)).toEqual([items[0].id]);
-  await expect.poll(async () => (await widgetEventRows(widget.id)).length).toBe(1);
+  // Once the later serve's impression has landed, one from the suspended serve would have too.
+  await expect.poll(async () => (await widgetEventRows(widget.id)).filter((e) => e.user_agent === ANDROID_CHROME_UA).length).toBe(1);
+  expect((await widgetEventRows(widget.id)).map((e) => e.user_agent)).toEqual([ANDROID_CHROME_UA]);
+  expect((await widgetItemRow(items[0].id))?.impressions).toBe(1);
 });
 
 test('INAPP-276 record a click', async () => {
@@ -488,26 +492,29 @@ test('INAPP-277 click scope and errors', async () => {
   const other = await inAppProject('inapp-277-other');
   const { widget, items } = await carouselWith(p, 'Counted', [{ title: 'Mine' }]);
 
-  const foreign = await clickWidgetItem(items[0].id, other.sdkKey);
+  const foreign = await clickWidgetItem(items[0].id, other.sdkKey, REFUSED_UA);
   expect(foreign.status).toBe(404);
   expect(messageOf(foreign)).toBe(BANNER_NOT_FOUND);
-  const none = await clickWidgetItem(items[0].id, undefined);
+  const none = await clickWidgetItem(items[0].id, undefined, REFUSED_UA);
   expect(none.status).toBe(401);
   expect(messageOf(none)).toBe(API_KEY_REQUIRED);
-  const unknown = await clickWidgetItem(randomUUID(), p.sdkKey);
+  const unknown = await clickWidgetItem(randomUUID(), p.sdkKey, REFUSED_UA);
   expect(unknown.status).toBe(404);
   expect(messageOf(unknown)).toBe(BANNER_NOT_FOUND);
-  const malformed = await clickWidgetItem('not-a-uuid', p.sdkKey);
+  const malformed = await clickWidgetItem('not-a-uuid', p.sdkKey, REFUSED_UA);
   expect(malformed.status).toBe(400);
   expect(messageOf(malformed)).toBe(UUID_EXPECTED);
 
-  await new Promise((resolve) => setTimeout(resolve, 1000));
+  // The counter is written before the answer.
   expect((await widgetItemRow(items[0].id))?.clicks).toBe(0);
   expect(await widgetEventRows(widget.id)).toEqual([]);
 
-  // Control: the project's own key counts the click.
+  // Control: the project's own key counts the click. Its event is written after the
+  // answer; once it has landed, one from the refused calls (made earlier) would have too.
   expect((await clickWidgetItem(items[0].id, p.sdkKey)).status).toBe(201);
   expect((await widgetItemRow(items[0].id))?.clicks).toBe(1);
+  await expect.poll(async () => (await widgetEventRows(widget.id)).filter((e) => e.user_agent === IPHONE_SAFARI_UA).length).toBe(1);
+  expect((await widgetEventRows(widget.id)).map((e) => e.user_agent)).toEqual([IPHONE_SAFARI_UA]);
 });
 
 // ------------------------------------------------------------ R. Permissions, tenancy, view-as ---
@@ -816,6 +823,7 @@ test('INAPP-293 message preview renders stored text safely', async ({ page }) =>
   const noMarkup = async () => {
     await expect(page.locator('img[src="x"]')).toHaveCount(0);
     await expect(page.locator('script', { hasText: 'alert(1)' })).toHaveCount(0);
+    await expect(page.locator('[onerror]')).toHaveCount(0);
   };
 
   await page.goto(`/projects/${p.project.id}/in-app-messages/${message.id}`);
@@ -853,6 +861,10 @@ test('INAPP-294 widget names, headings, UTM values and URLs render as text', asy
   expect(refused.status).toBe(400);
   expect(messageOf(refused)).toContain('clickUrl must be a URL address');
   await sql(`UPDATE in_app_banners SET click_url = $2 WHERE id = $1`, [item.id, clickUrl]);
+  // A quote-bearing click URL the API does accept.
+  const quotedUrl = 'https://e.com/"onmouseover="alert(4)';
+  const quoted = await createWidgetItem(p.owner, widget.id, { title: 'Quoted item', imageUrl: IMAGE, clickUrl: quotedUrl, sortOrder: 1 });
+  expect(quoted.clickUrl).toBe(quotedUrl);
 
   const dialogs = refuseDialogs(page);
   await signIn(page, p.owner);
@@ -874,6 +886,7 @@ test('INAPP-294 widget names, headings, UTM values and URLs render as text', asy
   await page.goto(`/projects/${p.project.id}/widgets/carousels/${widget.id}`);
   await expect(page.getByRole('heading', { level: 1, name, exact: true })).toBeVisible();
   await expect(widgetItemCard(page, 'Plain item').getByText(clickUrl, { exact: true })).toBeVisible();
+  await expect(widgetItemCard(page, 'Quoted item').getByText(quotedUrl, { exact: true })).toBeVisible();
   await noMarkup();
   await page.getByRole('tab', { name: 'Settings' }).click();
   await expect(page.getByText(heading, { exact: true })).toBeVisible();
@@ -883,6 +896,11 @@ test('INAPP-294 widget names, headings, UTM values and URLs render as text', asy
   await expect(page.getByRole('heading', { level: 1, name: 'Plain item', exact: true })).toBeVisible();
   await expect(page.getByText(clickUrl, { exact: true })).toBeVisible();
   await expect(page.getByText(utm, { exact: true })).toBeVisible();
+  await noMarkup();
+
+  await page.goto(`/projects/${p.project.id}/widgets/carousels/${widget.id}/items/${quoted.id}/report`);
+  await expect(page.getByRole('heading', { level: 1, name: 'Quoted item', exact: true })).toBeVisible();
+  await expect(page.getByText(quotedUrl, { exact: true })).toBeVisible();
   await noMarkup();
 
   expect(dialogs).toEqual([]);
@@ -903,10 +921,12 @@ test('INAPP-315 detail-page Activate and Pause in view-as', async ({ page, brows
   const errors = collectPageErrors(page);
   const posts = recordRequests(page, 'POST', /\/in-app-messages\/[0-9a-f-]{36}\/(activate|pause)$/);
 
-  const onlyReadOnlyToast = async () => {
+  // The refusal ends as an uncaught rejection, so once it is raised the page has done
+  // all it does about it: then only the read-only toast may be on screen.
+  const onlyReadOnlyToast = async (errorsBefore: number) => {
     await expect(toastWithTitle(page, 'Read-only session')).toContainText(READ_ONLY);
-    // The page raises nothing of its own: give it a moment, then only the one toast.
-    await page.waitForTimeout(1000);
+    await expect.poll(() => errors.length).toBeGreaterThan(errorsBefore);
+    expect(errors.slice(errorsBefore).join('\n')).toContain('Request failed with status code 403');
     expect(await toastTitles(page)).toEqual(['Read-only session']);
   };
 
@@ -916,9 +936,8 @@ test('INAPP-315 detail-page Activate and Pause in view-as', async ({ page, brows
   let response = await answered;
   expect(response.status()).toBe(403);
   expect((await response.json()).message).toBe(READ_ONLY);
-  await onlyReadOnlyToast();
+  await onlyReadOnlyToast(0);
   await expect(detailBadge(page, 'VA detail draft').getByText('Draft', { exact: true })).toBeVisible();
-  await expect.poll(() => errors.length).toBeGreaterThanOrEqual(1);
   const afterActivate = errors.length;
 
   await clearToasts(page);
@@ -928,9 +947,8 @@ test('INAPP-315 detail-page Activate and Pause in view-as', async ({ page, brows
   response = await answered;
   expect(response.status()).toBe(403);
   expect((await response.json()).message).toBe(READ_ONLY);
-  await onlyReadOnlyToast();
+  await onlyReadOnlyToast(afterActivate);
   await expect(detailBadge(page, 'VA detail active').getByText('Active', { exact: true })).toBeVisible();
-  await expect.poll(() => errors.length).toBeGreaterThan(afterActivate);
 
   expect(posts).toHaveLength(2);
   expect(await messageRows(p.project.id)).toEqual(before);
