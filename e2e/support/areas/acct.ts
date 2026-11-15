@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from 'crypto';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'crypto';
 import { existsSync, readFileSync, statSync } from 'fs';
 import path from 'path';
 import type { Browser, BrowserContext, Locator, Page, Response } from '@playwright/test';
@@ -6,7 +6,8 @@ import { Client } from 'pg';
 import { adminApi } from '../admin';
 import { apiUrl, newClientIp, type Account } from '../api';
 import { totpCode, totpStep, type TotpEnrolment } from '../factors';
-import { assertE2eDatabase, LOG_DIR, stackEnv } from '../stack';
+import { portInUse, run, stopAll, waitForUrl } from '../processes';
+import { appEnvironment, assertE2eDatabase, LOG_DIR, REPO_ROOT, runSecrets, stackEnv, stackPorts } from '../stack';
 
 /**
  * Helpers for the ACCT specs (the signed-in person's /settings): raw API calls that keep
@@ -539,4 +540,230 @@ export async function recordBlobTypes(page: Page): Promise<() => Promise<string[
     };
   });
   return () => page.evaluate(() => (window as unknown as { __e2eBlobTypes: string[] }).__e2eBlobTypes);
+}
+
+// ---- ACCT P1 chunk 2: passkeys from a second device, software registrations, sessions
+
+/**
+ * Holds only the `n`th `method path` request on the page (counting from 1) until
+ * `release` is called; `arrived` settles when it is held. Earlier and later ones pass.
+ */
+export async function holdNthRequest(
+  page: Page,
+  method: string,
+  path: string,
+  n: number,
+): Promise<{ arrived: Promise<void>; release: () => void }> {
+  let seen = 0;
+  let release!: () => void;
+  let arrive!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const arrived = new Promise<void>((resolve) => (arrive = resolve));
+  await page.route(`**${path}`, async (route) => {
+    const request = route.request();
+    if (request.method() === method && new URL(request.url()).pathname === path) {
+      seen += 1;
+      if (seen === n) {
+        arrive();
+        await gate;
+      }
+    }
+    await route.continue();
+  });
+  return { arrived, release };
+}
+
+/** A card's own description line. */
+export function cardDescription(card: Locator): Locator {
+  return card.locator('[data-slot="card-description"]');
+}
+
+type CborValue = number | string | Buffer | Map<number | string, CborValue>;
+
+function cborHead(major: number, length: number): Buffer {
+  if (length < 24) return Buffer.from([(major << 5) | length]);
+  if (length < 0x100) return Buffer.from([(major << 5) | 24, length]);
+  if (length < 0x10000) {
+    const head = Buffer.alloc(3);
+    head[0] = (major << 5) | 25;
+    head.writeUInt16BE(length, 1);
+    return head;
+  }
+  const head = Buffer.alloc(5);
+  head[0] = (major << 5) | 26;
+  head.writeUInt32BE(length, 1);
+  return head;
+}
+
+/** Just the CBOR a WebAuthn attestation object needs: integers, text, bytes and maps. */
+function cbor(value: CborValue): Buffer {
+  if (typeof value === 'number') return value >= 0 ? cborHead(0, value) : cborHead(1, -1 - value);
+  if (typeof value === 'string') {
+    const text = Buffer.from(value, 'utf8');
+    return Buffer.concat([cborHead(3, text.length), text]);
+  }
+  if (Buffer.isBuffer(value)) return Buffer.concat([cborHead(2, value.length), value]);
+  const entries = [...value.entries()];
+  return Buffer.concat([cborHead(5, entries.length), ...entries.flatMap(([key, item]) => [cbor(key), cbor(item)])]);
+}
+
+/** Authenticator data flags. */
+export const AUTH_DATA_FLAGS = { userPresent: 0x01, userVerified: 0x04, attestedCredential: 0x40 } as const;
+
+/**
+ * A registration response made in the test by a software authenticator (attestation
+ * `none`, a new P-256 key) for the challenge and relying party of `options`, as a browser
+ * at `origin` would send it. `flags` are the authenticator data flags: user presence and
+ * attested credential data without user verification is 0x41.
+ */
+export function softwareRegistration(
+  options: { challenge: string; rp: { id?: string } },
+  origin: string,
+  flags: number,
+): Record<string, unknown> {
+  const { publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const jwk = publicKey.export({ format: 'jwk' }) as { x: string; y: string };
+  const coseKey = cbor(
+    new Map<number, CborValue>([
+      [1, 2],
+      [3, -7],
+      [-1, 1],
+      [-2, Buffer.from(jwk.x, 'base64url')],
+      [-3, Buffer.from(jwk.y, 'base64url')],
+    ]),
+  );
+  const credentialId = randomBytes(16);
+  const idLength = Buffer.alloc(2);
+  idLength.writeUInt16BE(credentialId.length);
+  const authData = Buffer.concat([
+    createHash('sha256').update(options.rp.id ?? new URL(origin).hostname).digest(),
+    Buffer.from([flags]),
+    Buffer.alloc(4),
+    Buffer.alloc(16),
+    idLength,
+    credentialId,
+    coseKey,
+  ]);
+  const attestationObject = cbor(
+    new Map<string, CborValue>([
+      ['fmt', 'none'],
+      ['attStmt', new Map()],
+      ['authData', authData],
+    ]),
+  );
+  const clientDataJSON = Buffer.from(JSON.stringify({ type: 'webauthn.create', challenge: options.challenge, origin, crossOrigin: false }));
+  const id = credentialId.toString('base64url');
+  return {
+    id,
+    rawId: id,
+    type: 'public-key',
+    response: {
+      clientDataJSON: clientDataJSON.toString('base64url'),
+      attestationObject: attestationObject.toString('base64url'),
+      transports: ['internal'],
+    },
+    clientExtensionResults: {},
+  };
+}
+
+/** An auth_events row written directly, as the API would have recorded it. */
+export async function insertAuthEvent(userId: string, email: string, type: string, ip: string, reason: string | null = null): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO auth_events (user_id, email, type, reason, ip_address, created_at) VALUES ($1, $2, $3, $4, $5, clock_timestamp()) RETURNING id`,
+    [userId, email, type, reason, ip],
+  );
+  return row.id;
+}
+
+/**
+ * A new session from a password sign-in through the API, with what its tokens say:
+ * the session id, the refresh token's lifetime in seconds, and the maximum session
+ * length the access token carries.
+ */
+export async function passwordSignInDetails(
+  account: Pick<Account, 'email' | 'password'>,
+  ip: string,
+): Promise<{ accessToken: string; sessionId: string; refreshLifetimeSeconds: number; sessionMaxAgeSeconds: number }> {
+  const answer = await call<{ tokens: { accessToken: string } }>('POST', '/api/auth/login', { email: account.email, password: account.password }, { ip });
+  if (answer.status !== 200) throw new Error(`login answered ${answer.status}: ${answer.text.slice(0, 300)}`);
+  const accessToken = answer.body.tokens.accessToken;
+  const cookie = answer.headers.getSetCookie().find((line) => /chumbaq_refresh=/.test(line));
+  if (!cookie) throw new Error('login set no refresh cookie');
+  const refresh = jwtClaims(cookie.split(';')[0].split('=').slice(1).join('='));
+  const claims = jwtClaims(accessToken);
+  return {
+    accessToken,
+    sessionId: String(claims.sid),
+    refreshLifetimeSeconds: Number(refresh.exp) - Number(refresh.iat),
+    sessionMaxAgeSeconds: Number(claims.session_max_age),
+  };
+}
+
+/** Sets a per-tab note in the page's sessionStorage (what a sign-in response leaves). */
+export async function setSessionNote(page: Page, key: string, value = '1'): Promise<void> {
+  await page.evaluate(([k, v]) => sessionStorage.setItem(k, v), [key, value]);
+}
+
+export function sessionNote(page: Page, key: string): Promise<string | null> {
+  return page.evaluate((k) => sessionStorage.getItem(k), key);
+}
+
+export const FACTOR_RESET_NOTE = 'chumbaq_factor_reset_pending';
+export const STAFF_LINK_NOTE = 'chumbaq_staff_link_pending';
+
+/** Counts the page's calls to `navigator.credentials.create` from now on (the current document). */
+export async function countCredentialCreates(page: Page): Promise<() => Promise<number>> {
+  await page.evaluate(() => {
+    const container = navigator.credentials;
+    const original = container.create.bind(container);
+    (window as unknown as { __e2eCreates: number }).__e2eCreates = 0;
+    container.create = (options?: CredentialCreationOptions) => {
+      (window as unknown as { __e2eCreates: number }).__e2eCreates += 1;
+      return original(options);
+    };
+  });
+  return () => page.evaluate(() => (window as unknown as { __e2eCreates: number }).__e2eCreates);
+}
+
+// ---- A second customer API for one config variant
+
+export interface ExtraCustomerApi {
+  url: string;
+  stop(): Promise<void>;
+}
+
+/**
+ * A second customer API on the lane's database, Redis and secrets, with `changes` on top
+ * of the stack's environment, on a free port at the API port + 92..96 (the mock and stub
+ * take + 90 and + 91, billing's + 97 and + 98). Stop it when done.
+ */
+export async function startCustomerApiWith(label: string, changes: Record<string, string>): Promise<ExtraCustomerApi> {
+  const ports = stackPorts();
+  const taken = new Set(Object.values(ports));
+  let port = 0;
+  for (let candidate = ports.api + 92; candidate <= ports.api + 96; candidate++) {
+    if (!taken.has(candidate) && !(await portInUse(candidate))) {
+      port = candidate;
+      break;
+    }
+  }
+  if (!port) throw new Error('No free port for the extra customer API');
+  const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ...changes, API_PORT: String(port) };
+  const started = run(`api-${label}-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
+  try {
+    await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    throw error;
+  }
+  return { url: `http://localhost:${port}`, stop: () => stopAll([started]) };
+}
+
+/** Sends the page's requests under `prefix` (an API path) to another API, unchanged otherwise. */
+export async function forwardToApi(page: Page, base: string, prefix: string): Promise<void> {
+  await page.route(`**${prefix}**`, async (route) => {
+    const url = new URL(route.request().url());
+    const response = await route.fetch({ url: `${base}${url.pathname}${url.search}` });
+    await route.fulfill({ response });
+  });
 }
