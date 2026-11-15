@@ -15,6 +15,7 @@ import {
   customerRequest,
   exchangeViewAs,
   handoffRows,
+  jwtClaims,
   makeStaffSignInStale,
   makeSuperAdmin,
   parseCsv,
@@ -188,7 +189,8 @@ test('ADMTEN-076 the tenants list never returns secrets or end-user data', async
 test('ADMTEN-079 Export CSV downloads the current view and says how many', async ({ page, clientIp }) => {
   await signedInStaff(page, clientIp);
   const search = term('exp');
-  for (const name of ['Ada', 'Bea', 'Cy']) await createAccount(newClientIp(), `${search}-${name.toLowerCase()}`, name);
+  const active: Account[] = [];
+  for (const name of ['Ada', 'Bea', 'Cy']) active.push(await createAccount(newClientIp(), `${search}-${name.toLowerCase()}`, name));
   // A fourth match that the status filter leaves out.
   const suspended = await createAccount(newClientIp(), `${search}-sus`, 'Sus');
   await sql(`UPDATE users SET suspended_at = now(), suspended_reason = 'E2E: left out of the view' WHERE id = $1`, [
@@ -216,6 +218,10 @@ test('ADMTEN-079 Export CSV downloads the current view and says how many', async
   const file = await readDownload(await downloaded);
   expect(file.filename).toMatch(/^chumbaq-tenants-\d{8}-\d{6}\.csv$/);
   expect(file.lines).toHaveLength(4);
+  expect(file.lines[0]).toBe(CSV_HEADER);
+  // The file is the view: the three active matches, newest first, not the suspended one.
+  expect(file.lines.slice(1).map((line) => line.split(',')[0])).toEqual(active.map((account) => account.userId).reverse());
+  expect(file.text).not.toContain(suspended.userId);
   await expect(toast(page, 'Exported 3 tenants')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Export CSV' })).toBeEnabled();
 });
@@ -290,12 +296,13 @@ test('ADMTEN-084 every export is audited with its filters', async ({ page, clien
     target_type: 'tenant_list',
     target_id: null,
     ip_address: clientIp,
-    metadata: {
-      filters: { sort: 'messages_sent_30d', order: 'asc', search, activity: 'quiet', plan: 'free' },
-      rowCount: 0,
-      rowCap: 10000,
-      truncated: false,
-    },
+  });
+  // Exact: toMatchObject would accept extra keys in nested objects, and status must be absent.
+  expect(row.metadata).toEqual({
+    filters: { sort: 'messages_sent_30d', order: 'asc', search, activity: 'quiet', plan: 'free' },
+    rowCount: 0,
+    rowCap: 10000,
+    truncated: false,
   });
   // Recorded before the file was sent (the Date header has whole seconds).
   expect(new Date(row.created_at).getTime()).toBeLessThanOrEqual(sentAt.getTime() + 1_000);
@@ -479,7 +486,12 @@ test('ADMTEN-121 raise the project limit', async ({ page, clientIp }) => {
   // A sign-in older than 15 minutes is enough for limits.
   await makeStaffSignInStale(staff.account.userId);
 
+  // The page load refreshes the token; it must really carry the old sign-in, or this proves nothing.
+  const refreshed = page.waitForResponse((response) => response.url().endsWith('/api/staff/auth/session/refresh'));
   await openTenant(page, tenant);
+  const { data: session } = (await (await refreshed).json()) as { data: { accessToken: string } };
+  const authTime = Number(jwtClaims(session.accessToken).auth_time);
+  expect(Date.now() / 1000 - authTime).toBeGreaterThan(15 * 60);
   await expect(page.getByText(`2 of ${before.effectiveProjectLimit} projects (default limit)`)).toBeVisible();
   await page.getByRole('button', { name: 'Change limit' }).click();
   const dialog = page.getByRole('dialog', { name: 'Project limit' });
@@ -765,6 +777,7 @@ test('ADMTEN-155 a view-as session ends when the tenant is suspended', async ({ 
   await viewAs.unroute('**/api/**');
   await viewAs.goto('/projects');
   await expect(viewAs).toHaveURL(/\/login/);
+  expect(await viewAs.evaluate(() => sessionStorage.getItem('chumbaq_impersonation'))).toBeNull();
   await expect(viewAs.getByRole('region', { name: 'Impersonation session' })).toHaveCount(0);
 });
 
@@ -839,7 +852,8 @@ test('ADMTEN-161 view-as refusals for special targets', async ({ page, clientIp 
   await makeSuperAdmin(otherAdmin.userId);
   const suspended = await createAccount(newClientIp(), 'tenant', 'Sue Suspended');
   await adminApi('POST', `/api/admin/tenants/${suspended.userId}/suspend`, { reason: 'E2E: suspended target' }, staff.token, clientIp);
-  const auditBefore = (await auditRows({ action: 'tenant.impersonated', actorId: staff.account.userId })).length;
+  // No audit row of any kind from the refusals: count everything this staff member has written.
+  const auditBefore = (await auditRows({ actorId: staff.account.userId })).length;
 
   const cases: [string, number, string][] = [
     [staff.account.userId, 409, 'You cannot impersonate yourself'],
@@ -857,7 +871,10 @@ test('ADMTEN-161 view-as refusals for special targets', async ({ page, clientIp 
     expect.soft(response.json?.message, message).toBe(message);
   }
   expect(await handoffRows({ actorId: staff.account.userId })).toHaveLength(0);
-  expect(await auditRows({ action: 'tenant.impersonated', actorId: staff.account.userId })).toHaveLength(auditBefore);
+  expect(await auditRows({ actorId: staff.account.userId })).toHaveLength(auditBefore);
+  for (const target of [otherAdmin.userId, suspended.userId]) {
+    expect(await auditRows({ action: 'tenant.impersonated', targetId: target })).toHaveLength(0);
+  }
 });
 
 test('ADMTEN-162 view-as needs a recent staff sign-in', async ({ page, clientIp }) => {
