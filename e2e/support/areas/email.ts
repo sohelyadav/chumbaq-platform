@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
 import { Queue } from 'bullmq';
 import { expect, type Browser, type Locator, type Page } from '@playwright/test';
 import { Client } from 'pg';
@@ -740,4 +740,114 @@ export async function campaignJob(
   } finally {
     await queue.close();
   }
+}
+
+// ---- Third P1 chunk: webhooks, link rewrite, roles, activity, coverage additions
+
+/**
+ * A view-as session token for `tenant`, as the customer app gets one: the handoff's
+ * one-time code (in the link's fragment) exchanged on the customer API.
+ */
+export async function viewAsToken(browser: Browser, baseURL: string | undefined, tenant: Account): Promise<Caller> {
+  const url = await viewAsHandoff(browser, baseURL, tenant);
+  const code = new URLSearchParams(new URL(url).hash.slice(1)).get('code');
+  if (!code) throw new Error(`No code in the view-as link ${url}`);
+  const ip = newClientIp();
+  const session = await api<{ accessToken: string }>('POST', '/api/auth/impersonation/exchange', { code }, { ip });
+  return { accessToken: session.accessToken, ip };
+}
+
+/**
+ * Svix headers with every part as given (an unreadable timestamp, an empty id, a list of
+ * signatures): `sign` is the base64 HMAC-SHA256 of `<id>.<timestamp>.<body>` under the
+ * secret's key bytes, which the caller places in `svix-signature` as it likes.
+ */
+export function svixParts(secret: string, rawBody: string, id: string, timestamp: string): { sign: string } {
+  const key = Buffer.from(secret.slice('whsec_'.length), 'base64');
+  return { sign: createHmac('sha256', key).update(`${id}.${timestamp}.${rawBody}`).digest('base64') };
+}
+
+export interface SeedCampaignRow extends SeedCampaign {
+  /** When the row was created (`sent_at`, the list's order). */
+  createdAt: Date;
+  parentCampaignId?: string | null;
+  variantKey?: string | null;
+  recurrence?: Record<string, unknown> | null;
+  variants?: Array<Record<string, unknown>> | null;
+}
+
+/** A campaign row as `seedCampaign` writes it, with its creation time and family columns set. */
+export async function seedCampaignRow(projectId: string, c: SeedCampaignRow): Promise<string> {
+  const id = await seedCampaign(projectId, c);
+  await sql(
+    `UPDATE push_notification_logs
+        SET sent_at = $2, parent_campaign_id = $3, variant_key = $4, recurrence = $5, variants = $6
+      WHERE id = $1`,
+    [
+      id,
+      c.createdAt,
+      c.parentCampaignId ?? null,
+      c.variantKey ?? null,
+      c.recurrence ? JSON.stringify(c.recurrence) : null,
+      c.variants ? JSON.stringify(c.variants) : null,
+    ],
+  );
+  return id;
+}
+
+/**
+ * `count` people in one statement, each a device row of its own with a unique address
+ * (`<prefix>-<n>@example.test`) and `traits`, as identify leaves them.
+ */
+export async function seedManyPeople(projectId: string, prefix: string, count: number, traits: Record<string, unknown>): Promise<void> {
+  await sql(
+    `INSERT INTO device_identities (project_id, device_fingerprint, platform, email, traits)
+     SELECT $1, $2 || '-' || g, 'web', $2 || '-' || g || '@example.test', $4::jsonb
+       FROM generate_series(1, $3::int) AS g`,
+    [projectId, prefix, count, JSON.stringify(traits)],
+  );
+}
+
+/** A segment definition matching people whose `traits.<field>` equals `value`. */
+export function traitIs(field: string, value: string): Record<string, unknown> {
+  return { type: 'group', operator: 'and', children: [{ type: 'attribute', field: `traits.${field}`, op: 'eq', value }] };
+}
+
+/** The link rewrite route, answering status and body. */
+export function rewriteLinks(as: Caller, projectId: string, html: string): Promise<RawResponse> {
+  return call('POST', `/api/projects/${projectId}/email-links/rewrite`, as, { html });
+}
+
+export async function linkRows(projectId: string): Promise<Array<{ short_code: string; long_url: string; title: string | null }>> {
+  return sql(`SELECT short_code, long_url, title FROM links WHERE project_id = $1 ORDER BY created_at, short_code`, [projectId]);
+}
+
+/** The dashboard's address (APP_URL), which rewritten links start with. */
+export function appUrl(): string {
+  const base = stackEnv().APP_URL;
+  if (!base) throw new Error('APP_URL must be set for the e2e stack');
+  return base.replace(/\/+$/, '');
+}
+
+/** Picks `day` of next month at `time` in the composer's date and time picker. */
+export async function pickNextMonth(page: Page, day = 15, time = '10:30'): Promise<Date> {
+  await page.getByRole('button', { name: 'Pick date & time' }).click();
+  await page.getByRole('button', { name: /next month/i }).click();
+  await page.getByRole('gridcell', { name: String(day) }).getByRole('button').click();
+  await page.locator('input[type="time"]').fill(time);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: new RegExp(`${time}$`) })).toBeVisible();
+  const now = new Date();
+  const [hours, minutes] = time.split(':').map(Number);
+  return new Date(now.getFullYear(), now.getMonth() + 1, day, hours, minutes, 0, 0);
+}
+
+/** The toasts on screen (shadcn's viewport is a region named "Notifications ..."). */
+export function toasts(page: Page): Locator {
+  return page.getByRole('region', { name: /^Notifications/ }).locator('li');
+}
+
+/** Every activity row of a project, oldest first. */
+export async function allActivity(projectId: string): Promise<Array<Record<string, any>>> {
+  return sql(`SELECT * FROM project_activity WHERE project_id = $1 ORDER BY occurred_at, id`, [projectId]);
 }
