@@ -635,3 +635,50 @@ export async function viewAsTokenFrom(page: Page): Promise<string> {
   if (!token) throw new Error('The tab holds no view-as session');
   return token;
 }
+
+// ---- Detail page, variants, edit, delete and the analytics API (link-p1-02)
+
+/** `GET /api/<code>` with extra request headers (a Referer, a User-Agent), without following the redirect. */
+export async function openShortLinkWith(code: string, ip: string, headers: Record<string, string>): Promise<RawResponse & { location: string | null }> {
+  const response = await rawApi('GET', `/api/${code}`, undefined, { ip, headers: { 'User-Agent': DESKTOP_UA, ...headers } });
+  return { ...response, location: response.headers.get('location') };
+}
+
+/** One stat tile of the link detail page ("Total Clicks", "Installs", ...): the bordered box around label and value. */
+export function statTile(page: Page, label: string) {
+  return labelledBlock(page, label).locator('xpath=..');
+}
+
+/** The rows of one bar list of the Devices & Browsers card ("Operating System", "Browser"). */
+export function barListRows(page: Page, heading: string) {
+  return page.getByRole('heading', { name: heading, exact: true }).locator('xpath=..').locator('div.space-y-3 > div');
+}
+
+/** The width in pixels of a PNG given as a `data:image/png;base64,` URL (its IHDR chunk). */
+export function pngWidth(dataUrl: string): number {
+  const bytes = pngBytes(dataUrl);
+  return bytes.readUInt32BE(16);
+}
+
+/** The bytes of a `data:image/png;base64,` URL. */
+export function pngBytes(dataUrl: string): Buffer {
+  const match = /^data:image\/png;base64,(.+)$/.exec(dataUrl);
+  if (!match) throw new Error(`Not a PNG data URL: ${dataUrl.slice(0, 40)}`);
+  return Buffer.from(match[1], 'base64');
+}
+
+/** Answers the map's tile requests in the browser with an empty response, so nothing leaves the machine. */
+export async function stubMapTiles(target: Page | BrowserContext): Promise<void> {
+  await target.route('https://tiles.stadiamaps.com/**', (route) => route.fulfill({ status: 204 }));
+}
+
+/** The variant rows of the A/B Testing tab, each named by its variant's name. */
+export function variantRow(page: Page, name: string) {
+  return page.locator('div.rounded-lg.border').filter({ has: page.locator('p.font-medium', { hasText: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`) }) });
+}
+
+/** A `datetime-local` input value (local time, minutes) for a moment. */
+export function datetimeLocal(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
