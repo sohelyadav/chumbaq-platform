@@ -188,8 +188,7 @@ test('SEG-148 create defaults and response', async ({ clientIp }) => {
   expect(await activityRows(pid, 'journey.status_changed')).toEqual([]);
 });
 
-test('SEG-150 journey field validation', { annotation: { type: 'issue', description: 'SEG-150' } }, async ({ clientIp }) => {
-  test.fail();
+test('SEG-150 journey field validation', async ({ clientIp }) => {
   const p = await segProject(clientIp, 'seg150');
   const pid = p.project.id;
   const vip = await createSegment(p.owner, pid, clientIp, { name: 'VIP', definition: KNOWN_COUNTRY, evaluationMode: 'live', status: 'active' });
@@ -276,13 +275,29 @@ test('SEG-150 journey field validation', { annotation: { type: 'issue', descript
   expect(outOfRange.status).toBe(400);
   expect(messageOf(outOfRange)).toBe('Step 1: the member path points at a step that does not exist.');
   expect(await journeyCount(pid)).toBe(rowsBefore + 2);
+});
 
-  // The email body's own limit: 500,000 characters are allowed, one more is refused.
-  const long = await raw('POST', journeysPath(p), email({ html: 'h'.repeat(150_000) }), asFresh(p));
+test('SEG-150 an email step body up to its 500,000-character limit', { annotation: { type: 'issue', description: 'SEG-150' } }, async ({ clientIp }) => {
+  test.fail();
+  const p = await segProject(clientIp, 'seg150-html');
+  const pid = p.project.id;
+  const email = (html: string) => ({
+    name: 'SEG-150 html',
+    trigger: { type: 'event', eventName: 'signup' },
+    steps: [{ type: 'send_email', subject: 'S', html }],
+  });
+  // A body well under the limit is stored, so the size checks below are about size alone.
+  const small = await raw('POST', journeysPath(p), email('<p>Hi</p>'), asFresh(p));
+  expect(small.status).toBe(201);
+  const rowsBefore = await journeyCount(pid);
+
+  // 500,000 characters are allowed, one more is refused with the field's own message.
+  const long = await raw('POST', journeysPath(p), email('h'.repeat(150_000)), asFresh(p));
   expect.soft(long.status, 'a 150,000-character email body').toBe(201);
-  const huge = await raw('POST', journeysPath(p), email({ html: 'h'.repeat(500_001) }), asFresh(p));
+  const huge = await raw('POST', journeysPath(p), email('h'.repeat(500_001)), asFresh(p));
   expect.soft(huge.status, 'a 500,001-character email body').toBe(400);
   expect.soft(huge.body?.message).toEqual(['steps.0.html must be shorter than or equal to 500000 characters']);
+  expect.soft(await journeyCount(pid), 'only the allowed body is stored').toBe(rowsBefore + 1);
 });
 
 test('SEG-151 journey definition rules', async ({ clientIp }) => {
@@ -387,22 +402,32 @@ test('SEG-154 a partial edit keeps the other fields and is validated as a whole'
   expect((await journeyRow(journey.id))?.name).toBe('Renamed');
 });
 
-test('SEG-156 setting the status a journey already has', { annotation: { type: 'issue', description: 'SEG-156' } }, async ({ clientIp }) => {
-  test.fail();
+test('SEG-156 setting paused on a paused journey again', async ({ clientIp }) => {
   const p = await segProject(clientIp, 'seg156');
   const pid = p.project.id;
-  const status = (id: string, to: string) => raw('POST', `${journeysPath(p)}/${id}/status`, { status: to }, as(p, clientIp));
-
   // A paused journey set to paused again: answered, nothing logged, nothing moved.
   const paused = await createJourney(p.owner, pid, clientIp, { name: 'Paused one' });
   await setJourneyStatus(p.owner, pid, clientIp, paused.id, 'active');
   await setJourneyStatus(p.owner, pid, clientIp, paused.id, 'paused');
-  const pausedRow = await journeyRow(paused.id);
-  const again = await status(paused.id, 'paused');
+  const pausedRow = (await journeyRow(paused.id))!;
+  expect(pausedRow.enrolled_through).not.toBeNull();
+  const again = await raw('POST', `${journeysPath(p)}/${paused.id}/status`, { status: 'paused' }, as(p, clientIp));
   expect(again.status).toBe(201);
   expect(again.body.data).toMatchObject({ id: paused.id, status: 'paused' });
-  expect(await journeyRow(paused.id)).toMatchObject({ status: 'paused', enrolled_through: pausedRow?.enrolled_through });
-  expect((await activityRows(pid, 'journey.status_changed')).filter((row) => row.target_id === paused.id)).toHaveLength(2);
+  const { updated_at: _before, ...unchanged } = pausedRow;
+  const { updated_at: _after, ...now } = (await journeyRow(paused.id))!;
+  expect(now).toEqual(unchanged);
+  expect((await activityRows(pid, 'journey.status_changed')).map((row) => row.details)).toEqual([
+    { from: 'draft', to: 'active' },
+    { from: 'active', to: 'paused' },
+  ]);
+});
+
+test('SEG-156 setting active on an active journey again', { annotation: { type: 'issue', description: 'SEG-156' } }, async ({ clientIp }) => {
+  test.fail();
+  const p = await segProject(clientIp, 'seg156-active');
+  const pid = p.project.id;
+  const status = (id: string, to: string) => raw('POST', `${journeysPath(p)}/${id}/status`, { status: to }, as(p, clientIp));
 
   // An active journey set to active again, clear of the minute tick that moves its watermark.
   const active = await createJourney(p.owner, pid, clientIp, { name: 'Active one' });
@@ -612,25 +637,40 @@ test('SEG-170 a push step is skipped for someone who cannot be reached', async (
   const reachable = await addPushDevice(p, clientIp, { externalUserId: carol });
   const noToken = await addPushDevice(p, clientIp, { externalUserId: dave, token: false });
   const optedOut = await addPushDevice(p, clientIp, { externalUserId: erin, pushOptIn: false });
+  // Frank has a token but was already sent a push today, at a cap of one a day.
+  const frank = uniqueId('u-frank');
+  const capped = await addPushDevice(p, clientIp, { externalUserId: frank });
+  await sql(`UPDATE push_configs SET frequency_cap_per_day = 1 WHERE project_id = $1`, [pid]);
+  const [earlier] = await sql<{ id: string }>(
+    `INSERT INTO push_notification_logs (project_id, title, status, total_tokens, success_count, processed_tokens, completed_at)
+     VALUES ($1, 'Earlier campaign', 'sent', 1, 1, 1, now()) RETURNING id`,
+    [pid],
+  );
+  await sql(
+    `INSERT INTO push_notification_events (project_id, campaign_id, device_identity_id, type, platform, occurred_at)
+     VALUES ($1, $2, $3, 'sent', 'android', now() - interval '1 hour')`,
+    [pid, earlier.id, capped.id],
+  );
   const journey = await createJourney(p.owner, pid, clientIp, { name: 'Say hi', steps: [{ type: 'send_push', title: 'Hi' }, { type: 'exit' }] });
   await setJourneyStatus(p.owner, pid, clientIp, journey.id, 'active');
-  for (const device of [reachable, noToken, optedOut]) await trackEvent(p, clientIp, device.id, 'signup');
+  for (const device of [reachable, noToken, optedOut, capped]) await trackEvent(p, clientIp, device.id, 'signup');
 
   const allExited = async () => {
     const runs = await runsOf(journey.id);
-    return runs.length === 3 && runs.every((run) => run.status === 'exited');
+    return runs.length === 4 && runs.every((run) => run.status === 'exited');
   };
   await tickUntil(allExited, 'all exited', 4);
   const runs = await runsOf(journey.id);
   expect(runs.map((run) => [run.person_key, run.status, run.last_error]).sort()).toEqual(
-    [[carol, 'exited', null], [dave, 'exited', null], [erin, 'exited', null]].sort(),
+    [[carol, 'exited', null], [dave, 'exited', null], [erin, 'exited', null], [frank, 'exited', null]].sort(),
   );
   // Only the reachable person was sent anything.
-  const campaigns = await campaignsOf(pid);
+  const campaigns = (await campaignsOf(pid)).filter((campaign) => campaign.id !== earlier.id);
   expect(campaigns).toHaveLength(1);
   expect(campaigns[0].target_device_ids).toEqual([reachable.id]);
+  expect(campaigns[0].data?.journey_id).toBe(journey.id);
   const stats = await raw('GET', `${journeysPath(p)}/${journey.id}/stats`, undefined, as(p, clientIp));
-  expect(stats.body.data).toEqual({ active: 0, completed: 0, exited: 3, failed: 0 });
+  expect(stats.body.data).toEqual({ active: 0, completed: 0, exited: 4, failed: 0 });
 });
 
 test('SEG-173 a branch on a deleted or never refreshed audience fails the run', async ({ page, clientIp }) => {
@@ -1081,7 +1121,7 @@ test('SEG-218 a journey edit racing its activation does not undo the activation'
   try {
     // The edit reads the draft, then waits on the audience check.
     edit = raw('PATCH', `${journeysPath(p)}/${race.id}`, { steps: newSteps }, asFresh(p));
-    await waitForLockWaiter('segments');
+    await waitForLockWaiter('segments', '%COUNT(%FROM "segments"%');
     const activation = await raw('POST', `${journeysPath(p)}/${race.id}/status`, { status: 'active' }, asFresh(p));
     expect(activation.status).toBe(201);
     expect(activation.body.data.status).toBe('active');
@@ -1124,7 +1164,7 @@ test('SEG-219 an audience edit racing a materialisation run', { annotation: { ty
     const release = await lockTable('device_identities');
     try {
       await enqueueMaterialise(segmentId, pid);
-      await waitForLockWaiter('device_identities');
+      await waitForLockWaiter('device_identities', 'SELECT person_key FROM (%');
       const patched = await raw('PATCH', `/api/projects/${pid}/segments/${segmentId}`, patch, asFresh(p));
       expect(patched.status).toBe(200);
     } finally {
@@ -1427,5 +1467,8 @@ test('SEG-235 creating, editing and previewing an audience writes no activity', 
   const deleted = await raw('DELETE', `/api/projects/${pid}/segments/${segment.id}`, undefined, as(p, clientIp));
   expect(deleted.status).toBe(200);
   expect(await activityCount(pid)).toBe(before + 2);
-  expect((await activityRows(pid, 'content.deleted')).map((row) => row.target_label)).toEqual(['SEG-235 renamed']);
+  const deletedJourney = await raw('DELETE', `${journeysPath(p)}/${journey.id}`, undefined, as(p, clientIp));
+  expect(deletedJourney.status).toBe(200);
+  expect(await activityCount(pid)).toBe(before + 3);
+  expect((await activityRows(pid, 'content.deleted')).map((row) => row.target_label)).toEqual(['SEG-235 renamed', 'SEG-235 journey renamed']);
 });

@@ -771,14 +771,41 @@ export async function selectOptions(trigger: Locator): Promise<string[]> {
 
 // ---- Journeys API, journey runtime and coverage additions (seg-p1-03)
 
+/** A connection of its own to the lane's e2e database, for locks held across calls. */
+async function openClient(): Promise<Client> {
+  const env = stackEnv();
+  const client = new Client({
+    host: env.DATABASE_HOST,
+    port: Number(env.DATABASE_PORT || 5432),
+    user: env.DATABASE_USER,
+    password: env.DATABASE_PASSWORD,
+    database: assertE2eDatabase(env),
+  });
+  await client.connect();
+  return client;
+}
+
 /**
  * Runs the worker's journey tick now (enrol, then advance due runs), as its minute cron
  * does. Other specs' runs fail on purpose and log errors in the same tick, so the run's
  * own errors are not refused here: callers assert the outcome on their own rows.
+ *
+ * One at a time across the spec's workers (a session advisory lock), and clear of the
+ * stack's own minute tick: two ticks reading the same watermark both enrol from it, so a
+ * run that ended in the first could be started again by the second, which is not what a
+ * single worker does.
  */
 export async function tickNow(): Promise<string> {
-  const { output } = await runJobNow('journey-tick', { allowErrors: true, timeoutMs: 90_000 });
-  return output;
+  const client = await openClient();
+  try {
+    await client.query(`SELECT pg_advisory_lock(hashtext('e2e:seg:journey-tick'))`);
+    await clearOfTick();
+    const { output } = await runJobNow('journey-tick', { allowErrors: true, timeoutMs: 90_000 });
+    return output;
+  } finally {
+    // Ending the session releases the lock.
+    await client.end();
+  }
 }
 
 /**
@@ -914,15 +941,7 @@ export async function enqueueMaterialise(segmentId: string, projectId: string): 
  * release (commit). The API's lock timeout is 10 s: release well before that.
  */
 export async function lockTable(table: 'segments' | 'device_identities'): Promise<() => Promise<void>> {
-  const env = stackEnv();
-  const client = new Client({
-    host: env.DATABASE_HOST,
-    port: Number(env.DATABASE_PORT || 5432),
-    user: env.DATABASE_USER,
-    password: env.DATABASE_PASSWORD,
-    database: assertE2eDatabase(env),
-  });
-  await client.connect();
+  const client = await openClient();
   await client.query('BEGIN');
   await client.query(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`);
   let released = false;
@@ -937,16 +956,27 @@ export async function lockTable(table: 'segments' | 'device_identities'): Promis
   };
 }
 
-/** Waits until some other session is waiting for a lock on `table`. */
-export async function waitForLockWaiter(table: string, timeoutMs = 8000): Promise<void> {
+/**
+ * Waits until some other session is waiting for a lock on `table`, and, given `queryLike`
+ * (an ILIKE pattern), one whose statement matches it: other specs reading the same table
+ * at that moment would otherwise pass for the statement the caller is waiting on.
+ */
+export async function waitForLockWaiter(table: string, queryLike?: string, timeoutMs = 8000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const [row] = await sql<{ n: number }>(
-      `SELECT count(*)::int AS n FROM pg_locks WHERE relation = $1::regclass AND NOT granted`,
-      [table],
+      `SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+        WHERE l.relation = $1::regclass AND NOT l.granted AND ($2::text IS NULL OR a.query ILIKE $2)`,
+      [table, queryLike ?? null],
     );
     if (row.n > 0) return;
-    if (Date.now() > deadline) throw new Error(`Nothing waited on ${table}`);
+    if (Date.now() > deadline) {
+      const waiting = await sql<{ query: string }>(
+        `SELECT a.query FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE l.relation = $1::regclass AND NOT l.granted`,
+        [table],
+      );
+      throw new Error(`Nothing${queryLike ? ` like ${queryLike}` : ''} waited on ${table}; waiting: ${JSON.stringify(waiting.map((w) => w.query))}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
