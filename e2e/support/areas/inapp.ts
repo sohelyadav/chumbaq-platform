@@ -1,7 +1,9 @@
 import { createHmac, randomBytes, randomInt, randomUUID } from 'crypto';
-import { expect, type Locator, type Page } from '@playwright/test';
+import { expect, type Browser, type Locator, type Page } from '@playwright/test';
 import { Client } from 'pg';
+import { adminApi, enrolAndSignInStaff } from '../admin';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
+import { newPersonContext } from '../fixtures';
 import { assertE2eDatabase, stackEnv } from '../stack';
 
 /**
@@ -432,4 +434,216 @@ export function refuseDialogs(page: Page): string[] {
     await dialog.dismiss().catch(() => {});
   });
   return seen;
+}
+
+// ---- Widgets (banner categories, their banners and widget events)
+
+export const WIDGET_NOT_ACTIVE = 'Widget not found or not active';
+export const BANNER_NOT_FOUND = 'In-app banner not found';
+export const UUID_EXPECTED = 'Validation failed (uuid is expected)';
+export const READ_ONLY = 'Impersonation sessions are read-only';
+
+export const ANDROID_CHROME_UA =
+  'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
+export const IPHONE_SAFARI_UA =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1';
+
+/** A banner category through the dashboard's create route. */
+export async function createWidget(as: Caller, projectId: string, body: Record<string, unknown>): Promise<Record<string, any>> {
+  return dataOf(await call('POST', `/api/projects/${projectId}/banner-categories`, as, body));
+}
+
+/** A banner (widget item) through the dashboard's create route. */
+export async function createWidgetItem(as: Caller, categoryId: string, body: Record<string, unknown>): Promise<Record<string, any>> {
+  return dataOf(await call('POST', `/api/banner-categories/${categoryId}/banners`, as, body));
+}
+
+export async function setWidgetStatus(as: Caller, categoryId: string, status: string): Promise<void> {
+  dataOf(await call('PATCH', `/api/banner-categories/${categoryId}/status`, as, { status }));
+}
+
+export async function widgetRow(id: string): Promise<Record<string, any> | undefined> {
+  const [row] = await sql(`SELECT * FROM banner_categories WHERE id = $1`, [id]);
+  return row;
+}
+
+export async function widgetRows(projectId: string): Promise<Array<Record<string, any>>> {
+  return sql(`SELECT * FROM banner_categories WHERE project_id = $1 ORDER BY created_at`, [projectId]);
+}
+
+export async function widgetItemRows(categoryId: string): Promise<Array<Record<string, any>>> {
+  return sql(`SELECT * FROM in_app_banners WHERE category_id = $1 ORDER BY sort_order, created_at`, [categoryId]);
+}
+
+export async function widgetItemRow(id: string): Promise<Record<string, any> | undefined> {
+  const [row] = await sql(`SELECT * FROM in_app_banners WHERE id = $1`, [id]);
+  return row;
+}
+
+export async function widgetEventRows(categoryId: string): Promise<Array<Record<string, any>>> {
+  return sql(`SELECT * FROM widget_events WHERE category_id = $1 ORDER BY created_at, id`, [categoryId]);
+}
+
+/** Every widget row of a project (categories, items, events), for "nothing changed" checks. */
+export async function widgetSnapshot(projectId: string): Promise<unknown> {
+  const categories = await widgetRows(projectId);
+  const items = await sql(
+    `SELECT b.* FROM in_app_banners b JOIN banner_categories c ON c.id = b.category_id WHERE c.project_id = $1 ORDER BY b.id`,
+    [projectId],
+  );
+  const events = await sql(
+    `SELECT e.* FROM widget_events e JOIN banner_categories c ON c.id = e.category_id WHERE c.project_id = $1 ORDER BY e.id`,
+    [projectId],
+  );
+  return { categories, items, events };
+}
+
+/** An SDK request with an optional key and user agent, answering status and body. */
+export async function sdkRequest(
+  method: string,
+  path: string,
+  options: { apiKey?: string; userAgent?: string; body?: unknown; ip?: string } = {},
+): Promise<RawResponse> {
+  const response = await fetch(apiUrl(path), {
+    method,
+    headers: {
+      'X-Forwarded-For': options.ip ?? newClientIp(),
+      ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...(options.apiKey === undefined ? {} : { 'X-API-Key': options.apiKey }),
+      ...(options.userAgent === undefined ? {} : { 'User-Agent': options.userAgent }),
+    },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  });
+  const text = await response.text();
+  let parsed: any = text;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    // Not JSON: keep the text.
+  }
+  return { status: response.status, text, body: parsed };
+}
+
+/** `GET /api/in-app-banners/serve/:categoryId`, as the SDK asks for a widget. */
+export function serveWidget(categoryId: string, apiKey: string | undefined, userAgent = ANDROID_CHROME_UA): Promise<RawResponse> {
+  return sdkRequest('GET', `/api/in-app-banners/serve/${categoryId}`, { apiKey, userAgent });
+}
+
+/** `POST /api/in-app-banners/:bannerId/click`, as the SDK reports a tap. */
+export function clickWidgetItem(bannerId: string, apiKey: string | undefined, userAgent = IPHONE_SAFARI_UA): Promise<RawResponse> {
+  return sdkRequest('POST', `/api/in-app-banners/${bannerId}/click`, { apiKey, userAgent });
+}
+
+/** The widgets list row of a category, by its name. */
+export function widgetListRow(page: Page, name: string): Locator {
+  return page.getByRole('row').filter({ has: page.getByText(name, { exact: true }) });
+}
+
+/**
+ * A text field of the widget detail's dialogs by its label (the labels have no
+ * htmlFor): the field inside the label's parent block, colour pickers left out.
+ */
+export function dialogField(scope: Locator, label: string): Locator {
+  return scope
+    .locator('label', { hasText: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`) })
+    .locator('..')
+    .getByRole('textbox')
+    .and(scope.page().locator(':not([type="color"])'));
+}
+
+/** A multi-item widget's item card on the detail page, by its title. */
+export function widgetItemCard(page: Page, title: string): Locator {
+  return page.locator('[data-slot="card"]').filter({ has: page.getByText(title, { exact: true }) });
+}
+
+/** Picks an option of a Radix select. */
+export async function chooseOption(trigger: Locator, option: string): Promise<void> {
+  await trigger.click();
+  await trigger.page().getByRole('option', { name: option, exact: true }).click();
+}
+
+/** Records requests whose method matches and whose path ends with `suffix`. */
+export function recordRequests(page: Page, method: string, suffix: string | RegExp): string[] {
+  const seen: string[] = [];
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    const matches = typeof suffix === 'string' ? path.endsWith(suffix) : suffix.test(path);
+    if (request.method() === method && matches) seen.push(path);
+  });
+  return seen;
+}
+
+/** Collects the page's uncaught errors and unhandled rejections. */
+export function collectPageErrors(page: Page): string[] {
+  const seen: string[] = [];
+  page.on('pageerror', (error) => seen.push(error.message));
+  return seen;
+}
+
+// ---- View-as
+
+/**
+ * Staff view-as of `tenant`: a super admin (the flag set directly, which is all the
+ * guards read) enrols a passkey and signs in to the admin app in a browser of their
+ * own, and starts view-as with a reason. Answers the one-time handoff link.
+ */
+export async function viewAsHandoff(browser: Browser, baseURL: string | undefined, tenant: Pick<Account, 'userId'>): Promise<string> {
+  const ip = newClientIp();
+  const staff = await createAccount(ip, 'inapp-staff', 'Ivo Staff');
+  await sql(`UPDATE users SET is_super_admin = true WHERE id = $1`, [staff.userId]);
+  const { context } = await newPersonContext(browser, baseURL);
+  try {
+    const page = await context.newPage();
+    const staffToken = await enrolAndSignInStaff(page, staff);
+    const handoff = await adminApi<{ url: string }>(
+      'POST',
+      `/api/admin/tenants/${tenant.userId}/impersonate`,
+      { reason: 'E2E: checking in-app pages read-only' },
+      staffToken,
+      ip,
+    );
+    return handoff.url;
+  } finally {
+    await context.close();
+  }
+}
+
+/** Opens a view-as handoff link in this tab and waits for the read-only banner. */
+export async function openViewAs(page: Page, url: string): Promise<void> {
+  await page.goto(url);
+  await page.getByRole('region', { name: 'Impersonation session' }).waitFor();
+}
+
+/** The view-as access token the customer app keeps for this tab. */
+export async function viewAsTokenOf(page: Page): Promise<string> {
+  const stored = await page.evaluate(() => sessionStorage.getItem('chumbaq_impersonation'));
+  if (!stored) throw new Error('No view-as session in this tab');
+  return (JSON.parse(stored) as { accessToken: string }).accessToken;
+}
+
+// ---- Toasts, located by CSS rather than role: an open modal dialog hides the rest of
+// the page, toasts included, from the accessibility tree.
+
+function toastItems(page: Page): Locator {
+  return page.locator('[aria-label^="Notifications"] li');
+}
+
+/** A toast by its exact title, whether or not a dialog is open. */
+export function toastWithTitle(page: Page, title: string): Locator {
+  const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return toastItems(page).filter({ has: page.locator('div.text-sm.font-semibold', { hasText: new RegExp(`^${escaped}$`) }) });
+}
+
+/** The titles of every toast on screen. */
+export async function toastTitles(page: Page): Promise<string[]> {
+  return toastItems(page).locator('div.text-sm.font-semibold').allTextContents();
+}
+
+/** Closes every toast (with no dialog open) and waits until none is left. */
+export async function clearToasts(page: Page): Promise<void> {
+  const toasts = toastItems(page);
+  for (let tries = 0; tries < 10 && (await toasts.count()) > 0; tries++) {
+    await toasts.first().locator('[toast-close]').click({ timeout: 2_000 }).catch(() => {});
+  }
+  await expect(toasts).toHaveCount(0);
 }
