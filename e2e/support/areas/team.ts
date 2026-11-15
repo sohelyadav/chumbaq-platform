@@ -675,3 +675,74 @@ export async function openViewAsLink(browser: Browser, baseURL: string | undefin
   await page.getByRole('region', { name: 'Impersonation session' }).waitFor();
   return page;
 }
+
+// ---- P1: members, invitations, the /invite page and billing transfer
+
+/** The `name=value` pairs of a response's Set-Cookie headers, as a Cookie header. */
+function cookieHeaderFrom(response: Response): string {
+  return response.headers
+    .getSetCookie()
+    .map((cookie) => cookie.split(';')[0])
+    .join('; ');
+}
+
+/**
+ * An access token whose sign-in is 20 minutes old: a fresh password sign-in through the
+ * API, the session's `authenticated_at` moved back (refresh reads `auth_time` from it),
+ * then a refresh with that session's cookie.
+ */
+export async function staleToken(person: Person): Promise<Pick<Person, 'accessToken' | 'ip'>> {
+  const headers = { 'Content-Type': 'application/json', 'X-Chumbaq-Client': 'web', 'X-Forwarded-For': person.ip };
+  const login = await fetch(apiUrl('/api/auth/login'), {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ email: person.email, password: person.password }),
+  });
+  if (!login.ok) throw new Error(`login answered ${login.status}: ${await login.text()}`);
+  const cookie = cookieHeaderFrom(login);
+  await ageSignIn(person);
+  const refresh = await fetch(apiUrl('/api/auth/refresh'), { method: 'POST', headers: { ...headers, Cookie: cookie } });
+  const text = await refresh.text();
+  if (!refresh.ok) throw new Error(`refresh answered ${refresh.status}: ${text}`);
+  return { accessToken: (JSON.parse(text) as { data: { accessToken: string } }).data.accessToken, ip: person.ip };
+}
+
+/** `POST /api/auth/reauth` with the password; answers the re-authenticated token. */
+export async function reauthenticate(
+  as: Pick<Person, 'accessToken' | 'ip'>,
+  password: string,
+): Promise<Pick<Person, 'accessToken' | 'ip'>> {
+  const result = await call('POST', '/api/auth/reauth', { as, body: { password } });
+  if (result.status !== 200) throw new Error(`reauth answered ${result.status}: ${JSON.stringify(result.body)}`);
+  return { accessToken: (result.body.data as { accessToken: string }).accessToken, ip: as.ip };
+}
+
+/** A trap address as staff register one: only the sha256 of the normalised address is stored. */
+export async function seedTrapAddress(label: string, email: string): Promise<{ id: string }> {
+  return withDb(async (db) => {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO security_tripwires (kind, value_hash, label) VALUES ('account', $1, $2) RETURNING id`,
+      [sha256Hex(email.trim().toLowerCase()), label],
+    );
+    return rows[0];
+  });
+}
+
+/** Security alerts of a kind and dedupe key, as stored. */
+export async function securityAlerts(kind: string, dedupeKey: string): Promise<Array<{ kind: string; dedupe_key: string; details: unknown }>> {
+  return withDb(async (db) => {
+    const { rows } = await db.query(
+      'SELECT kind, dedupe_key, details FROM security_alerts WHERE kind = $1 AND dedupe_key = $2',
+      [kind, dedupeKey],
+    );
+    return rows;
+  });
+}
+
+/** How many activity rows the project has, any action. */
+export async function activityCount(projectId: string): Promise<number> {
+  return withDb(async (db) => {
+    const { rows } = await db.query<{ n: string }>('SELECT count(*)::text AS n FROM project_activity WHERE project_id = $1', [projectId]);
+    return Number(rows[0].n);
+  });
+}
