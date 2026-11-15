@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import type { Page } from '@playwright/test';
 import { api, createAccount, createApiKey, createProject } from '../../support/api';
 import { expect, openSidebarGroup, sidebarLink, signIn, test } from '../../support/fixtures';
+import { adminApi } from '../../support/admin';
 import { stackEnv } from '../../support/stack';
 import {
   addMember,
@@ -111,12 +112,15 @@ test('PROJ-006 anonymous, garbage and staff tokens are refused on project APIs',
   test.slow(); // The staff grant runs the CLI.
   const owner = await createAccount(clientIp, 'proj006');
   const project = await createProject(owner, clientIp, 'PROJ-006 untouched');
-  const { staffToken } = await newStaffSession(page, clientIp);
-  const [before] = await dbRows<{ n: number }>('SELECT count(*)::int AS n FROM projects');
+  const { staff, staffToken } = await newStaffSession(page, clientIp);
+  // The staff token is a live one (so its refusal below is the customer API's doing).
+  const staffMe = await adminApi<{ email: string }>('GET', '/api/staff/auth/me', undefined, staffToken, clientIp);
+  expect(staffMe.email).toBe(staff.email);
+  const anonymousName = `PROJ-006 anonymous ${randomUUID()}`;
 
   const routes: [string, string, unknown?][] = [
     ['GET', '/api/projects'],
-    ['POST', '/api/projects', { name: 'Anonymous project', domain: 'anon.e2e.example.test' }],
+    ['POST', '/api/projects', { name: anonymousName, domain: 'anon.e2e.example.test' }],
     ['GET', `/api/projects/${project.id}`],
     ['PATCH', `/api/projects/${project.id}`, { name: 'Renamed anonymously' }],
     ['POST', `/api/projects/${project.id}/domain/verify`],
@@ -136,10 +140,10 @@ test('PROJ-006 anonymous, garbage and staff tokens are refused on project APIs',
     }
   }
 
-  const [after] = await dbRows<{ n: number }>('SELECT count(*)::int AS n FROM projects');
-  expect(after.n).toBe(before.n);
-  const [row] = await dbRows<{ name: string }>('SELECT name FROM projects WHERE id = $1', [project.id]);
-  expect(row.name).toBe('PROJ-006 untouched');
+  // Other specs create projects at the same time, so look for this test's own rows only.
+  expect(await dbRows('SELECT id FROM projects WHERE name = $1', [anonymousName])).toEqual([]);
+  const rows = await dbRows<{ name: string }>('SELECT name FROM projects WHERE id = $1', [project.id]);
+  expect(rows).toEqual([{ name: 'PROJ-006 untouched' }]);
 });
 
 // ---------------------------------------------------------------------------
@@ -186,6 +190,9 @@ test('PROJ-007 selector renders the account\'s projects', async ({ page, clientI
 
   // The dashed "New Project" card ends the grid; no link counts are shown.
   await expect(page.locator('span', { hasText: /^New Project$/ })).toBeVisible();
+  const lastCard = page.locator('[data-slot="card"]').last();
+  await expect(lastCard).toHaveClass(/border-dashed/);
+  await expect(lastCard).toHaveText('New Project');
   await expect(page.getByText(/\d+ links?$/)).toHaveCount(0);
 });
 
@@ -224,8 +231,8 @@ test('PROJ-017 create a project from the header button', async ({ page, clientIp
   await dialog.getByRole('button', { name: 'Create Project' }).click();
   await expect(dialog.getByRole('button', { name: 'Creating...' })).toBeDisabled();
 
-  await expect(page.getByText('Project created', { exact: true }).first()).toBeVisible();
-  await expect(page.getByText('Checkout App', { exact: true }).first()).toBeVisible();
+  const toast = page.getByRole('status').filter({ hasText: 'Project created' });
+  await expect(toast.first()).toContainText('Checkout App');
   await expect(dialog).toHaveCount(0);
   await expect(page).toHaveURL(/\/projects\/[0-9a-f-]{36}\/settings$/);
   const projectId = /\/projects\/([0-9a-f-]{36})\//.exec(page.url())![1];
