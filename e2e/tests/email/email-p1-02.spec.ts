@@ -7,6 +7,7 @@ import {
   armBox,
   brevoCallsTo,
   call,
+  campaignJob,
   campaignRows,
   card,
   confirmEmail,
@@ -571,7 +572,8 @@ test('EMAIL-121 email campaign header, content card and back arrow', async ({ pa
 
 test('EMAIL-122 engagement cards for email', async ({ page }) => {
   const p = await emailProject('email-122', { provider: 'brevo', requireOptIn: false });
-  const id = await seedCampaign(p.project.id, { subject: 'Engaging', totalTokens: 4, successCount: 4 });
+  // Accepted by the provider differs from the delivered events, so Delivered is the events'.
+  const id = await seedCampaign(p.project.id, { subject: 'Engaging', totalTokens: 6, successCount: 6 });
   const people: string[] = [];
   for (let i = 0; i < 4; i += 1) people.push(await identifyEmail(p, p.owner.ip, { email: `e122-${i}@example.test` }));
   for (const person of people) await seedCampaignEvent(p.project.id, id, person, 'delivered');
@@ -673,9 +675,9 @@ test('EMAIL-132 provider removed before a queued campaign runs', async () => {
   const failed = await read();
   expect(failed).toMatchObject({ errorMessage: CONNECT_FIRST, successCount: 0, processedTokens: 0 });
   expect(await brevoCallsTo(address)).toHaveLength(0);
-  // Not retried: a few seconds later nothing has moved.
-  await new Promise((resolve) => setTimeout(resolve, 5_000));
-  expect(await read()).toMatchObject({ status: 'failed', errorMessage: CONNECT_FIRST, processedTokens: 0 });
+  // Not retried: the queue allows three tries, and its job ended failed after the first.
+  await expect.poll(async () => (await campaignJob(campaign.id))?.state, { timeout: 15_000 }).toBe('failed');
+  expect(await campaignJob(campaign.id)).toEqual({ state: 'failed', attemptsStarted: 1, attemptsMade: 1, attempts: 3 });
 });
 
 // ------------------------------------------------------------ J. Unsubscribe ---

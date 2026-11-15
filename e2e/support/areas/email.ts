@@ -1,4 +1,5 @@
 import { randomBytes } from 'crypto';
+import { Queue } from 'bullmq';
 import { expect, type Browser, type Locator, type Page } from '@playwright/test';
 import { Client } from 'pg';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
@@ -714,4 +715,29 @@ export function recordPosts(page: Page, suffix: string): Array<Record<string, an
     }
   });
   return seen;
+}
+
+/**
+ * The campaign's job on the push campaign queue (its id is the campaign id), as BullMQ
+ * keeps it: state, how many runs started and finished, and how many were allowed.
+ */
+export async function campaignJob(
+  campaignId: string,
+): Promise<{ state: string; attemptsStarted: number; attemptsMade: number; attempts: number | undefined } | null> {
+  const env = stackEnv();
+  const queue = new Queue('push-campaign', {
+    connection: {
+      host: env.REDIS_HOST || '127.0.0.1',
+      port: Number(env.REDIS_PORT || 6379),
+      password: env.REDIS_PASSWORD || undefined,
+      db: Number(env.REDIS_DB),
+    },
+  });
+  try {
+    const job = await queue.getJob(campaignId);
+    if (!job) return null;
+    return { state: await job.getState(), attemptsStarted: job.attemptsStarted, attemptsMade: job.attemptsMade, attempts: job.opts.attempts };
+  } finally {
+    await queue.close();
+  }
 }
