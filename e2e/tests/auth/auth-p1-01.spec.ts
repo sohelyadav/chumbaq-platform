@@ -57,7 +57,6 @@ const CANCELLED = 'The passkey request was cancelled or timed out. Please try ag
 const LIMITED = 'Too many failed attempts. Try again in a few minutes.';
 const INVALID = 'Invalid email or password';
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const isApi = (path: string) => (response: Response) => new URL(response.url()).pathname === path;
 const isApiRequest = (path: string) => (request: Request) => new URL(request.url()).pathname === path;
 
@@ -113,9 +112,12 @@ test('AUTH-006 public pages send a signed-in user to /projects', async ({ page, 
   const account = await createAccount(clientIp, 'auth006');
   await signIn(page, account);
   for (const path of ['/login', '/register', '/forgot-password']) {
+    const before = await page.evaluate(() => window.history.length);
     await page.goto(path);
     await expect(page).toHaveURL(`${baseURL}/projects`);
     await expect(page.getByRole('heading', { name: 'Your Projects' })).toBeVisible();
+    // Replaced, not pushed: the visit added one history entry, which is now /projects.
+    expect(await page.evaluate(() => window.history.length)).toBe(before + 1);
   }
 });
 
@@ -166,6 +168,8 @@ test('AUTH-013 a pending verification kept in sessionStorage sends the user to /
   await submitLogin(page, account.email, account.password);
   await expect(page).toHaveURL(`${baseURL}/verify-email`);
   // The page took the kept token: it offers to confirm rather than calling the link invalid.
+  await expect(page.getByText('Confirm your email', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Confirm email address' })).toBeEnabled();
   await expect(page.getByText('Could not confirm your email', { exact: true })).toHaveCount(0);
 });
 
@@ -273,14 +277,20 @@ test('AUTH-030 login API validation errors', async () => {
     [{ email, password: '' }, 'Password is required'],
     [{ email, password: 'p', remember: true }, 'property remember should not exist'],
   ];
+  const ips: string[] = [];
   for (const [body, message] of cases) {
-    const answer = await post('/api/auth/login', body, { ip: newClientIp() });
+    const ip = newClientIp();
+    ips.push(ip);
+    const answer = await post('/api/auth/login', body, { ip });
     expect({ body, status: answer.status }).toEqual({ body, status: 400 });
     expect(answer.body.message).toEqual(expect.arrayContaining([message]));
     expect(answer.setCookie).toBeNull();
   }
   expect(await authEventsFor(email, since)).toEqual([]);
+  // Nor under any address, the malformed one included.
+  expect(await sql('SELECT type FROM auth_events WHERE ip_address = ANY($1) AND created_at >= $2', [ips, since])).toEqual([]);
   expect(await signInAttemptCounts(email)).toEqual({});
+  expect(await signInAttemptCounts('x')).toEqual({});
 
   // A number is converted to a string by the validation pipe (implicit conversion), so it
   // is checked as a password: a well-formed attempt, recorded and counted.
@@ -299,17 +309,30 @@ test('AUTH-032 the login route takes five a minute from one client', async ({ pa
   await page.goto('/login');
   const throttled = page.waitForResponse(isApi('/api/auth/login'));
   await submitLogin(page, account.email, account.password);
-  expect((await throttled).status()).toBe(429);
+  const refused = await throttled;
+  expect(refused.status()).toBe(429);
+  // The block lasts the rest of the minute.
+  const retryAfter = Number(await refused.headerValue('retry-after'));
+  expect(retryAfter).toBeGreaterThan(0);
+  expect(retryAfter).toBeLessThanOrEqual(60);
   await expect(formMessage(page, 'ThrottlerException: Too Many Requests')).toBeVisible();
   await expect(page).toHaveURL(/\/login$/);
 
   // Another client is not affected.
   expect((await passwordStep(account, newClientIp())).status).toBe(200);
 
-  await sleep(61_000);
-  const answered = page.waitForResponse(isApi('/api/auth/login'));
-  await page.getByRole('button', { name: 'Login', exact: true }).click();
-  expect((await answered).status()).toBe(200);
+  // Retrying while blocked does not extend the block; once the minute is up the form signs in.
+  const login = page.getByRole('button', { name: 'Login', exact: true });
+  await expect
+    .poll(
+      async () => {
+        const answered = page.waitForResponse(isApi('/api/auth/login'));
+        await login.click();
+        return (await answered).status();
+      },
+      { timeout: (retryAfter + 15) * 1000, intervals: [5_000] },
+    )
+    .toBe(200);
   await expect(page.getByRole('heading', { name: 'Your Projects' })).toBeVisible();
 });
 
@@ -628,14 +651,14 @@ test('AUTH-077 autofill is off while tenants cannot have passkeys', async ({ pag
     await page.getByRole('menuitem', { name: 'Log out' }).click();
     expect(((await (await offered).json()) as { data: unknown }).data).toEqual({ available: false });
     await expect(page.getByRole('heading', { name: 'Login to your account' })).toBeVisible();
-    await sleep(500);
-    expect(await credentialGets(page)).toEqual([]);
     await expect(page).toHaveURL(/\/login$/);
 
     const verified = page.waitForResponse(isApi('/api/auth/passkey/verify'));
     await page.getByRole('button', { name: 'Sign in with a passkey' }).click();
     expect((await verified).status()).toBe(200);
     await expect(page.getByRole('heading', { name: 'Your Projects' })).toBeVisible();
+    // The only ceremony this page ever started is the button's: no autofill request at all.
+    expect((await credentialGets(page)).map((c) => [c.conditional, c.settled])).toEqual([[false, 'resolved']]);
   } finally {
     await off.stop();
   }
