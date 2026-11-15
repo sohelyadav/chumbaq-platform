@@ -145,6 +145,11 @@ test('EMAIL-149 a later refusal beats an older link', async () => {
   const p = await confirmProject('email-149');
   // After the mail went out, the app reports that the person refused.
   await identifyDevice(p, p.owner.ip, p.fingerprint, { email: E2, emailOptIn: false });
+  // The send the link names is still the row's latest, so only the later refusal can
+  // make the link not current.
+  const [refused] = await identityRows(p.project.id, E2);
+  expect(refused.email_opt_in).toBe(false);
+  expect(new Date(refused.email_confirm_sent_at).getTime()).toBe(p.sentAt.getTime());
 
   const answered = await publicRequest('POST', pathAndQuery(p.link), { contentType: 'application/x-www-form-urlencoded', text: '' });
   expect(answered.status).toBe(200);
@@ -630,10 +635,11 @@ test('EMAIL-191 view-as reads, with webhook URLs hidden', async ({ page, browser
   const apiKey = (p.email!.credentials as { apiKey: string }).apiKey;
   const url = await viewAsHandoff(browser, baseURL, p.owner);
 
-  const bodies: string[] = [];
-  page.on('response', async (response) => {
+  // Every API body the view-as tab reads, awaited before the checks below.
+  const reads: Array<Promise<string>> = [];
+  page.on('response', (response) => {
     if (!response.url().includes('/api/')) return;
-    bodies.push(await response.text().catch(() => ''));
+    reads.push(response.text().catch(() => ''));
   });
   await openViewAs(page, url);
   await openEmail(page, p.project.id, 'Campaigns');
@@ -645,6 +651,7 @@ test('EMAIL-191 view-as reads, with webhook URLs hidden', async ({ page, browser
   const provider = card(page, 'Provider');
   await expect(provider.getByText(`Key ending ${apiKey.slice(-4)} is stored.`)).toBeVisible();
   await expect(provider.locator('code')).toHaveText(HIDDEN_VALUE);
+  const bodies = await Promise.all(reads);
   const settings = bodies.map((body) => { try { return JSON.parse(body); } catch { return null; } }).find((body) => body?.data?.webhookUrls);
   expect(settings.data.webhookUrls).toEqual({ ses: HIDDEN_VALUE, resend: HIDDEN_VALUE, brevo: HIDDEN_VALUE });
 
@@ -667,41 +674,65 @@ test('EMAIL-192 view-as writes are refused', async ({ page, browser, baseURL }) 
   const testAddress = uniqueEmail('email-192-test');
   const url = await viewAsHandoff(browser, baseURL, p.owner);
 
-  const refusals: string[] = [];
-  page.on('response', async (response) => {
+  // Every POST or DELETE the view-as tab makes to the email routes, awaited before the checks below.
+  const writes: Array<Promise<string>> = [];
+  page.on('response', (response) => {
     const method = response.request().method();
-    if (!new URL(response.url()).pathname.startsWith('/api/email/') || method === 'GET') return;
-    const body = (await response.json().catch(() => null)) as { message?: string } | null;
-    refusals.push(`${method} ${new URL(response.url()).pathname} ${response.status()} ${body?.message}`);
+    const path = new URL(response.url()).pathname;
+    if (!path.startsWith('/api/email/') || method === 'GET') return;
+    writes.push(
+      response
+        .json()
+        .catch(() => null)
+        .then((body: { message?: string } | null) => `${method} ${path} ${response.status()} ${body?.message}`),
+    );
   });
-  const readOnlyToast = page.getByText('Read-only session', { exact: true });
-  const expectRefused = async (method: string, pathPart: string, action: () => Promise<unknown>) => {
+  const toasts = page.getByRole('region', { name: /^Notifications/ }).locator('li');
+  const readOnlyToast = toasts.filter({ hasText: 'Read-only session' });
+  /**
+   * The action's request is refused read-only, and raises the global toast and only the
+   * page's own toast (`own`, carrying the API's message) if it has one. Toasts last 4 s,
+   * so each step waits for the last step's to go first and sees only its own.
+   */
+  const expectRefused = async (
+    method: string,
+    pathPart: string,
+    action: () => Promise<unknown>,
+    { own, countToasts = true }: { own?: string; countToasts?: boolean } = {},
+  ) => {
+    await expect(toasts).toHaveCount(0, { timeout: 10_000 });
     const [response] = await Promise.all([
       page.waitForResponse((r) => r.request().method() === method && new URL(r.url()).pathname.includes(pathPart)),
       action(),
     ]);
     expect(response.status(), pathPart).toBe(403);
     expect(((await response.json()) as { message: string }).message, pathPart).toBe(READ_ONLY);
-    await expect(readOnlyToast.first()).toBeVisible();
+    await expect(readOnlyToast.first(), pathPart).toContainText(READ_ONLY);
+    if (own) await expect(toasts.filter({ hasText: own }), pathPart).toContainText(READ_ONLY);
+    if (countToasts) await expect(toasts, pathPart).toHaveCount(own ? 2 : 1);
   };
 
   await openViewAs(page, url);
   await openEmail(page, p.project.id, 'Settings');
   const sender = card(page, 'Sender');
   await sender.getByLabel('From name').fill('Changed in view-as');
-  await expectRefused('POST', '/api/email/settings', () => page.getByRole('button', { name: 'Save sender' }).click());
-  await expect(page.getByText('Could not save', { exact: true })).toBeVisible();
+  await expectRefused('POST', '/api/email/settings', () => page.getByRole('button', { name: 'Save sender' }).click(), {
+    own: 'Could not save',
+  });
 
   const provider = card(page, 'Provider');
   await provider.getByLabel('API key').fill('xkeysib-x');
-  await expectRefused('POST', '/api/email/providers', () => provider.getByRole('button', { name: 'Replace and use Brevo' }).click());
-  await expect(page.getByText('Could not connect', { exact: true })).toBeVisible();
+  await expectRefused('POST', '/api/email/providers', () => provider.getByRole('button', { name: 'Replace and use Brevo' }).click(), {
+    own: 'Could not connect',
+  });
 
   page.once('dialog', (dialog) => dialog.accept());
-  await expectRefused('POST', '/rotate-webhook-token', () => provider.getByRole('button', { name: 'Replace URL' }).click());
-  await expect(page.getByText('Could not replace the URL', { exact: true })).toBeVisible();
+  await expectRefused('POST', '/rotate-webhook-token', () => provider.getByRole('button', { name: 'Replace URL' }).click(), {
+    own: 'Could not replace the URL',
+  });
 
   await provider.getByRole('tab', { name: /Amazon SES/ }).click();
+  // Switch topic adds nothing of its own.
   await expectRefused('POST', '/reset-ses-topic', () => provider.getByRole('button', { name: 'Switch topic' }).click());
 
   const testCard = card(page, 'Send a test');
@@ -711,21 +742,31 @@ test('EMAIL-192 view-as writes are refused', async ({ page, browser, baseURL }) 
 
   await openEmail(page, p.project.id, 'Suppressions');
   await page.getByPlaceholder('someone@example.com').fill('new@example.test');
-  await expectRefused('POST', '/api/email/suppressions', () => page.getByRole('button', { name: 'Suppress', exact: true }).click());
-  await expect(page.getByText('That is not a valid address', { exact: true })).toBeVisible();
+  await expectRefused('POST', '/api/email/suppressions', () => page.getByRole('button', { name: 'Suppress', exact: true }).click(), {
+    countToasts: false,
+  });
+  // The page's own toast here is always this one, with no description.
+  await expect(toasts.filter({ hasText: 'That is not a valid address' })).toHaveCount(1);
+  await expect(toasts).toHaveCount(2);
   page.once('dialog', (dialog) => dialog.accept());
+  // Lifting adds nothing of its own.
   await expectRefused('DELETE', '/api/email/suppressions/', () =>
     page.getByRole('row').filter({ hasText: 'lift@example.test' }).getByTitle('Resubscribe').click(),
   );
   await expect(page.getByRole('row').filter({ hasText: 'lift@example.test' })).toBeVisible();
 
-  await expectRefused('POST', '/api/email/audience-preview', () => page.goto(`/projects/${p.project.id}/email/new`));
+  // The composer previews its audience as it opens; how often is the page's business.
+  await expectRefused('POST', '/api/email/audience-preview', () => page.goto(`/projects/${p.project.id}/email/new`), {
+    countToasts: false,
+  });
   await expect(reachLine(page)).toHaveText('Choose an audience to see its reach.');
   await page.getByLabel('Subject').fill('From view-as');
   await page.getByLabel('HTML', { exact: true }).fill('<p>Hi</p>');
-  await expectRefused('POST', '/api/email/send', () => page.getByRole('button', { name: 'Send email' }).click());
-  await expect(page.getByText('Could not create email', { exact: true })).toBeVisible();
+  await expectRefused('POST', '/api/email/send', () => page.getByRole('button', { name: 'Send email' }).click(), {
+    own: 'Could not create email',
+  });
 
+  const refusals = await Promise.all(writes);
   expect(refusals.every((line) => line.endsWith(`403 ${READ_ONLY}`)), refusals.join('\n')).toBe(true);
   expect(refusals.length).toBeGreaterThanOrEqual(9);
   expect(await emailSettingsRow(p.project.id)).toEqual(before);
