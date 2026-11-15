@@ -150,8 +150,11 @@ test('TEAM-008 names and emails render as text, never HTML', async ({ page }) =>
 // ---- B. Change role
 
 test('TEAM-012 cancelling the sign-in prompt leaves the role and shows nothing', async ({ page }) => {
-  const { owner, project, people } = await makeTeam('Omar Owner', { admin: ['admin', 'Ada Admin'] });
-  const { admin } = people;
+  const { owner, project, people } = await makeTeam('Omar Owner', {
+    admin: ['admin', 'Ada Admin'],
+    member: ['member', 'Mia Member'],
+  });
+  const { admin, member } = people;
 
   await signInStale(page, owner);
   await openMembers(page, project.id);
@@ -163,16 +166,19 @@ test('TEAM-012 cancelling the sign-in prompt leaves the role and shows nothing',
   await expect(reauth).toBeVisible();
   await reauth.getByRole('button', { name: 'Cancel' }).click();
   await expect(reauth).toHaveCount(0);
-
   await expect(memberRow(page, admin.email).getByRole('combobox')).toHaveText('Admin');
-  // A refusal toast would be raised as the cancel settles; give it the time to show.
-  await page.waitForTimeout(1_000);
+
+  // A later change that needs no prompt raises a toast of its own; any toast the cancel
+  // raised came before it and is still on screen (toasts stay 4 s), so only this one shows.
+  await chooseRole(page, member.email, 'Admin');
+  const notifications = page.getByRole('region', { name: /Notifications/ }).locator('li');
+  await expect(notifications).toHaveCount(1);
+  await expect(notifications).toContainText('Mia Member is now admin.');
   await expect(toastTitled(page, 'Role not changed')).toHaveCount(0);
-  await expect(toastTitled(page, 'Role changed')).toHaveCount(0);
-  await expect(page.getByRole('region', { name: /Notifications/ }).locator('li')).toHaveCount(0);
   expect(statuses).toEqual([403]);
   expect(await memberRoleIn(project.id, admin)).toBe('admin');
-  expect((await teamActivity(project.id, owner)).filter((e) => e.action === 'member.role_changed')).toEqual([]);
+  const changes = (await teamActivity(project.id, owner)).filter((e) => e.action === 'member.role_changed');
+  expect(changes.map((e) => e.targetId)).toEqual([member.userId]);
 });
 
 test('TEAM-014 recent sign-in is checked before the owner-count rules', async () => {
@@ -408,10 +414,11 @@ test('TEAM-042 leaving clears a billing offer made to you', async ({ page }) => 
   await signIn(page, owner);
   await openSettings(page, project.id);
   const card = cardTitled(page, 'Billing owner');
-  await expect(card.getByText(/^Offered to/)).toHaveCount(0);
   await expect(
     card.getByText('Billing can only move to another owner. Make someone an owner on the Members page first.', { exact: true }),
   ).toBeVisible();
+  await expect(card.getByText(/^Offered to/)).toHaveCount(0);
+  await expect(card.getByRole('button', { name: 'Cancel offer' })).toHaveCount(0);
 });
 
 test('TEAM-044 leave by someone not in the project', async () => {
@@ -584,6 +591,7 @@ test('TEAM-057 pending invites list content and order', async ({ page }) => {
   ];
   for (const [index, cells] of expected.entries()) {
     await expect(rows.nth(index).locator('td')).toHaveText([...cells, '']);
+    await expect(rows.nth(index).locator('td').nth(1).locator('[data-slot="badge"]')).toHaveText(cells[1]);
   }
   await expect(rows.nth(3).locator('td').nth(3).locator('[data-slot="badge"]')).toHaveText('Expired');
   await expect(card.getByText(joiner.email)).toHaveCount(0);
@@ -1049,6 +1057,11 @@ test('TEAM-117 a new offer replaces the earlier one', async ({ page, browser, ba
   expect((await offerBilling(project.id, owner, coOwner)).status).toBe(200);
   await ageBillingOffer(project.id, '3 days');
 
+  // While the offer is Cara's, her settings page shows it.
+  await signIn(page, coOwner);
+  await openSettings(page, project.id);
+  await expect(cardTitled(page, 'Take over billing')).toBeVisible();
+
   const before = Date.now();
   expect((await offerBilling(project.id, owner, coOwner2)).status).toBe(200);
   const offer = (await membersOf(project.id, owner)).billingOffer as { toUserId: string; offeredAt: string; expiresAt: string };
@@ -1056,8 +1069,15 @@ test('TEAM-117 a new offer replaces the earlier one', async ({ page, browser, ba
   expect(Math.abs(new Date(offer.offeredAt).getTime() - before)).toBeLessThan(60_000);
   expect(new Date(offer.expiresAt).getTime() - new Date(offer.offeredAt).getTime()).toBe(7 * 24 * 60 * 60 * 1000);
 
-  await signIn(page, coOwner);
-  await openSettings(page, project.id);
+  // The card hangs on the members query, so wait for that answer before looking for it.
+  const membersLoaded = page.waitForResponse(
+    (r) => r.request().method() === 'GET' && new URL(r.url()).pathname === `/api/projects/${project.id}/members`,
+  );
+  await page.reload();
+  const seen = (await (await membersLoaded).json()).data.billingOffer as { toUserId: string };
+  expect(seen.toUserId).toBe(coOwner2.userId);
+  await cardTitled(page, 'Leave project').waitFor();
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0))));
   await expect(cardTitled(page, 'Take over billing')).toHaveCount(0);
   const late = await call('POST', `${offerUrl(project.id)}/accept`, { as: coOwner });
   expect(late.status).toBe(400);
