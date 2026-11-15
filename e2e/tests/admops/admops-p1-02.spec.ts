@@ -292,16 +292,15 @@ test('ADMOPS-104 a staff sign-in from a new device raises "Staff sign-in from a 
       () => sql(`SELECT id FROM staff_sessions WHERE user_id = $1`, [staff.account.userId]),
       (rows) => rows.length >= 2,
     );
-    await sleep(2500);
-    // Neither the first sign-in of the account nor a second from the same browser alarms.
-    expect(await deviceAlarms()).toEqual([]);
-
     const phonePage = await phone.newPage();
     const phoneKey = await addAuthenticator(phonePage);
     await copyPasskeys(sameKey, phoneKey);
     await phonePage.goto(adminUrl('/sign-in'));
     await staffPasskeySignIn(phonePage);
-    const [alarm] = await eventually(deviceAlarms, (rows) => rows.length > 0);
+    const [alarm, ...others] = await eventually(deviceAlarms, (rows) => rows.length > 0);
+    // Only the phone's: neither the first sign-in of the account nor the second from the
+    // same browser (both checked before the phone signed in) raised one.
+    expect(others).toEqual([]);
     expect(alarm.details).toEqual({ email: staff.account.email, device: expect.stringMatching(/ on iOS$/) });
     expect(alarm.ip_address).toBe(phoneIp);
     expect(alarm.dedupe_key).toBe(`${staff.account.userId}:${alarm.details.device}`);
@@ -430,15 +429,18 @@ test.describe('the internal alarm route with SECURITY_ALERT_TOKEN set (P1)', () 
     expect(await alarms({ keyLike: `${prefix}%` })).toHaveLength(1);
   });
 
-  test('ADMOPS-114 long detail values are shortened, never refused', async ({ page, clientIp }) => {
-    test.info().annotations.push({ type: 'issue', description: 'ADMOPS-114' });
-    test.fail();
+  /** Posts a 2,000-character `files` detail; answers the alarm's key, what was sent and what was stored. */
+  const postLongDetail = async () => {
     const key = `aide-114-${hex()}`;
     const files = `/etc/e2e-114-${hex()}/${'a'.repeat(2000)}`.slice(0, 2000);
     const response = await postAlarm(extra.url, { kind: 'server.files_changed', key, details: { files } }, { 'X-Security-Alert-Token': token });
     expect({ status: response.status, body: response.json }).toEqual({ status: 202, body: { data: { accepted: true } } });
     const [alarm] = await alarms({ key });
-    const stored = String(alarm.details.files);
+    return { key, files, stored: String(alarm.details.files) };
+  };
+
+  test('ADMOPS-114 long detail values are shortened, never refused', async ({ page, clientIp }) => {
+    const { files, stored } = await postLongDetail();
     expect(stored).toHaveLength(500);
     expect(stored).toBe(`${files.slice(0, 499)}…`);
 
@@ -446,8 +448,17 @@ test.describe('the internal alarm route with SECURITY_ALERT_TOKEN set (P1)', () 
     await openAdminPage(page, '/incidents', RECORD_HEADING);
     const row = alarmListRow(page, `files: ${files.slice(0, 40)}`);
     await expect(row).toContainText('Server files changed');
-    const details = row.locator('div.break-all');
-    await expect(details).toHaveText(`files: ${stored}`);
+    await expect(row.locator('div.break-all')).toHaveText(`files: ${stored}`);
+  });
+
+  test('ADMOPS-114 a long detail value is shown wrapped', async ({ page, clientIp }) => {
+    test.info().annotations.push({ type: 'issue', description: 'ADMOPS-114' });
+    test.fail();
+    const { files } = await postLongDetail();
+    await signedInStaff(page, clientIp);
+    await openAdminPage(page, '/incidents', RECORD_HEADING);
+    const details = alarmListRow(page, `files: ${files.slice(0, 40)}`).locator('div.break-all');
+    await expect(details).toBeVisible();
     // Wrapped inside the card rather than widening the table.
     const card = await cardTitled(page, 'Recent alarms').boundingBox();
     const box = await details.boundingBox();
@@ -1054,6 +1065,7 @@ test('ADMOPS-175 the 4-hour reminder is stamped once while the incident is open'
   expect(stamped.reminder_email_failed).toBe(false);
   const subject = `2 hours left to report: ${incident.title}`;
   const mail = await waitForMail(staff.account.email, { subjectIncludes: subject });
+  expect(mail.text).toContain(`Deadline: ${istAndUtc(incident.deadline)}`);
   expect(mail.text).toContain('email incident@cert-in.org.in, phone 1800-11-4949');
   expect(mail.text).toContain(`/incidents/${incident.id}`);
 
@@ -1123,6 +1135,10 @@ test('ADMOPS-179 the noticed time defaults to when the page opened, not when "Re
   await page.getByLabel('Title', { exact: true }).fill(stale);
   await page.getByRole('checkbox', { name: '(iii) Unauthorised access of IT systems/data' }).check();
   await page.clock.setSystemTime(Date.now());
+  // Nothing on the form says the prefilled time is seven hours old.
+  const form = cardTitled(page, 'Record an incident');
+  await expect(form.getByRole('alert')).toHaveCount(0);
+  await expect(form).not.toContainText(/\b(ago|old|stale|overdue|late|passed)\b/i);
   await page.getByRole('button', { name: 'Record incident' }).click();
   await expect(page.getByRole('heading', { name: stale, level: 1 })).toBeVisible();
   const staleId = new URL(page.url()).pathname.split('/').pop()!;
