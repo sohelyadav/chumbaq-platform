@@ -325,14 +325,20 @@ test('LINK-198 fingerprint match ignores desktop clicks and other projects', asy
   const p2 = await sdkProject(clientIp, 'p2');
   const desktop = await seedLink(p1.owner, p1.project.id, clientIp, { longUrl: 'https://example.com/desk', shortCode: uniqueCode('fp-desk') });
   const foreign = await seedLink(p2.owner, p2.project.id, clientIp, { longUrl: 'https://example.com/p2', shortCode: uniqueCode('fp-p2'), iosUrl: 'https://example.com/app/p2' });
+  // A link with no iOS deep link: an iPhone tapping it goes straight to the web page.
+  const webOnly = await seedLink(p1.owner, p1.project.id, clientIp, { longUrl: 'https://example.com/web', shortCode: uniqueCode('fp-web') });
   const address = newClientIp();
   const desktopClick = await clickFrom(desktop, address);
+  // An iOS click that is still a web fallback, so only the redirect type can leave it out.
+  const webClick = await clickFrom(webOnly, address, IPHONE_UA);
   const foreignClick = await clickFrom(foreign, address, IPHONE_UA);
   expect((await clicksOf(desktop.id))[0].redirect_type).toBe('web_fallback');
+  expect((await clicksOf(webOnly.id)).map((row) => [row.platform, row.redirect_type])).toEqual([['ios', 'web_fallback']]);
 
   const answer = await deferredMatch(p1.key, address, { fingerprint: { os: 'iOS' } });
   expect([answer.status, answer.body]).toEqual([201, { data: { matched: false } }]);
   expect(await matchedOf(desktopClick)).toBe(false);
+  expect(await matchedOf(webClick)).toBe(false);
   expect(await matchedOf(foreignClick)).toBe(false);
 
   // The control: P2's own key does claim its click.
@@ -435,11 +441,24 @@ test('LINK-209 conversion of a do-not-track person is dropped with 2xx', async (
   expect(nobody.status).toBe(201);
   expect(nobody.body.data).toMatchObject({ id: expect.any(String), linkId: link.id, externalUserId: null });
   expect(await conversionRows(link.id)).toEqual([expect.objectContaining({ id: nobody.body.data.id, external_user_id: null })]);
-  const [attribution] = await sql<{ n: string }>(
-    "SELECT count(*)::text AS n FROM conversion_events WHERE link_id = $1 AND external_user_id = 'u-dnt'",
-    [link.id],
-  );
-  expect(attribution.n).toBe('0');
+
+  // The control: a person with no objection is recorded and attributed (one result per
+  // model, written after the answer). The dropped conversion came first, so once these
+  // results exist its own would be there too, had it been attributed.
+  const counted = await post({ externalUserId: 'u-ok' });
+  expect(counted.status).toBe(201);
+  const attributionOf = async (person: string) =>
+    Number(
+      (
+        await sql<{ n: string }>('SELECT count(*)::text AS n FROM attribution_results WHERE project_id = $1 AND distinct_id = $2', [
+          project.id,
+          person,
+        ])
+      )[0].n,
+    );
+  await waitUntil(() => attributionOf('u-ok'), (n) => n >= 4, 'the attribution of u-ok');
+  expect(await attributionOf('u-dnt')).toBe(0);
+  expect((await conversionRows(link.id)).map((row) => row.external_user_id)).toEqual([null, 'u-ok']);
 });
 
 // ---- Q. Review additions
@@ -573,7 +592,8 @@ test('LINK-228 bulk-imported javascript: destination on desktop', async ({ page,
   await page.goto(`/${link.short_code}`, { waitUntil: 'commit' });
   await waitUntil(async () => failed, (all) => all.length > 0, 'the refused redirect', 10_000);
   expect(failed[0]).toMatch(/net::ERR_(UNSAFE_REDIRECT|ABORTED)/);
-  await page.waitForTimeout(500);
+  // The catch-all page's spinner is still the document shown.
+  await expect(page.locator('.animate-spin')).toBeVisible();
   expect(page.url()).toBe(new URL(`/${link.short_code}`, baseURL).href);
   expect(dialogs).toEqual([]);
   // The raw request, the API host, the hop and the page's own each recorded a click.
