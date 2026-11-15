@@ -315,7 +315,7 @@ test('LINK-101 referrer with HTML is shown as text', async ({ page, clientIp }) 
   const cell = referrers.locator('tbody').getByRole('row').first().getByRole('cell').first();
   await expect(cell).toHaveText(referer);
   // The cell holds one text node and nothing the browser could run.
-  expect(await cell.evaluate((el) => [...el.childNodes].map((n) => n.nodeName))).toEqual(['#text']);
+  expect(await cell.evaluate((el) => Array.from(el.childNodes, (n) => n.nodeName))).toEqual(['#text']);
   await expect(page.locator('img[src="x"]')).toHaveCount(0);
   expect(dialogs).toEqual([]);
 });
