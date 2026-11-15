@@ -284,8 +284,14 @@ test('PPL-015 Status filter', async ({ page, clientIp }) => {
   expect(await rowNames(page)).toEqual(active.slice(0, 20).map((d) => d.fingerprint));
   await expect(bodyRows(page).locator('[data-slot="badge"]', { hasText: 'inactive' })).toHaveCount(0);
 
-  // Back to the first load's query (no status), which the page still holds: no new request.
-  await chooseFilter(page, 0, 'All statuses');
+  // A search every row matches makes "All statuses" a query the page has not loaded
+  // yet, so its request can be seen: no status, and back to page 1 from page 2.
+  const search = page.getByPlaceholder('Search by name, email, or ID...');
+  await Promise.all([waitForList(page, p.project.id, { search: 'fp-', status: 'active', page: '1' }), search.fill('fp-')]);
+  await expect(page.getByText('Showing 1–20 of 21')).toBeVisible();
+  await Promise.all([waitForList(page, p.project.id, { search: 'fp-', status: 'active', page: '2' }), page.getByText(/^Showing /).locator('..').getByRole('button').nth(1).click()]);
+  await expect(page.getByText('Showing 21–21 of 21')).toBeVisible();
+  await Promise.all([waitForList(page, p.project.id, { search: 'fp-', status: null, page: '1' }), chooseFilter(page, 0, 'All statuses')]);
   await expect(page.getByText('Showing 1–20 of 22')).toBeVisible();
   await expect(listFilters(page).getByRole('combobox').nth(0)).toHaveText('All statuses');
 });
@@ -315,8 +321,12 @@ test('PPL-016 Push status filter', async ({ page, clientIp }) => {
   await expect.poll(async () => (await rowNames(page)).sort()).toEqual(await names([inactiveOnly, none]));
   await expect(bodyRows(page).locator('svg.lucide-bell')).toHaveCount(0);
 
-  // The first load's query again (no pushEnabled), still held by the page.
-  await chooseFilter(page, 1, 'All push status');
+  // A search every row matches makes "All push status" a query not loaded yet, so its
+  // request (no pushEnabled) can be seen.
+  const search = page.getByPlaceholder('Search by name, email, or ID...');
+  await Promise.all([waitForList(page, p.project.id, { search: 'fp-push', pushEnabled: 'false', page: '1' }), search.fill('fp-push')]);
+  await expect(bodyRows(page)).toHaveCount(2);
+  await Promise.all([waitForList(page, p.project.id, { search: 'fp-push', pushEnabled: null, page: '1' }), chooseFilter(page, 1, 'All push status')]);
   await expect(bodyRows(page)).toHaveCount(3);
   await expect(pushSelect).toHaveText('Push status');
 });
@@ -334,8 +344,12 @@ test('PPL-017 Platform filter', async ({ page, clientIp }) => {
     await expect.poll(() => rowNames(page)).toEqual([fps[platform]]);
     await expect(bodyRows(page).locator('[data-slot="table-cell"]').nth(1)).toHaveText(platform);
   }
-  // The first load's query again (no platform), still held by the page.
-  await chooseFilter(page, 2, 'All platforms');
+  // A search every row matches makes "All platforms" a query not loaded yet, so its
+  // request (no platform) can be seen.
+  const search = page.getByPlaceholder('Search by name, email, or ID...');
+  await Promise.all([waitForList(page, p.project.id, { search: 'fp-', platform: 'android', page: '1' }), search.fill('fp-')]);
+  await expect(bodyRows(page)).toHaveCount(1);
+  await Promise.all([waitForList(page, p.project.id, { search: 'fp-', platform: null, page: '1' }), chooseFilter(page, 2, 'All platforms')]);
   await expect(bodyRows(page)).toHaveCount(3);
   await expect(listFilters(page).getByRole('combobox').nth(2)).toHaveText('Platform');
 });
@@ -463,8 +477,8 @@ test('PPL-037 Unknown person id shows "Person not found"', async ({ page, client
   });
   await page.goto(`/projects/${p.project.id}/users/${unknown}`);
   await expect(page.getByText('Person not found', { exact: true })).toBeVisible();
-  // One retry, then the page gives up.
-  expect(answers).toEqual([
+  // One retry, then the page gives up (the handler reads each body after it arrives).
+  await expect.poll(() => answers).toEqual([
     { status: 404, message: PERSON_NOT_FOUND },
     { status: 404, message: PERSON_NOT_FOUND },
   ]);
@@ -1087,7 +1101,7 @@ test('PPL-088 A stranger claiming a do-not-track device\'s id is still tracked',
   });
 });
 
-test('PPL-091 Identify string booleans (known risk)', { annotation: { type: 'issue', description: 'PPL-091' } }, async ({ clientIp }) => {
+test('PPL-091 Identify with string booleans is refused or stored as sent',{ annotation: { type: 'issue', description: 'PPL-091' } }, async ({ clientIp }) => {
   test.fail();
   const p = await peopleProject(clientIp);
   const fp = fingerprint('fp-strings');
