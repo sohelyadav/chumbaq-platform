@@ -647,3 +647,97 @@ export async function clearToasts(page: Page): Promise<void> {
   }
   await expect(toasts).toHaveCount(0);
 }
+
+// ---- Campaign list and editor (P1: list, layout, templates, content step)
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Records `times` SDK events of one type for a device, through the real event route. */
+export async function recordEvents(
+  p: InAppProject,
+  messageId: string,
+  deviceFingerprint: string,
+  eventType: string,
+  times: number,
+  buttonId?: string,
+): Promise<void> {
+  for (let i = 0; i < times; i++) {
+    dataOf(await recordInAppEvent(p, { messageId, deviceFingerprint, eventType, ...(buttonId ? { buttonId } : {}) }));
+  }
+}
+
+/** Waits for a message's denormalised counters (updated after the event route answers). */
+export async function waitForCounters(messageId: string, impressions: number, clicks: number): Promise<void> {
+  await expect
+    .poll(async () => {
+      const row = await messageRow(messageId);
+      return [Number(row?.total_impressions), Number(row?.total_clicks)];
+    })
+    .toEqual([impressions, clicks]);
+}
+
+/** The value of one of the list's stat cards, by its label. */
+export function statValue(page: Page, label: string): Locator {
+  return page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.locator('p', { hasText: new RegExp(`^${escapeRegExp(label)}$`) }) })
+    .locator('p.text-2xl');
+}
+
+/** A number field of the campaign editor by its label (labels have no htmlFor). */
+export function editorNumber(page: Page, label: string): Locator {
+  return page
+    .locator('label', { hasText: new RegExp(`^${escapeRegExp(label)}$`) })
+    .locator('..')
+    .getByRole('spinbutton');
+}
+
+/** A Radix select of the campaign editor by its label. */
+export function editorSelect(page: Page, label: string): Locator {
+  return page
+    .locator('label', { hasText: new RegExp(`^${escapeRegExp(label)}$`) })
+    .locator('..')
+    .getByRole('combobox');
+}
+
+/** The editor's step pills ("1 Content & Design", ...), by number and label. */
+export function stepPill(page: Page, num: number, label: string): Locator {
+  return page.getByRole('button', { name: new RegExp(`^${num}\\s*${escapeRegExp(label)}$`) });
+}
+
+/** The message-type badge beside the editor's heading. */
+export function editorTypeBadge(page: Page): Locator {
+  return page.getByRole('heading', { level: 1 }).locator('xpath=following-sibling::*[1]');
+}
+
+/** The editor's icon-only back arrow, left of the heading. */
+export function editorBackArrow(page: Page): Locator {
+  return page.getByRole('heading', { level: 1 }).locator('xpath=ancestor::div[2]/preceding-sibling::button[1]');
+}
+
+/** The rows of the CTA Buttons card. */
+export function ctaRows(page: Page): Locator {
+  return page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.getByText('CTA Buttons', { exact: true }) })
+    .locator('div.rounded-md.border');
+}
+
+/** A template gallery card, by the preset's name. */
+export function presetCard(page: Page, name: string): Locator {
+  return page
+    .locator('button[aria-pressed]')
+    .filter({ has: page.locator('span.text-sm.font-medium', { hasText: new RegExp(`^${escapeRegExp(name)}$`) }) });
+}
+
+/** The gallery header's link: "Starting blank" or "Start blank instead". */
+export function blankToggle(page: Page): Locator {
+  return page.getByRole('button', { name: /^(Starting blank|Start blank instead)$/ });
+}
+
+/** Waits for the editor's create POST and answers it. */
+export function createPosted(page: Page, projectId: string) {
+  return page.waitForResponse((r) => r.url().endsWith(`/api/projects/${projectId}/in-app-messages`) && r.request().method() === 'POST');
+}
