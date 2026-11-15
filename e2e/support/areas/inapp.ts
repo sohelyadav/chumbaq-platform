@@ -741,3 +741,45 @@ export function blankToggle(page: Page): Locator {
 export function createPosted(page: Page, projectId: string) {
   return page.waitForResponse((r) => r.url().endsWith(`/api/projects/${projectId}/in-app-messages`) && r.request().method() === 'POST');
 }
+
+// ---- Editor steps 2 to 4, editing, detail page (P1)
+
+/** A date-and-time field of the editor's step 4 by its label (no htmlFor, no role). */
+export function editorDate(page: Page, label: string): Locator {
+  return page
+    .locator('label', { hasText: new RegExp(`^${escapeRegExp(label)}$`) })
+    .locator('..')
+    .locator('input[type="datetime-local"]');
+}
+
+/** One of the option cards of steps 2 and 3 ("On Event", "Mixpanel Cohort", ...), by its label. */
+export function editorChoice(page: Page, label: string): Locator {
+  return page.getByRole('button', { name: new RegExp(`^${escapeRegExp(label)}(\\s|$)`) });
+}
+
+/** The editor's scrolling left panel (the steps' fields, not the top bar or the preview). */
+export function editorPanel(page: Page): Locator {
+  return page.locator('div.overflow-y-auto.p-5');
+}
+
+/** The value of one of the detail page's stat cards, by its label. */
+export function detailStat(page: Page, label: string): Locator {
+  return page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.locator('p', { hasText: new RegExp(`^${escapeRegExp(label)}$`) }) })
+    .locator('p.text-lg');
+}
+
+/** A card of the detail page by its title. */
+export function cardTitled(page: Page, title: string): Locator {
+  return page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.locator('[data-slot="card-title"]', { hasText: new RegExp(`^${escapeRegExp(title)}$`) }) });
+}
+
+/** Waits for the editor's update PATCH and answers it. */
+export function updatePatched(page: Page, projectId: string, id: string) {
+  return page.waitForResponse(
+    (r) => r.url().endsWith(`/api/projects/${projectId}/in-app-messages/${id}`) && r.request().method() === 'PATCH',
+  );
+}
