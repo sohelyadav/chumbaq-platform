@@ -125,6 +125,23 @@ function activityRowsOnPage(page: Page) {
   return page.getByRole('table').locator('tbody tr[aria-expanded]');
 }
 
+/** Toasts titled `title`, found even while a modal dialog hides the rest of the page from the accessibility tree. */
+function toastsBehindDialog(page: Page, title: string) {
+  return page.getByRole('region', { name: /Notifications/, includeHidden: true }).locator('li').filter({ hasText: title });
+}
+
+/**
+ * A view-as write raises its own `Read-only session` toast. Earlier toasts (4 s each) are
+ * waited out first, so the one seen belongs to this write and is not a leftover.
+ */
+async function expectOwnReadOnlyToast(page: Page, attempt: () => Promise<unknown>): Promise<void> {
+  const readOnly = toastsBehindDialog(page, 'Read-only session');
+  await expect(readOnly).toHaveCount(0, { timeout: 10_000 });
+  await attempt();
+  await expect(readOnly).toHaveCount(1);
+  await expect(readOnly).toContainText(READ_ONLY);
+}
+
 /** The billing card's owner picker. */
 function billingPicker(page: Page) {
   return page.getByRole('combobox', { name: 'Owner to offer billing to' });
@@ -213,6 +230,8 @@ test('TEAM-116 offering billing needs a recent sign-in', async ({ page }) => {
   await expect(dialog).toBeVisible();
   await confirmWithPassword(page, owner.password);
   await expect(toastTitled(page, 'Billing offered')).toBeVisible();
+  // Toasts last 4 s: a failure toast from the cancelled attempt would still be showing.
+  await expect(toastTitled(page, 'Billing not offered')).toHaveCount(0);
   expect(statuses).toEqual([403, 403, 200]);
   expect((await membersOf(project.id, owner)).billingOffer).toMatchObject({ toUserId: people.coOwner.userId });
 });
@@ -388,6 +407,7 @@ test('TEAM-123 accepting needs a recent sign-in', async ({ page }) => {
   await expect(dialog).toBeVisible();
   await confirmWithPassword(page, coOwner.password);
   await expect(toastTitled(page, 'This project is now billed to you')).toBeVisible();
+  await expect(toastTitled(page, 'Billing not moved')).toHaveCount(0);
   expect(statuses).toEqual([403, 403, 200]);
   expect(await billingState(project.id)).toEqual({ ownerId: coOwner.userId, pendingTo: null });
 });
@@ -621,6 +641,7 @@ test('TEAM-138 admin can read the log; member cannot', async ({ page, browser, b
   await expect(page.getByLabel('Kind')).toHaveCount(0);
   await expect(page.getByLabel('Person')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Download CSV' })).toHaveCount(0);
+  await page.waitForLoadState('networkidle');
   expect(activityCalls.filter((url) => url.includes('/api/'))).toEqual([]);
 
   for (const path of [`/api/projects/${project.id}/activity`, `/api/projects/${project.id}/activity/export`]) {
@@ -990,6 +1011,7 @@ test('TEAM-168 permissions follow a role change without signing in again', async
 
   const before = await call('GET', keys, { as: member });
   expect(before.status).toBe(403);
+  expect(messageOf(before)).toBe(ROLE_REFUSAL);
   expect((await role('admin')).status).toBe(200);
   expect((await call('GET', keys, { as: member })).status).toBe(200);
   expect((await role('member')).status).toBe(200);
@@ -1031,40 +1053,37 @@ test('TEAM-174 view-as sees the team but changes nothing', async ({ browser, bas
       refusals.push({ status: response.status(), message: (await response.json().catch(() => ({}))).message });
     }
   });
-  const readOnlyToasts = toastTitled(viewAs, 'Read-only session');
 
   await openMembers(viewAs, project.id);
   await expect(memberRow(viewAs, member.email)).toBeVisible();
   await expect(pendingInviteRow(viewAs, pending.email)).toBeVisible();
 
-  await chooseRole(viewAs, member.email, 'Admin');
+  await expectOwnReadOnlyToast(viewAs, () => chooseRole(viewAs, member.email, 'Admin'));
   await expect(toastTitled(viewAs, 'Role not changed')).toContainText(READ_ONLY);
-  await expect(readOnlyToasts.first()).toContainText(READ_ONLY);
 
   await memberRow(viewAs, member.email).getByRole('button', { name: 'Remove Mia Member' }).click();
   const removeDialog = viewAs.getByRole('dialog', { name: 'Remove Mia Member?' });
-  await removeDialog.getByRole('button', { name: 'Remove', exact: true }).click();
+  await expectOwnReadOnlyToast(viewAs, () => removeDialog.getByRole('button', { name: 'Remove', exact: true }).click());
   // The modal dialog hides the rest of the page (toasts included) from the accessibility tree.
-  await expect(
-    viewAs.getByRole('region', { name: /Notifications/, includeHidden: true }).locator('li').filter({ hasText: 'Not removed' }),
-  ).toContainText(READ_ONLY);
+  await expect(toastsBehindDialog(viewAs, 'Not removed')).toContainText(READ_ONLY);
   await expect(removeDialog).toBeVisible();
   await removeDialog.getByRole('button', { name: 'Cancel' }).click();
 
   await viewAs.getByLabel('Email address').fill(uniqueEmail('team-viewas-invite'));
-  await viewAs.getByRole('button', { name: 'Send invite' }).click();
+  await expectOwnReadOnlyToast(viewAs, () => viewAs.getByRole('button', { name: 'Send invite' }).click());
   await expect(viewAs.getByRole('alert').filter({ hasText: READ_ONLY })).toHaveText(READ_ONLY);
 
-  await viewAs.getByRole('button', { name: `Resend the invite to ${pending.email}` }).click();
+  await expectOwnReadOnlyToast(viewAs, () => viewAs.getByRole('button', { name: `Resend the invite to ${pending.email}` }).click());
   await expect(toastTitled(viewAs, 'Invite not resent')).toContainText(READ_ONLY);
-  await viewAs.getByRole('button', { name: `Cancel the invite to ${pending.email}` }).click();
+  await expectOwnReadOnlyToast(viewAs, () => viewAs.getByRole('button', { name: `Cancel the invite to ${pending.email}` }).click());
   await expect(toastTitled(viewAs, 'Invite not cancelled')).toContainText(READ_ONLY);
   await expect(viewAs.getByRole('dialog', { name: /^Invite link for/ })).toHaveCount(0);
+  await expect(viewAs.getByText(/#token=/)).toHaveCount(0);
 
   await openSettings(viewAs, project.id);
   await billingPicker(viewAs).click();
   await viewAs.getByRole('option', { name: 'Cara Co', exact: true }).click();
-  await viewAs.getByRole('button', { name: 'Offer billing' }).click();
+  await expectOwnReadOnlyToast(viewAs, () => viewAs.getByRole('button', { name: 'Offer billing' }).click());
   await expect(toastTitled(viewAs, 'Billing not offered')).toContainText(READ_ONLY);
 
   await expect.poll(() => refusals.length).toBe(6);
