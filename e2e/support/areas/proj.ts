@@ -1,5 +1,5 @@
 import { randomBytes } from 'crypto';
-import type { Browser, Page } from '@playwright/test';
+import { devices, type Browser, type Page } from '@playwright/test';
 import { Client } from 'pg';
 import { api, apiUrl, createAccount, newClientIp, type Account, type Project } from '../api';
 import { newPersonContext } from '../fixtures';
@@ -424,4 +424,74 @@ export async function openShortLink(shortCode: string, ip: string): Promise<{ st
 /** Sets an account's display name directly, for the header's fallbacks. */
 export async function setUserName(userId: string, name: string): Promise<void> {
   await withDatabase((db) => db.query(`UPDATE users SET name = $2 WHERE id = $1`, [userId, name]));
+}
+
+// ---- Settings, domain proof, delete, view-as and suspension (P1)
+
+/** iPhone Safari, as a phone opening a short link sends it. */
+export const IPHONE_UA = devices['iPhone 15'].userAgent;
+
+/** A link with any of the create fields (an `iosUrl`, a fallback, ...). */
+export async function createLinkWith(
+  account: Account,
+  ip: string,
+  projectId: string,
+  fields: Record<string, unknown>,
+): Promise<Link> {
+  return api<Link>(
+    'POST',
+    `/api/projects/${projectId}/links`,
+    { longUrl: 'https://landing.e2e.example.test/welcome', shortCode: newShortCode(), ...fields },
+    { token: account.accessToken, ip },
+  );
+}
+
+/** A phone opening a short link on the API's root redirect; redirects are not followed. */
+export async function openShortLinkAs(
+  shortCode: string,
+  userAgent: string,
+  ip: string,
+): Promise<{ status: number; contentType: string; body: string }> {
+  const response = await fetch(apiUrl(`/${shortCode}`), {
+    redirect: 'manual',
+    headers: { 'User-Agent': userAgent, 'X-Forwarded-For': ip, Accept: 'text/html' },
+  });
+  return { status: response.status, contentType: response.headers.get('content-type') ?? '', body: await response.text() };
+}
+
+/** Lifts a suspension written by `suspendAccount`. */
+export async function reactivateAccount(userId: string): Promise<void> {
+  await withDatabase((db) => db.query(`UPDATE users SET suspended_at = NULL, suspended_reason = NULL WHERE id = $1`, [userId]));
+}
+
+/** Every column of the project row, for "nothing else changed" comparisons. */
+export async function fullProjectRow(projectId: string): Promise<Record<string, unknown> | undefined> {
+  const [row] = await dbRows(`SELECT * FROM projects WHERE id = $1`, [projectId]);
+  return row;
+}
+
+/** Counts the page's requests with this method to exactly this API path from now on. */
+export function countRequests(page: Page, method: string, pathname: string): { count(): number } {
+  let n = 0;
+  page.on('request', (request) => {
+    if (request.method() === method && new URL(request.url()).pathname === pathname) n += 1;
+  });
+  return { count: () => n };
+}
+
+/**
+ * Watches every document the page loads from now on and remembers whether `text` ever
+ * appeared in its text or title. Answers a reader of that flag.
+ */
+export async function watchForText(page: Page, text: string): Promise<() => Promise<boolean>> {
+  await page.addInitScript((needle: string) => {
+    const w = window as unknown as { __e2eSeen?: boolean };
+    w.__e2eSeen = false;
+    const check = () => {
+      if ((document.documentElement?.textContent ?? '').includes(needle) || document.title.includes(needle)) w.__e2eSeen = true;
+    };
+    new MutationObserver(check).observe(document, { subtree: true, childList: true, characterData: true });
+    check();
+  }, text);
+  return async () => page.evaluate(() => (window as unknown as { __e2eSeen?: boolean }).__e2eSeen === true);
 }
