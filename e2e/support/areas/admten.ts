@@ -905,3 +905,108 @@ export async function identifyKnownPerson(
     { apiKey: sdkKey, ip },
   );
 }
+
+// ---- Tenant page, usage, limits and suspension (P1 chunk 2)
+
+const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const pad2 = (n: number) => String(n).padStart(2, '0');
+
+/**
+ * An instant as the admin app writes it with date-fns (`MMM d, yyyy` and, with
+ * `withTime`, ` HH:mm`), in this machine's time zone, which the browser shares.
+ */
+export function adminDate(value: string | Date, withTime = false): string {
+  const date = new Date(value);
+  const day = `${SHORT_MONTHS[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
+  return withTime ? `${day} ${pad2(date.getHours())}:${pad2(date.getMinutes())}` : day;
+}
+
+/** `'2026-11-13'` moved by `days` (UTC days). */
+export function addUtcDays(day: string, days: number): string {
+  const date = new Date(`${day}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+/** `'2026-11'` as "Nov 2026". */
+export function usageMonth(month: string): string {
+  const [year, index] = month.split('-');
+  return `${SHORT_MONTHS[Number(index) - 1]} ${year}`;
+}
+
+/** One fact of the tenant page's Account card (its `dd`), by its label. */
+export function accountFact(page: Page, label: string) {
+  return cardTitled(page, 'Account')
+    .locator('dl > div')
+    .filter({ has: page.locator('dt').getByText(label, { exact: true }) })
+    .locator('dd');
+}
+
+/** A desktop click on a short link, as `GET /api/<code>` (the redirect writes its click row after answering). */
+export async function clickShortLink(code: string, ip: string): Promise<number> {
+  const response = await fetch(apiUrl(`/api/${code}`), {
+    redirect: 'manual',
+    headers: {
+      'X-Forwarded-For': ip,
+      'User-Agent':
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    },
+  });
+  await response.arrayBuffer();
+  return response.status;
+}
+
+/** `person` joins `projectId` with `role`: invited by `owner` through the API and accepted with the link's token. */
+export async function inviteAndAccept(
+  owner: Account,
+  projectId: string,
+  person: Account,
+  role: 'member' | 'admin',
+  ip: string,
+): Promise<void> {
+  const invite = await api<{ inviteUrl: string }>(
+    'POST',
+    `/api/projects/${projectId}/invitations`,
+    { email: person.email, role },
+    { token: owner.accessToken, ip },
+  );
+  const token = new URL(invite.inviteUrl).hash.replace(/^#token=/, '');
+  await api('POST', '/api/invitations/accept', { token }, { token: person.accessToken, ip });
+}
+
+/** A pending invitation from `owner` to a new address; answers the address. */
+export async function inviteAddress(owner: Account, projectId: string, ip: string, label = 'invitee'): Promise<string> {
+  const email = `${label}-${randomUUID().slice(0, 8)}@e2e.example.test`;
+  await api('POST', `/api/projects/${projectId}/invitations`, { email, role: 'member' }, { token: owner.accessToken, ip });
+  return email;
+}
+
+/** A draft journey in `projectId` (the worker's tick leaves it alone), written in SQL. */
+export async function insertDraftJourney(projectId: string): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO journeys (project_id, name, trigger, steps) VALUES ($1, $2, '{}', '[]') RETURNING id`,
+    [projectId, `E2E journey ${randomUUID().slice(0, 6)}`],
+  );
+  return row.id;
+}
+
+/** A journey run in SQL; `dueInSeconds` null leaves `next_due_at` empty. Answers its id. */
+export async function insertJourneyRun(
+  projectId: string,
+  journeyId: string,
+  status: 'active' | 'completed' | 'exited' | 'failed',
+  dueInSeconds: number | null,
+): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO journey_runs (project_id, journey_id, person_key, status, next_due_at)
+     VALUES ($1, $2, $3, $4, CASE WHEN $5::int IS NULL THEN NULL ELSE now() + make_interval(secs => $5::int) END)
+     RETURNING id`,
+    [projectId, journeyId, `e2e-person-${randomUUID().slice(0, 8)}`, status, dueInSeconds],
+  );
+  return row.id;
+}
+
+export async function runDueAt(runId: string): Promise<Date | null> {
+  const [row] = await sql<{ next_due_at: Date | null }>(`SELECT next_due_at FROM journey_runs WHERE id = $1`, [runId]);
+  return row.next_due_at;
+}
