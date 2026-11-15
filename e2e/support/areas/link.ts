@@ -568,3 +568,70 @@ export async function bulkImport(account: Account, projectId: string, ip: string
 export async function storedLinks(projectId: string): Promise<{ id: string; short_code: string; long_url: string; ios_url: string | null }[]> {
   return sql('SELECT id, short_code, long_url, ios_url FROM links WHERE project_id = $1 ORDER BY long_url', [projectId]);
 }
+
+// ---- Links list, create and bulk import (link-p1-01)
+
+/**
+ * Uploads to the bulk import route and answers status and body whatever the status.
+ * `file: null` sends a multipart body with no file part.
+ */
+export async function rawBulkImport(
+  token: string | undefined,
+  projectId: string,
+  ip: string,
+  file: { content: string | Buffer; mimeType?: string; name?: string } | null,
+): Promise<RawResponse> {
+  const form = new FormData();
+  if (file) {
+    const bytes = typeof file.content === 'string' ? Buffer.from(file.content) : file.content;
+    form.append('file', new Blob([new Uint8Array(bytes)], { type: file.mimeType ?? 'text/csv' }), file.name ?? 'links.csv');
+  } else {
+    form.append('note', 'no file here');
+  }
+  const response = await fetch(apiUrl(`/api/projects/${projectId}/links/bulk`), {
+    method: 'POST',
+    headers: { 'X-Forwarded-For': ip, 'X-Chumbaq-Client': 'web', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: form,
+  });
+  const text = await response.text();
+  let body: unknown = text;
+  try {
+    body = text ? JSON.parse(text) : undefined;
+  } catch {
+    // not JSON: keep the text
+  }
+  return { status: response.status, body, headers: response.headers };
+}
+
+/** An existing account joins `projectId` with `role`: invited by the owner and accepted with the link's token. */
+export async function joinProject(owner: Account, projectId: string, person: Account, role: 'member' | 'admin', ip: string): Promise<void> {
+  const invite = await api<{ inviteUrl: string }>(
+    'POST',
+    `/api/projects/${projectId}/invitations`,
+    { email: person.email, role },
+    { token: owner.accessToken, ip },
+  );
+  await api('POST', '/api/invitations/accept', { token: tokenFromLink(invite.inviteUrl) }, { token: person.accessToken, ip });
+}
+
+/** `n` links seeded one after another, titled `<prefix> 1` .. `<prefix> n`. */
+export async function seedLinks(account: Account, projectId: string, ip: string, n: number, prefix = 'Bulk'): Promise<SeededLink[]> {
+  const links: SeededLink[] = [];
+  for (let i = 1; i <= n; i++) {
+    links.push(await seedLink(account, projectId, ip, { longUrl: `https://example.com/${prefix.toLowerCase().replace(/\W+/g, '-')}/${i}`, title: `${prefix} ${i}` }));
+  }
+  return links;
+}
+
+/** The body rows of the dashboard's links table. */
+export function linkRows(page: Page) {
+  return page.getByRole('table').locator('tbody').getByRole('row');
+}
+
+/** The access token of the view-as session a tab holds (its sessionStorage record). */
+export async function viewAsTokenFrom(page: Page): Promise<string> {
+  const raw = await page.evaluate(() => sessionStorage.getItem('chumbaq_impersonation'));
+  const token = raw ? (JSON.parse(raw) as { accessToken?: string }).accessToken : undefined;
+  if (!token) throw new Error('The tab holds no view-as session');
+  return token;
+}
