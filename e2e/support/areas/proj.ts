@@ -1,7 +1,8 @@
 import { randomBytes } from 'crypto';
-import type { Page } from '@playwright/test';
+import type { Browser, Page } from '@playwright/test';
 import { Client } from 'pg';
-import { api, apiUrl, createAccount, type Account, type Project } from '../api';
+import { api, apiUrl, createAccount, newClientIp, type Account, type Project } from '../api';
+import { newPersonContext } from '../fixtures';
 import { adminApi, enrolAndSignInStaff, grantSuperAdmin } from '../admin';
 import { assertE2eDatabase, stackEnv } from '../stack';
 
@@ -195,4 +196,163 @@ export async function viewAsToken(staffToken: string, tenantId: string, ip: stri
   const code = new URL(handoff.url).hash.replace(/^#code=/, '');
   const session = await api<{ accessToken: string }>('POST', '/api/auth/impersonation/exchange', { code }, { ip });
   return session.accessToken;
+}
+
+// ---- Project settings page
+
+/**
+ * An input on the settings page by its label. The page's labels have no `htmlFor`, so
+ * the label is matched inside the field's own `div.space-y-2`.
+ */
+export function settingsInput(page: Page, label: string) {
+  return page
+    .locator('div.space-y-2')
+    .filter({ has: page.locator('label', { hasText: new RegExp(`^${label}$`) }) })
+    .locator('input');
+}
+
+/** A card by its title (shadcn `data-slot="card"`). */
+export function cardTitled(page: Page, title: string) {
+  return page.locator('[data-slot="card"]').filter({ has: page.getByText(title, { exact: true }) });
+}
+
+/** Toasts (or any live status) containing this text. */
+export function toastWith(page: Page, text: string) {
+  return page.getByRole('status').filter({ hasText: text });
+}
+
+export interface ActivityRow {
+  action: string;
+  target_label: string | null;
+  details: Record<string, unknown> | null;
+  actor_user_id: string | null;
+}
+
+export async function activityRows(projectId: string): Promise<ActivityRow[]> {
+  return dbRows<ActivityRow>(
+    `SELECT action, target_label, details, actor_user_id FROM project_activity WHERE project_id = $1 ORDER BY occurred_at, id`,
+    [projectId],
+  );
+}
+
+export interface ProjectRow {
+  name: string;
+  domain: string | null;
+  domain_verified_at: Date | null;
+  domain_verification_token: string | null;
+  owner_id: string;
+  updated_at: Date;
+}
+
+export async function projectRow(projectId: string): Promise<ProjectRow | undefined> {
+  const [row] = await dbRows<ProjectRow>(
+    `SELECT name, domain, domain_verified_at, domain_verification_token, owner_id, updated_at FROM projects WHERE id = $1`,
+    [projectId],
+  );
+  return row;
+}
+
+const SEEDABLE_PROJECT_COLUMNS = new Set(['domain', 'domain_verified_at', 'domain_verification_token']);
+
+/** Writes project columns directly, for states the DTO refuses (a platform host) or DNS must give (a proof). */
+export async function setProjectColumns(projectId: string, columns: Record<string, unknown>): Promise<void> {
+  const keys = Object.keys(columns);
+  for (const key of keys) if (!SEEDABLE_PROJECT_COLUMNS.has(key)) throw new Error(`Not a seedable column: ${key}`);
+  const assignments = keys.map((key, i) => `${key} = $${i + 2}`).join(', ');
+  await withDatabase((db) => db.query(`UPDATE projects SET ${assignments} WHERE id = $1`, [projectId, ...keys.map((k) => columns[k])]));
+}
+
+// ---- Sign-in age and suspension
+
+/** Moves every one of the user's sign-ins back 20 minutes, past the 15-minute recent sign-in window. */
+export async function ageSignIn(userId: string): Promise<void> {
+  await withDatabase((db) =>
+    db.query(`UPDATE auth_sessions SET authenticated_at = now() - interval '20 minutes' WHERE user_id = $1`, [userId]),
+  );
+}
+
+function cookiesFrom(response: Response): string {
+  return response.headers
+    .getSetCookie()
+    .map((cookie) => cookie.split(';')[0])
+    .join('; ');
+}
+
+/**
+ * An access token whose sign-in is 20 minutes old: signs in, moves the session's
+ * `authenticated_at` back (where refresh reads `auth_time` from), and refreshes with the
+ * session's cookie.
+ */
+export async function staleAccessToken(account: Account, ip: string): Promise<string> {
+  const headers = { 'Content-Type': 'application/json', 'X-Chumbaq-Client': 'web', 'X-Forwarded-For': ip };
+  const login = await fetch(apiUrl('/api/auth/login'), {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ email: account.email, password: account.password }),
+  });
+  if (!login.ok) throw new Error(`login answered ${login.status}: ${await login.text()}`);
+  const cookie = cookiesFrom(login);
+  await ageSignIn(account.userId);
+  const refresh = await fetch(apiUrl('/api/auth/refresh'), { method: 'POST', headers: { ...headers, Cookie: cookie } });
+  const text = await refresh.text();
+  if (!refresh.ok) throw new Error(`refresh answered ${refresh.status}: ${text}`);
+  return (JSON.parse(text) as { data: { accessToken: string } }).data.accessToken;
+}
+
+/** Suspends an account as far as `JwtStrategy` reads it (on every request). */
+export async function suspendAccount(userId: string): Promise<void> {
+  await withDatabase((db) => db.query(`UPDATE users SET suspended_at = now(), suspended_reason = 'e2e' WHERE id = $1`, [userId]));
+}
+
+// ---- View-as in a customer tab
+
+export interface ViewAs {
+  staff: Account;
+  staffToken: string;
+  /** A fresh one-time handoff link (`APP_URL/impersonate#code=`) for the tenant. */
+  handoff(): Promise<string>;
+  /** A fresh view-as access token for the tenant, exchanged as the /impersonate page does. */
+  token(): Promise<string>;
+}
+
+/**
+ * A super admin (granted by the CLI) signed in to the admin app in a browser context of
+ * their own, ready to start view-as of `tenant` as often as a test needs.
+ */
+export async function staffForViewAs(browser: Browser, baseURL: string | undefined, tenant: Account): Promise<ViewAs> {
+  const ip = newClientIp();
+  const staff = await createAccount(ip, 'proj-staff', 'Pat Staff');
+  await grantSuperAdmin(staff.email);
+  const { context } = await newPersonContext(browser, baseURL);
+  let staffToken: string;
+  try {
+    staffToken = await enrolAndSignInStaff(await context.newPage(), staff);
+  } finally {
+    await context.close();
+  }
+  const handoff = async () =>
+    (
+      await adminApi<{ url: string }>(
+        'POST',
+        `/api/admin/tenants/${tenant.userId}/impersonate`,
+        { reason: 'E2E: checking project pages read-only' },
+        staffToken,
+        ip,
+      )
+    ).url;
+  const token = async () => {
+    const code = new URL(await handoff()).hash.replace(/^#code=/, '');
+    return (await api<{ accessToken: string }>('POST', '/api/auth/impersonation/exchange', { code }, { ip })).accessToken;
+  };
+  return { staff, staffToken, handoff, token };
+}
+
+/** Opens a view-as session of `tenant` in `page` and waits for the selector under the banner. */
+export async function openViewAs(page: Page, viewAs: ViewAs, tenant: Account): Promise<void> {
+  await page.goto(await viewAs.handoff());
+  await page.waitForURL(/\/projects$/);
+  await page
+    .getByRole('region', { name: 'Impersonation session' })
+    .getByText(`Viewing ${tenant.email} as Super Admin · read-only`)
+    .waitFor();
 }
