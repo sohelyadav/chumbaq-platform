@@ -447,7 +447,7 @@ test('LINK-155 analytics routes for roles and outsiders', async ({ browser, base
 test('LINK-156 click export file contents and headers', async ({ clientIp }) => {
   const { owner, project } = await ownerWithProject(clientIp);
   const link = await seedLink(owner, project.id, clientIp, { longUrl: 'https://example.com/csv', shortCode: uniqueCode('csv') });
-  const visitors = ['198.51.100.21', '198.51.100.22', '198.51.100.23'];
+  const visitors = [newClientIp(), newClientIp(), newClientIp()];
   for (const [i, ip] of visitors.entries()) {
     expect((await openShortLink(link.shortCode, ip)).status).toBe(302);
     await waitForClicks(link.id, i + 1);
@@ -746,6 +746,8 @@ test('LINK-172 interstitial escapes link fields', async ({ browser, baseURL, cli
     await dialog.dismiss();
   });
   await stubHosts(page, ['example.com']);
+  // No store URL or iOS fallback: the page falls back to the destination.
+  const fellBack = page.waitForRequest('https://example.com/xss');
   const response = await page.goto(`/redirect/${link.shortCode}`, { waitUntil: 'commit' });
   const html = await response!.text();
 
@@ -761,7 +763,8 @@ test('LINK-172 interstitial escapes link fields', async ({ browser, baseURL, cli
 
   const cookies = await waitUntil(() => context.cookies(baseURL), (all) => all.some((c) => c.name === 'chumbaq_params'), 'the params cookie', 5000);
   expect(JSON.parse(decodeURIComponent(cookies.find((c) => c.name === 'chumbaq_params')!.value))).toEqual(params);
-  await page.waitForTimeout(2000); // past the fallback, when a planted script would also have run
+  // The page's own script has run to its fallback, so any planted script would have run too.
+  await fellBack;
   expect(dialogs).toEqual([]);
   await context.close();
 });
