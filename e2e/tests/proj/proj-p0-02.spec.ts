@@ -458,6 +458,14 @@ test('PROJ-096 delete a project with a recent sign-in', async ({ page, clientIp 
   await insertClicks(link.id, 2, '1 hour');
   await createApiKey(owner, project.id, clientIp);
   const { meta } = await listProjects(owner, clientIp);
+  // Every row the cascade must remove is there to begin with.
+  const dependants = async () => ({
+    links: (await dbRows('SELECT 1 FROM links WHERE project_id = $1', [project.id])).length,
+    api_keys: (await dbRows('SELECT 1 FROM api_keys WHERE project_id = $1', [project.id])).length,
+    project_members: (await dbRows('SELECT 1 FROM project_members WHERE project_id = $1', [project.id])).length,
+    click_events: (await dbRows('SELECT 1 FROM click_events WHERE link_id = $1', [link.id])).length,
+  });
+  expect(await dependants()).toEqual({ links: 1, api_keys: 1, project_members: 1, click_events: 2 });
 
   await signIn(page, owner);
   await expect(page.getByText(`2 of ${meta.projectLimit} projects`)).toBeVisible();
@@ -486,11 +494,7 @@ test('PROJ-096 delete a project with a recent sign-in', async ({ page, clientIp 
   await expect(page.getByRole('menuitem').filter({ hasText: survivor.name })).toBeVisible();
   await expect(page.getByRole('menuitem').filter({ hasText: doomed })).toHaveCount(0);
 
-  for (const table of ['links', 'api_keys', 'project_members']) {
-    const rows = await dbRows(`SELECT 1 FROM ${table} WHERE project_id = $1`, [project.id]);
-    expect(rows, table).toEqual([]);
-  }
-  expect(await dbRows('SELECT 1 FROM click_events WHERE link_id = $1', [link.id])).toEqual([]);
+  expect(await dependants()).toEqual({ links: 0, api_keys: 0, project_members: 0, click_events: 0 });
   expect(await projectRow(project.id)).toBeUndefined();
   // The log outlives the project; the delete is its last entry.
   expect((await activityRows(project.id)).at(-1)).toEqual({
@@ -546,15 +550,22 @@ test('PROJ-098 cancelling the confirmation keeps the project', async ({ page, cl
   await signInLongAgo(page, owner);
   await openSettings(page, project.id);
 
+  const deletes: number[] = [];
+  page.on('response', (r) => {
+    if (r.url().endsWith(`/api/projects/${project.id}`) && r.request().method() === 'DELETE') deletes.push(r.status());
+  });
   const dialog = await openDeleteDialog(page);
   await dialog.getByRole('button', { name: 'Delete Project' }).click();
   const reauth = page.getByRole('dialog', { name: 'Confirm it is you' });
   await expect(reauth).toBeVisible();
+  expect(deletes).toEqual([403]);
   await reauth.getByRole('button', { name: 'Cancel' }).click();
   await expect(reauth).toHaveCount(0);
   await expect(page.getByRole('dialog', { name: 'Delete Project' })).toHaveCount(0);
   await expect(toastWith(page, 'Project not deleted')).toHaveCount(0);
   await expect(page).toHaveURL(new RegExp(`/projects/${project.id}/settings$`));
+  // Cancelling sends nothing more.
+  expect(deletes).toEqual([403]);
 
   expect(await projectRow(project.id)).toBeDefined();
   const kept = await rawApi('GET', `/api/projects/${project.id}`, { token: owner.accessToken, ip: clientIp });
@@ -765,19 +776,23 @@ test('PROJ-110 a suspended account is signed out of its projects', async ({ page
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
 
   await suspendAccount(owner.userId);
-  await openSidebarGroup(page, 'Main');
-  const [refused] = await Promise.all([
-    page.waitForResponse((r) => r.url().includes('/api/') && r.status() === 403),
-    sidebarLink(page, 'Links').click(),
-  ]);
-  await expect(page).toHaveURL(/\/login\?suspended=1$/);
-  // The page left before its body could be read; the same request with the old token says why.
-  const again = await rawApi<{ message: string }>(refused.request().method(), new URL(refused.url()).pathname + new URL(refused.url()).search, {
-    token: owner.accessToken,
-    ip: clientIp,
+  // The page leaves as soon as the refusal lands, so the bodies are read on the way through.
+  const refusals: { url: string; message: unknown }[] = [];
+  await page.route('**/api/**', async (route) => {
+    const response = await route.fetch();
+    if (response.status() === 403) {
+      const body = (await response.json().catch(() => null)) as { message?: unknown } | null;
+      refusals.push({ url: route.request().url(), message: body?.message });
+    }
+    await route.fulfill({ response });
   });
-  expect(again.status).toBe(403);
-  expect(again.body.message).toBe('Account suspended');
+  await openSidebarGroup(page, 'Main');
+  await sidebarLink(page, 'Links').click();
+  await expect(page).toHaveURL(/\/login\?suspended=1$/);
+  expect(refusals.length).toBeGreaterThan(0);
+  for (const refusal of refusals) expect(refusal.message, refusal.url).toBe('Account suspended');
+  // The session is cleared, not only the page changed.
+  expect(await page.evaluate(() => localStorage.getItem('chumbaq_signed_in'))).toBeNull();
 
   const list = await rawApi<{ message: string }>('GET', '/api/projects', { token: owner.accessToken, ip: clientIp });
   expect(list.status).toBe(403);
