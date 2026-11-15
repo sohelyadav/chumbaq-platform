@@ -5,6 +5,7 @@ import { Client } from 'pg';
 import { adminApi, enrolAndSignInStaff } from '../admin';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
 import { newPersonContext } from '../fixtures';
+import { runJobNow } from '../jobs';
 import { assertE2eDatabase, stackEnv } from '../stack';
 
 /**
@@ -715,4 +716,53 @@ export async function seedAudiencePeople(p: SegProject, ip: string): Promise<Aud
 /** Members of a live audience for `definition`, sorted. */
 export async function sortedMembers(account: Account, projectId: string, ip: string, definition: Node): Promise<string[]> {
   return (await liveMembers(account, projectId, ip, definition)).sort();
+}
+
+// ---- Audience edit, members, materialisation, journeys list and editor (seg-p1-02)
+
+/**
+ * Runs the worker's segment refresh job now (the five-minute cron's own method), which
+ * enqueues every materialised audience that is due, and waits until this one's run has
+ * stamped `last_materialized_at` later than `after` and released its claim. The stack's
+ * worker processes the job; its own cron may get there first, which is the same outcome.
+ */
+export async function refreshThroughScheduler(segmentId: string, after: Date | null = null, timeoutMs = 90_000): Promise<Date> {
+  await runJobNow('segment-refresh');
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const row = await segmentRow(segmentId);
+    const at = row?.last_materialized_at ? new Date(row.last_materialized_at) : null;
+    if (at && (!after || at.getTime() > after.getTime()) && row?.materializing_at === null) return at;
+    if (Date.now() > deadline) throw new Error(`Segment ${segmentId} was not refreshed by the scheduler`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+/** Moves an audience's last refresh back, so its interval has passed. */
+export async function ageRefresh(segmentId: string, minutes: number): Promise<void> {
+  await sql(`UPDATE segments SET last_materialized_at = last_materialized_at - ($2::int * interval '1 minute') WHERE id = $1`, [segmentId, minutes]);
+}
+
+export interface MemberRow {
+  person_key: string;
+  entered_at: Date;
+  materialized_at: Date;
+}
+
+export async function memberRows(segmentId: string): Promise<MemberRow[]> {
+  return sql<MemberRow>(
+    `SELECT person_key, entered_at, materialized_at FROM segment_members WHERE segment_id = $1 ORDER BY person_key`,
+    [segmentId],
+  );
+}
+
+/** The option names of a Radix select, then closes it. */
+export async function selectOptions(trigger: Locator): Promise<string[]> {
+  await trigger.click();
+  const page = trigger.page();
+  await page.getByRole('option').first().waitFor();
+  const names = await page.getByRole('option').allInnerTexts();
+  await page.keyboard.press('Escape');
+  await page.getByRole('option').first().waitFor({ state: 'detached' });
+  return names.map((name) => name.trim());
 }
