@@ -602,7 +602,8 @@ test('ADMTEN-037 tenant names and emails on the overview render as text', async 
       await expect(card.getByRole('link', { name: tenant.email, exact: true })).toBeVisible();
       await expect(page.locator('img[src="x"]')).toHaveCount(0);
       await expect(card.locator('img')).toHaveCount(0);
-      await page.waitForTimeout(500);
+      // The name sits in the cell as one text node, so nothing in it became markup that could run.
+      expect(await card.getByText(name, { exact: true }).evaluate((el) => el.childElementCount)).toBe(0);
       expect(dialogs).toEqual([]);
     },
   );
@@ -867,7 +868,7 @@ test('ADMTEN-049 search with no match shows the filtered empty state', async ({ 
   expect(body.data).toEqual([]);
   const empty = page.getByText('No tenants match this view.', { exact: true });
   await expect(empty).toBeVisible();
-  await expect(empty.locator('xpath=..').locator('svg')).toHaveCount(1);
+  await expect(empty.locator('xpath=..').locator('svg.lucide-building2')).toHaveCount(1);
   await expect(page.getByText(/^Page \d+ of/)).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Next page' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Previous page' })).toHaveCount(0);
@@ -1129,6 +1130,6 @@ test('ADMTEN-077 tenant names render as text in the list', async ({ page, client
   }
   await expect(page.locator('script', { hasText: 'alert(1)' })).toHaveCount(0);
   await expect(page.getByRole('main').locator('a[href="http://evil"]')).toHaveCount(0);
-  await page.waitForTimeout(500);
+  expect(await page.getByRole('main').locator('tbody script').count()).toBe(0);
   expect(dialogs).toEqual([]);
 });

@@ -15,16 +15,20 @@ import { assertE2eDatabase, REPO_ROOT, stackEnv } from '../stack';
 
 // ---- Database
 
-/** A query against the lane's e2e database (the name is checked as in support/seed.ts). */
-export async function withDb<T>(work: (db: Client) => Promise<T>): Promise<T> {
+function dbClient(): Client {
   const env = stackEnv();
-  const client = new Client({
+  return new Client({
     host: env.DATABASE_HOST,
     port: Number(env.DATABASE_PORT || 5432),
     user: env.DATABASE_USER,
     password: env.DATABASE_PASSWORD,
     database: assertE2eDatabase(env),
   });
+}
+
+/** A query against the lane's e2e database (the name is checked as in support/seed.ts). */
+export async function withDb<T>(work: (db: Client) => Promise<T>): Promise<T> {
+  const client = dbClient();
   await client.connect();
   try {
     return await work(client);
@@ -294,6 +298,49 @@ export function utcDay(offsetDays = 0): string {
   return date.toISOString().slice(0, 10);
 }
 
+/**
+ * The roll-up state is one row for the whole database, and specs in other workers set it
+ * too. Whoever changes it holds this session lock (its own connection) until it has put
+ * the row back, so two tests never see each other's state. The key is not the worker's
+ * own roll-up lock, so the job specs can still run a tick meanwhile.
+ */
+async function holdRollupStateLock(): Promise<() => Promise<void>> {
+  const client = dbClient();
+  await client.connect();
+  try {
+    await client.query(`SELECT pg_advisory_lock(hashtext('e2e_usage_rollup_state'))`);
+  } catch (error) {
+    await client.end();
+    throw error;
+  }
+  return async () => {
+    try {
+      await client.query(`SELECT pg_advisory_unlock(hashtext('e2e_usage_rollup_state'))`);
+    } finally {
+      await client.end();
+    }
+  };
+}
+
+/** Runs `change` under the state lock; the restore it answers releases the lock after it. */
+async function lockedStateChange(change: () => Promise<() => Promise<void>>): Promise<() => Promise<void>> {
+  const release = await holdRollupStateLock();
+  let restore: () => Promise<void>;
+  try {
+    restore = await change();
+  } catch (error) {
+    await release();
+    throw error;
+  }
+  return async () => {
+    try {
+      await restore();
+    } finally {
+      await release();
+    }
+  };
+}
+
 interface RollupState {
   started_on: string;
   first_day: string;
@@ -306,7 +353,11 @@ interface RollupState {
  * hourly tick has no day left to close and seeded `usage_daily` rows are what the admin
  * routes read. Answers a function that puts the state back as it was.
  */
-export async function seedRollupThroughYesterday(): Promise<() => Promise<void>> {
+export function seedRollupThroughYesterday(): Promise<() => Promise<void>> {
+  return lockedStateChange(seedRollupThroughYesterdayUnlocked);
+}
+
+async function seedRollupThroughYesterdayUnlocked(): Promise<() => Promise<void>> {
   const [before] = await sql<RollupState & Record<string, unknown>>(
     `SELECT to_char(started_on, 'YYYY-MM-DD') AS started_on, to_char(first_day, 'YYYY-MM-DD') AS first_day,
             to_char(last_closed_day, 'YYYY-MM-DD') AS last_closed_day, devices_through
@@ -573,7 +624,11 @@ export interface RollupStateSeed {
  * Puts the roll-up's state row exactly as given (or removes it, for `null`), and answers
  * a function that puts back the row that was there before, every column of it.
  */
-export async function setRollupState(state: RollupStateSeed | null): Promise<() => Promise<void>> {
+export function setRollupState(state: RollupStateSeed | null): Promise<() => Promise<void>> {
+  return lockedStateChange(() => setRollupStateUnlocked(state));
+}
+
+async function setRollupStateUnlocked(state: RollupStateSeed | null): Promise<() => Promise<void>> {
   const [before] = await sql<{ started_on: string; first_day: string; last_closed_day: string; devices_through: Date | null }>(
     `SELECT to_char(started_on, 'YYYY-MM-DD') AS started_on, to_char(first_day, 'YYYY-MM-DD') AS first_day,
             to_char(last_closed_day, 'YYYY-MM-DD') AS last_closed_day, devices_through
