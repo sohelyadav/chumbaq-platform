@@ -189,6 +189,10 @@ test('AUTH-099 complete sign-up API password rules', async ({ clientIp }) => {
     expect({ password, status: answer.status }).toEqual({ password, status: 400 });
     expect(answer.body.message).toEqual(expect.arrayContaining([message]));
   }
+  // A value that is not a string after conversion (an array) is a type error.
+  const notString = await post('/api/auth/complete-signup', { token, password: ['12345678'] }, { ip: clientIp });
+  expect(notString.status).toBe(400);
+  expect(notString.body.message).toEqual(expect.arrayContaining(['password must be a string']));
   expect(await usersWithEmail(email)).toEqual([]);
 
   // None of them spent the link.
@@ -413,10 +417,38 @@ test('AUTH-126 the back button after logging out', async ({ page, clientIp }) =>
   const project = await createProject(account, clientIp, `AUTH-126 ${Date.now()}`);
   await signIn(page, account);
   await expect(page.getByText(project.name, { exact: true })).toBeVisible();
+  // Logging out turns the page's own entry into /login before loading /login, so a dashboard
+  // entry is two steps back: open a project first, so the one before it is the project list.
+  await page.getByText(project.name, { exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/projects/${project.id}`));
   await signOutFromMenu(page, account.name);
 
+  const dataAnswers: number[] = [];
+  page.on('response', (response) => {
+    if (new URL(response.url()).pathname.startsWith('/api/projects')) dataAnswers.push(response.status());
+  });
+  const first = await page.goBack();
+  expect(first && new URL(first.url()).pathname).toBe('/login');
+  await expect(page.getByRole('heading', { name: 'Login to your account' })).toBeVisible();
+
+  // Back again reaches /projects (within this document, so the app's router handles it), and
+  // the guard puts /login in its place without the list being fetched.
+  await page.evaluate(() => {
+    const seen: string[] = [];
+    (window as unknown as { e2eNavigations: string[] }).e2eNavigations = seen;
+    const navigation = (window as unknown as { navigation: EventTarget }).navigation;
+    navigation.addEventListener('navigate', (event) => {
+      const { navigationType, destination } = event as Event & { navigationType: string; destination: { url: string } };
+      seen.push(`${navigationType} ${new URL(destination.url).pathname}`);
+    });
+  });
   await page.goBack();
   await expect(page).toHaveURL(/\/login$/);
+  const [arrived, ...after] = await page.evaluate(() => (window as unknown as { e2eNavigations: string[] }).e2eNavigations);
+  expect(arrived).toBe('traverse /projects');
+  expect(after.length).toBeGreaterThan(0);
+  expect(after.filter((navigation) => navigation !== 'replace /login')).toEqual([]);
+  expect(dataAnswers.filter((status) => status === 200)).toEqual([]);
   await expect(page.getByRole('heading', { name: 'Login to your account' })).toBeVisible();
   await expect(page.getByText(project.name, { exact: true })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Your Projects' })).toHaveCount(0);
@@ -706,15 +738,17 @@ test('AUTH-172 the reset-link status says nothing for other tokens', async ({ cl
   const account = await createAccount(clientIp, 'auth172');
   const emailed = await seedAccountToken(account.userId);
   const expiredStaff = await seedAccountToken(account.userId, { staffIssued: true, usableIn: '-25 hours', expiresIn: '-1 hour' });
+  // Past its expiry while its wait has not ended, so only the expiry can make it say nothing.
+  const expiredWaiting = await seedAccountToken(account.userId, { staffIssued: true, usableIn: '2 hours', expiresIn: '-1 minute' });
   const waiting = await seedAccountToken(account.userId, { staffIssued: true, usableIn: '2 hours', expiresIn: '26 hours' });
   const path = '/api/auth/reset-password/status';
 
   const answers = [];
-  for (const token of [randomToken(), emailed, expiredStaff]) {
+  for (const token of [randomToken(), emailed, expiredStaff, expiredWaiting]) {
     const answer = await post(path, { token }, { ip: clientIp });
     answers.push([answer.status, answer.body]);
   }
-  expect(answers).toEqual(Array(3).fill([200, { usableAt: null }]));
+  expect(answers).toEqual(Array(4).fill([200, { usableAt: null }]));
   const empty = await post(path, {}, { ip: clientIp });
   expect(empty.status).toBe(400);
   // A waiting staff link is the one thing it names.
@@ -722,12 +756,12 @@ test('AUTH-172 the reset-link status says nothing for other tokens', async ({ cl
   expect(named.status).toBe(200);
   expect(named.body.usableAt).toBe((await tokenRow(waiting)).usable_after!.toISOString());
 
-  for (const token of [emailed, expiredStaff, waiting]) expect((await tokenRow(token)).used_at).toBeNull();
+  for (const token of [emailed, expiredStaff, expiredWaiting, waiting]) expect((await tokenRow(token)).used_at).toBeNull();
 
-  // Five so far from this client; five more are answered, the eleventh is throttled.
+  // Six so far from this client; four more are answered, the eleventh is throttled.
   const more = [];
-  for (let i = 0; i < 6; i++) more.push((await post(path, { token: randomToken() }, { ip: clientIp })).status);
-  expect(more).toEqual([200, 200, 200, 200, 200, 429]);
+  for (let i = 0; i < 5; i++) more.push((await post(path, { token: randomToken() }, { ip: clientIp })).status);
+  expect(more).toEqual([200, 200, 200, 200, 429]);
 });
 
 test('AUTH-173 a reset cancels a waiting staff factor reset', async ({ clientIp }) => {

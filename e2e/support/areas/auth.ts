@@ -826,31 +826,8 @@ export interface ExtraApi {
  * PASSKEYS_FOR_TENANTS=false: an install where only staff hold passkeys. On a free port
  * at the API port + 92..96 (the mock and stub take + 90 and + 91, billing's + 97, + 98).
  */
-export async function startTenantPasskeysOffApi(): Promise<ExtraApi> {
-  const ports = stackPorts();
-  const taken = new Set(Object.values(ports));
-  let port = 0;
-  for (let candidate = ports.api + 92; candidate <= ports.api + 96; candidate++) {
-    if (!taken.has(candidate) && !(await portInUse(candidate))) {
-      port = candidate;
-      break;
-    }
-  }
-  if (!port) throw new Error('No free port for the extra customer API');
-  const env = {
-    ...process.env,
-    ...appEnvironment(runSecrets(), ports),
-    PASSKEYS_FOR_TENANTS: 'false',
-    API_PORT: String(port),
-  };
-  const started = run(`api-tenant-passkeys-off-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
-  try {
-    await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
-  } catch (error) {
-    await stopAll([started]);
-    throw error;
-  }
-  return { url: `http://localhost:${port}`, stop: () => stopAll([started]) };
+export function startTenantPasskeysOffApi(): Promise<ExtraApi> {
+  return startCustomerApiWith('tenant-passkeys-off', { PASSKEYS_FOR_TENANTS: 'false' });
 }
 
 /** Sends the page's requests under `prefix` (an API path) to another API, unchanged otherwise. */
