@@ -504,3 +504,106 @@ export function csvRecords(text: string): Record<string, string>[] {
 }
 
 export { newClientIp, adminUrl };
+
+// ---- P1 helpers
+
+/**
+ * `count` audit rows for one actor, one statement (`generate_series`), created one
+ * second apart ending at `endAt` (row `n` is the newest), each with the reason
+ * `<reasonPrefix> <n>`. Answers nothing: read them back by the actor.
+ */
+export async function seedBulkAuditRows(
+  actorEmail: string,
+  count: number,
+  { endAt = new Date(), reasonPrefix = 'bulk row', action = 'tenant.suspended' }: { endAt?: Date; reasonPrefix?: string; action?: string } = {},
+): Promise<void> {
+  await sql(
+    `INSERT INTO admin_audit_logs (actor_id, actor_email, action, target_type, reason, created_at)
+     SELECT NULL, $1, $2, 'user', $3 || ' ' || n, $4::timestamptz - (($5 - n) * interval '1 second')
+     FROM generate_series(1, $5::int) AS n`,
+    [actorEmail, action, reasonPrefix, endAt.toISOString(), count],
+  );
+}
+
+/**
+ * Another admin API process on the lane's database and Redis with extra environment, on
+ * a free port of its own (a range no other ADMOPS helper uses).
+ */
+export async function startAdminApiWith(extra: Record<string, string>, label: string): Promise<{ url: string; stop(): Promise<void> }> {
+  const ports = stackPorts();
+  let port = 0;
+  for (let candidate = ports.adminApi + 70; candidate < ports.adminApi + 80; candidate++) {
+    if (!(await portInUse(candidate))) {
+      port = candidate;
+      break;
+    }
+  }
+  if (!port) throw new Error(`No free port for the ${label} admin API`);
+  const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ADMIN_API_PORT: String(port), ...extra };
+  const started: Started = run(`admin-api-${label}-${port}`, 'node', ['dist/main-admin'], {
+    cwd: path.join(REPO_ROOT, 'apps/api'),
+    env,
+  });
+  const url = `http://127.0.0.1:${port}`;
+  try {
+    await waitForUrl(started, `${url}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    throw error;
+  }
+  return { url, stop: () => stopAll([started]) };
+}
+
+/** Sends every request of a page under an admin API path prefix to another admin API. */
+export async function forwardAdminPrefix(page: Page, base: string, prefix: string): Promise<void> {
+  const origin = new URL(adminUrl('/')).origin;
+  await page.route(
+    (url) => url.origin === origin && url.pathname.startsWith(prefix),
+    async (route) => {
+      const target = new URL(route.request().url());
+      const response = await route.fetch({ url: `${base}${target.pathname}${target.search}` });
+      await route.fulfill({ response });
+    },
+  );
+}
+
+/** An `AdminHealth` body of a working stack, with `overrides` laid over it. */
+export function healthBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    status: 'ok',
+    checkedAt: new Date().toISOString(),
+    database: { ok: true, latencyMs: 3 },
+    redis: { ok: true, latencyMs: 1 },
+    platformEmail: { configured: true, from: 'no-reply@e2e.example.test' },
+    clock: { state: 'unknown', source: null, stratum: null, offsetMs: null },
+    queues: [
+      { name: 'push-campaign', waiting: 0, active: 0, delayed: 0, failed: 0 },
+      { name: 'cohort-sync', waiting: 0, active: 0, delayed: 0, failed: 0 },
+      { name: 'segment-materialize', waiting: 0, active: 0, delayed: 0, failed: 0 },
+    ],
+    ...overrides,
+  };
+}
+
+/** Answers the page's `GET /api/admin/health` with `body` (in the API's `{ data }` envelope) until replaced. */
+export async function serveHealth(page: Page, body: Record<string, unknown>): Promise<void> {
+  await page.unroute(/\/api\/admin\/health$/);
+  await page.route(/\/api\/admin\/health$/, (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: body }) }),
+  );
+}
+
+/** A link in the admin app's sidebar. */
+export function sidebarItem(page: Page, name: string): Locator {
+  return page.locator('[data-sidebar="sidebar"]').getByRole('link', { name, exact: true });
+}
+
+/** The section name in the admin app's header breadcrumb. */
+export function breadcrumbSection(page: Page): Locator {
+  return page.locator('header [data-slot="breadcrumb-page"]').first();
+}
+
+/** A card of the page, by its title. */
+export function cardTitled(page: Page, title: string): Locator {
+  return page.locator('[data-slot="card"]').filter({ has: page.locator('[data-slot="card-title"]', { hasText: new RegExp(`^${title}$`) }) });
+}
