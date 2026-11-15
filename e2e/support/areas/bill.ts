@@ -1231,3 +1231,240 @@ export async function outboxRow(providerSubscriptionId: string): Promise<{
   );
   return row;
 }
+
+// ------------------------------------------------------------------ P1: admin summary, plans and the tenant card
+
+/**
+ * Another admin API on the lane's database and secrets with some environment changed
+ * (billing off, a tax rate), on the first free port from the admin API port + 70 to + 78,
+ * so it can run beside the extra admin API that `startBillingOffAdminApi` starts.
+ */
+export async function startVariantAdminApi(label: string, changes: Record<string, string>): Promise<BillingOffApi> {
+  const { portInUse } = await import('../processes');
+  const ports = stackPorts();
+  const taken = new Set(Object.values(ports));
+  let port = 0;
+  for (let candidate = ports.adminApi + 70; candidate <= ports.adminApi + 78; candidate++) {
+    if (!taken.has(candidate) && !(await portInUse(candidate))) {
+      port = candidate;
+      break;
+    }
+  }
+  if (!port) throw new Error('No free port for a variant admin API');
+  const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ...changes, ADMIN_API_PORT: String(port) };
+  const started = run(`admin-api-${label}-${port}`, 'node', ['dist/main-admin'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
+  try {
+    await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    throw error;
+  }
+  return { url: `http://127.0.0.1:${port}`, stop: () => stopAll([started]) };
+}
+
+/** Marks an account a super admin (the flag `admin:grant` sets), for a second staff member. */
+export async function makeSuperAdmin(userId: string): Promise<void> {
+  const rows = await query(`UPDATE users SET is_super_admin = true WHERE id = $1 RETURNING id`, [userId]);
+  if (rows.length !== 1) throw new Error(`No users row ${userId}`);
+}
+
+/**
+ * Moves the staff member's sign-in 20 minutes back, past the 15 minutes a recent sign-in
+ * lasts. The next token the admin app refreshes (a page load) carries the old time.
+ */
+export async function makeStaffSignInStale(userId: string): Promise<void> {
+  await query(
+    `UPDATE staff_sessions SET authenticated_at = now() - interval '20 minutes' WHERE user_id = $1 AND revoked_at IS NULL`,
+    [userId],
+  );
+}
+
+export interface SeededPayment {
+  id: string;
+  providerId: string;
+}
+
+/**
+ * A payment row as the webhook would store one (amounts in paise, no card or contact
+ * data), for states that need a chosen time or refund: `paidAgoSeconds` back from now.
+ */
+export async function seedPayment(
+  userId: string,
+  fields: {
+    amount: number;
+    status: 'captured' | 'failed' | 'refunded';
+    refunded?: number;
+    method?: string | null;
+    failureReason?: string | null;
+    paidAgoSeconds?: number;
+    subscriptionId?: string | null;
+    taxRateBps?: number;
+  },
+): Promise<SeededPayment> {
+  const providerId = `pay_e2e${randomBytes(6).toString('hex')}`;
+  const [row] = await query<{ id: string }>(
+    `INSERT INTO billing_payments
+       (provider_payment_id, user_id, subscription_id, provider_invoice_id, amount_paise, amount_refunded_paise, tax_rate_bps,
+        currency, status, method, failure_reason, paid_at)
+     VALUES ($1, $2, $3, NULL, $4, $5, $6, 'INR', $7, $8, $9, now() - make_interval(secs => $10))
+     RETURNING id`,
+    [
+      providerId,
+      userId,
+      fields.subscriptionId ?? null,
+      fields.amount,
+      fields.refunded ?? 0,
+      fields.taxRateBps ?? 0,
+      fields.status,
+      fields.method === undefined ? 'upi' : fields.method,
+      fields.failureReason ?? null,
+      fields.paidAgoSeconds ?? 0,
+    ],
+  );
+  return { id: row.id, providerId };
+}
+
+/** An invoice row as the webhook would store one. */
+export async function seedInvoice(
+  userId: string,
+  fields: {
+    number?: string | null;
+    shortUrl?: string | null;
+    status?: string;
+    amount?: number;
+    tax?: number;
+    currency?: string;
+    issued?: boolean;
+    paid?: boolean;
+    subscriptionId?: string | null;
+  },
+): Promise<{ id: string; providerId: string }> {
+  const providerId = `inv_e2e${randomBytes(6).toString('hex')}`;
+  const [row] = await query<{ id: string }>(
+    `INSERT INTO billing_invoices
+       (provider_invoice_id, user_id, subscription_id, status, amount_paise, tax_paise, provider_tax_paise, currency,
+        period_start, period_end, issued_at, paid_at, short_url, number)
+     VALUES ($1, $2, $3, $4, $5, $6, $6, $7, now(), now() + interval '30 days',
+             CASE WHEN $8 THEN now() END, CASE WHEN $9 THEN now() END, $10, $11)
+     RETURNING id`,
+    [
+      providerId,
+      userId,
+      fields.subscriptionId ?? null,
+      fields.status ?? 'paid',
+      fields.amount ?? 49_900,
+      fields.tax ?? 0,
+      fields.currency ?? 'INR',
+      fields.issued ?? true,
+      fields.paid ?? true,
+      fields.shortUrl ?? null,
+      fields.number === undefined ? `INV-E2E-${randomBytes(2).toString('hex')}` : fields.number,
+    ],
+  );
+  return { id: row.id, providerId };
+}
+
+/**
+ * A subscription row with any status, on a chosen price, that the mock has never heard of:
+ * for history the card lists (statuses the flow takes weeks to reach, a replaced one).
+ * Never the account's current or next.
+ */
+export async function seedSubscriptionRow(
+  userId: string,
+  price: { id: string },
+  planCode: string,
+  fields: { status: string; supersededBy?: string | null; method?: string | null; cancelAtPeriodEnd?: boolean },
+): Promise<{ id: string; providerId: string }> {
+  const providerId = `sub_e2eseed${randomBytes(6).toString('hex')}`;
+  return withDb(async (db) => {
+    await db.query(`INSERT INTO billing_accounts (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [userId]);
+    const { rows } = await db.query(
+      `INSERT INTO billing_subscriptions
+         (user_id, provider_subscription_id, price_id, plan_code, interval, status, method, current_start, current_end, charge_at,
+          paid_count, was_current, superseded_by, cancel_at_period_end, last_event_at, last_event_rank, created_by)
+       VALUES ($1, $2, $3, $4, 'monthly', $5, $6, now(), now() + interval '30 days', now() + interval '30 days',
+          1, false, $7, $8, now(), 2, $1)
+       RETURNING id`,
+      [userId, providerId, price.id, planCode, fields.status, fields.method ?? null, fields.supersededBy ?? null, fields.cancelAtPeriodEnd ?? false],
+    );
+    return { id: rows[0].id as string, providerId };
+  });
+}
+
+/**
+ * Razorpay's invoice fixture for `event` (`invoice.paid` or `invoice.expired`, the API's own
+ * test copies of the documented bodies) with the run's ids, sent signed. `invoiceId`
+ * repeats an earlier invoice; `createdAt` orders it.
+ */
+export async function sendInvoiceEvent(
+  event: 'invoice.paid' | 'invoice.expired',
+  fields: {
+    subscriptionId: string;
+    customerId: string;
+    number: string;
+    amount: number;
+    invoiceId?: string;
+    shortUrl?: string | null;
+    createdAt?: number;
+  },
+): Promise<SentEvent & { invoiceId: string }> {
+  const fixture = JSON.parse(
+    JSON.stringify(require(path.join(REPO_ROOT, `apps/api/src/modules/billing/providers/__fixtures__/razorpay/${event}.json`))),
+  );
+  const invoiceId = fields.invoiceId ?? `inv_e2e${randomBytes(6).toString('hex')}`;
+  const createdAt = fields.createdAt ?? nowSeconds();
+  const paid = event === 'invoice.paid';
+  const paymentId = paid ? `pay_e2e${randomBytes(6).toString('hex')}` : null;
+  const invoice = fixture.payload.invoice.entity;
+  Object.assign(invoice, {
+    id: invoiceId,
+    subscription_id: fields.subscriptionId,
+    customer_id: fields.customerId,
+    order_id: null,
+    payment_id: paymentId,
+    invoice_number: fields.number,
+    amount: fields.amount,
+    amount_paid: paid ? fields.amount : 0,
+    amount_due: paid ? 0 : fields.amount,
+    gross_amount: fields.amount,
+    taxable_amount: fields.amount,
+    tax_amount: 0,
+    billing_start: createdAt,
+    billing_end: createdAt + 30 * DAY_SECONDS,
+    issued_at: createdAt,
+    paid_at: paid ? createdAt : null,
+    expired_at: paid ? null : createdAt,
+    short_url: fields.shortUrl ?? null,
+    status: paid ? 'paid' : 'expired',
+  });
+  if (paid) {
+    Object.assign(fixture.payload.payment.entity, {
+      id: paymentId,
+      invoice_id: invoiceId,
+      order_id: null,
+      amount: fields.amount,
+      customer_id: fields.customerId,
+      created_at: createdAt,
+    });
+    delete fixture.payload.order;
+    fixture.contains = ['payment', 'invoice'];
+  } else {
+    fixture.contains = ['invoice'];
+  }
+  fixture.created_at = createdAt;
+  const rawBody = JSON.stringify(fixture);
+  const eventId = newEventId();
+  return { ...(await postWebhook(rawBody, { eventId })), eventId, rawBody, invoiceId };
+}
+
+/** The admin app's payment time ("15 Nov 2026, 10:20"), in UTC. */
+export function gbDateTime(at: string | Date): string {
+  return new Date(at).toLocaleString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC',
+  });
+}
