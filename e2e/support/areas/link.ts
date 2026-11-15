@@ -1,5 +1,6 @@
 import { randomBytes } from 'crypto';
 import { readdirSync, readFileSync } from 'fs';
+import { request as httpRequest } from 'http';
 import path from 'path';
 import { Client } from 'pg';
 import { devices, type Browser, type BrowserContext, type Page } from '@playwright/test';
@@ -388,4 +389,182 @@ export async function routeRedirectHop(target: Page | BrowserContext): Promise<R
     }
   });
   return hops;
+}
+
+// ---- Preview, association files, deferred match, conversions (link-p0-03)
+
+/** A new API key of the project: `{ id, fullKey }`. `permissions: ['privacy']` makes a server-only privacy key. */
+export async function newApiKey(
+  account: Account,
+  projectId: string,
+  ip: string,
+  body: { name?: string; permissions?: string[] } = {},
+): Promise<{ id: string; fullKey: string }> {
+  const created = await api<{ apiKey: { id: string }; fullKey: string }>(
+    'POST',
+    `/api/projects/${projectId}/api-keys`,
+    { name: 'E2E link key', ...body },
+    { token: account.accessToken, ip },
+  );
+  return { id: created.apiKey.id, fullKey: created.fullKey };
+}
+
+export interface AppFields {
+  domain?: string | null;
+  verified?: boolean;
+  iosTeamId?: string | null;
+  iosBundleId?: string | null;
+  iosAppStoreUrl?: string | null;
+  androidPackageName?: string | null;
+  androidSha256Fingerprints?: string | null;
+}
+
+const APP_COLUMNS: Record<Exclude<keyof AppFields, 'verified'>, string> = {
+  domain: 'domain',
+  iosTeamId: 'ios_team_id',
+  iosBundleId: 'ios_bundle_id',
+  iosAppStoreUrl: 'ios_app_store_url',
+  androidPackageName: 'android_package_name',
+  androidSha256Fingerprints: 'android_sha256_fingerprints',
+};
+
+/**
+ * Sets a project's app and domain fields in SQL, as a proved domain leaves them
+ * (`verified: true` stamps `domain_verified_at`, false clears it). Proving a domain needs
+ * a DNS record, and the API refuses the platform's own hosts as a domain.
+ */
+export async function setProjectApp(projectId: string, fields: AppFields): Promise<void> {
+  const sets: string[] = [];
+  const values: unknown[] = [projectId];
+  for (const [key, column] of Object.entries(APP_COLUMNS)) {
+    const value = fields[key as keyof typeof APP_COLUMNS];
+    if (value === undefined) continue;
+    values.push(value);
+    sets.push(`${column} = $${values.length}`);
+  }
+  if (fields.verified !== undefined) sets.push(`domain_verified_at = ${fields.verified ? 'now()' : 'NULL'}`);
+  if (!sets.length) return;
+  await sql(`UPDATE projects SET ${sets.join(', ')} WHERE id = $1`, values);
+}
+
+/** A host name nobody else in the run uses, under example.test. */
+export function uniqueHost(label: string): string {
+  return `${label}-${randomBytes(3).toString('hex')}.example.test`;
+}
+
+export interface WellKnownAnswer {
+  status: number;
+  contentType: string | undefined;
+  body: unknown;
+  text: string;
+}
+
+/**
+ * `GET /.well-known/<file>` on the API with the given Host header (fetch will not send
+ * one of its own choosing), as a phone checking the domain would. Answers the status,
+ * the content type and the parsed body.
+ */
+export async function wellKnown(file: 'apple-app-site-association' | 'assetlinks.json', host: string, ip: string): Promise<WellKnownAnswer> {
+  // The stack's API listens on plain http (E2E_API_URL).
+  const url = new URL(apiUrl(`/.well-known/${file}`));
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'GET',
+        headers: { Host: host, 'X-Forwarded-For': ip },
+      },
+      (response) => {
+        let text = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => (text += chunk));
+        response.on('end', () => {
+          let body: unknown = text;
+          try {
+            body = JSON.parse(text);
+          } catch {
+            // not JSON: keep the text
+          }
+          resolve({ status: response.statusCode ?? 0, contentType: response.headers['content-type'], body, text });
+        });
+      },
+    );
+    request.on('error', reject);
+    request.end();
+  });
+}
+
+export interface ClickRow {
+  id: string;
+  matched: boolean;
+  platform: string;
+  redirect_type: string;
+  ip_address: string;
+}
+
+/** The click rows of a link, oldest first. */
+export async function clicksOf(linkId: string): Promise<ClickRow[]> {
+  return sql<ClickRow & Record<string, unknown>>(
+    'SELECT id, matched, platform, redirect_type, ip_address FROM click_events WHERE link_id = $1 ORDER BY clicked_at, id',
+    [linkId],
+  );
+}
+
+/** Opens the link once from `ip` and waits for its click row; answers that row's id. */
+export async function clickFrom(link: { id: string; shortCode: string }, ip: string, userAgent = DESKTOP_UA): Promise<string> {
+  const before = (await clicksOf(link.id)).map((row) => row.id);
+  const response = await openShortLink(link.shortCode, ip, userAgent);
+  if (response.status !== 200 && response.status !== 302) throw new Error(`Opening ${link.shortCode} answered ${response.status}`);
+  const rows = await waitUntil(() => clicksOf(link.id), (all) => all.length > before.length, `a click on ${link.shortCode}`);
+  return rows.find((row) => !before.includes(row.id))!.id;
+}
+
+/** Moves a click back in time, as if it had been made `minutes` ago. */
+export async function backdateClick(clickId: string, minutes: number): Promise<void> {
+  await sql('UPDATE click_events SET clicked_at = now() - make_interval(mins => $2) WHERE id = $1', [clickId, minutes]);
+}
+
+/** `POST /api/deferred/match` as an SDK sends it, from `ip`. */
+export async function deferredMatch(apiKey: string | undefined, ip: string, body: unknown): Promise<RawResponse> {
+  return rawApi('POST', '/api/deferred/match', body, { apiKey, ip });
+}
+
+/** The conversion rows of a link, oldest first. */
+export async function conversionRows(linkId: string): Promise<Record<string, unknown>[]> {
+  return sql(
+    'SELECT id, link_id, click_event_id, event_type, external_user_id, metadata FROM conversion_events WHERE link_id = $1 ORDER BY converted_at, id',
+    [linkId],
+  );
+}
+
+/** A whole-person objection, as the owner's dashboard action leaves it. */
+export async function seedObjection(projectId: string, externalUserId: string): Promise<void> {
+  await sql('INSERT INTO tracking_objections (project_id, external_user_id) VALUES ($1, $2)', [projectId, externalUserId]);
+}
+
+export interface BulkResult {
+  total: number;
+  created: number;
+  errors: { row: number; error: string }[];
+}
+
+/** Uploads a CSV to the bulk import route as the page does (one `file` part, text/csv). */
+export async function bulkImport(account: Account, projectId: string, ip: string, csv: string): Promise<BulkResult> {
+  const form = new FormData();
+  form.append('file', new Blob([csv], { type: 'text/csv' }), 'links.csv');
+  const response = await fetch(apiUrl(`/api/projects/${projectId}/links/bulk`), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${account.accessToken}`, 'X-Forwarded-For': ip, 'X-Chumbaq-Client': 'web' },
+    body: form,
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`Bulk import answered ${response.status}: ${text.slice(0, 300)}`);
+  return (JSON.parse(text) as { data: BulkResult }).data;
+}
+
+/** The project's links as stored, by destination. */
+export async function storedLinks(projectId: string): Promise<{ id: string; short_code: string; long_url: string; ios_url: string | null }[]> {
+  return sql('SELECT id, short_code, long_url, ios_url FROM links WHERE project_id = $1 ORDER BY long_url', [projectId]);
 }
