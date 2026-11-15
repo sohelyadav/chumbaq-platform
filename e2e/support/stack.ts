@@ -175,6 +175,8 @@ export interface RunSecrets {
   credentialsKey: string;
   /** MFA_ENCRYPTION_KEY (32 bytes of base64): encrypts TOTP secrets, keys recovery codes. */
   mfaKey: string;
+  /** MIXPANEL_ENCRYPTION_KEY (at least 32 characters): encrypts stored Mixpanel credentials. */
+  mixpanelKey: string;
   razorpayKeyId: string;
   razorpayKeySecret: string;
   razorpayWebhookSecret: string;
@@ -186,6 +188,8 @@ export function newRunSecrets(): RunSecrets {
     jwtRefreshSecret: randomBytes(32).toString('hex'),
     credentialsKey: randomBytes(32).toString('hex'),
     mfaKey: randomBytes(32).toString('base64'),
+    // The API uses the first 32 characters as the key, so 32 hex characters is 32 bytes.
+    mixpanelKey: randomBytes(16).toString('hex'),
     // Obviously fake: Razorpay's key shape, a test-mode prefix and a mock-only body.
     razorpayKeyId: 'rzp_test_E2eMockOnly000',
     razorpayKeySecret: `e2e-fake-${randomBytes(8).toString('hex')}`,
@@ -198,6 +202,7 @@ const SECRET_VARS: Record<keyof RunSecrets, string> = {
   jwtRefreshSecret: 'E2E_JWT_REFRESH_SECRET',
   credentialsKey: 'E2E_CREDENTIALS_ENCRYPTION_KEY',
   mfaKey: 'E2E_MFA_ENCRYPTION_KEY',
+  mixpanelKey: 'E2E_MIXPANEL_ENCRYPTION_KEY',
   razorpayKeyId: 'E2E_RAZORPAY_KEY_ID',
   razorpayKeySecret: 'E2E_RAZORPAY_KEY_SECRET',
   razorpayWebhookSecret: 'E2E_RAZORPAY_WEBHOOK_SECRET',
@@ -237,6 +242,8 @@ export function appEnvironment(secrets: RunSecrets, ports: StackPorts): Record<s
     // tenants, so the customer app's factor screens exist whatever the .env says.
     MFA_ENCRYPTION_KEY: secrets.mfaKey,
     PASSKEYS_FOR_TENANTS: 'true',
+    // Mixpanel credentials can be stored (configure needs the key), whatever the .env says.
+    MIXPANEL_ENCRYPTION_KEY: secrets.mixpanelKey,
     // Billing on, against the local mock only. Fake keys; the mock checks the pair.
     BILLING_ENABLED: 'true',
     RAZORPAY_KEY_ID: secrets.razorpayKeyId,

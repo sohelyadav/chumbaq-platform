@@ -32,9 +32,7 @@ import {
   identifyDevice,
   identityKeyVersion,
   literalHookUrl,
-  MIXPANEL_KEY_NEEDED,
   messageOf,
-  mixpanelKeyAvailable,
   newPerson,
   openViewAs,
   ownerWithProject,
@@ -1007,7 +1005,6 @@ test('INTEG-069 a patch cannot move a webhook or set its secret', async () => {
 // ------------------------------------------------------------------ Mixpanel
 
 test('INTEG-084 connect Mixpanel', async ({ page }) => {
-  test.skip(!mixpanelKeyAvailable(), MIXPANEL_KEY_NEEDED);
   const p = await ownerWithProject();
   await signIn(page, p.owner);
   await page.goto(`/projects/${p.project.id}/mixpanel`);
@@ -1348,7 +1345,6 @@ test('INTEG-127 show an in-app message to a cohort', async ({ page }) => {
 });
 
 test('INTEG-130 Mixpanel routes by role', async ({ browser, baseURL }) => {
-  test.skip(!mixpanelKeyAvailable(), MIXPANEL_KEY_NEEDED);
   const p = await sdkProject(await ownerWithProject());
   // A Mixpanel project id of this test's own, so the stub's cohort list answer reaches no one else.
   const mixpanelProjectId = String(randomInt(10_000_000, 99_999_999));

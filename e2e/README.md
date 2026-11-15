@@ -107,8 +107,8 @@ stack of its own:
    `NODE_ENV=test`, then the admin API, the worker and both Vite dev servers, waiting
    for each to answer. Everything is stopped when the run ends.
 
-On top of the `.env`, the apps get per-run values: fresh JWT secrets and credentials
-key, account email switched on against the provider stub (a fake `PLATFORM_BREVO_API_KEY`
+On top of the `.env`, the apps get per-run values: fresh JWT secrets, credentials key,
+`MFA_ENCRYPTION_KEY` and `MIXPANEL_ENCRYPTION_KEY`, account email switched on against the provider stub (a fake `PLATFORM_BREVO_API_KEY`
 and every provider's `*_API_BASE_URL` pointed at the stub, so nothing leaves the machine),
 and billing switched on with obviously fake Razorpay keys, `BILLING_TAX_RATE_BPS=0` and
 `RAZORPAY_API_BASE_URL` pointing at the mock. The API refuses `RAZORPAY_API_BASE_URL`
@@ -199,7 +199,8 @@ case is written, with a comment saying so.
 **Slow tests.** Some cases wait for real timers: the in-memory route throttles (about
 61 s each, in `auth` and `admauth`), the worker's once-a-minute scheduler and outbox
 (`bill`, `push`, `seg`, `smswa`, `email`), and fresh authenticator-app steps (up to 30 s).
-They are marked `test.slow()` or set their own timeout.
+They are marked `test.slow()` or set their own timeout. A new case that only needs a
+worker job to have run can call `runJobNow` instead (see "Worker jobs on demand").
 
 **Extra processes.** A few specs start a second API process on the lane's database for
 one config variant, on a port derived from the lane's ports, and stop it when the
@@ -254,6 +255,33 @@ the text with BOM and CR made visible), `decodeQr` / `decodeQrOnPage` (jsqr), `m
 (iPhone or Pixel), `fixedLocaleContext` (default en-IN, Asia/Kolkata), `allowClipboard` and
 `readClipboard`. `tests/_helpers/factors.spec.ts` shows each in use.
 
+### Worker jobs on demand
+
+`support/jobs.ts`: `runJobNow(name)` runs one of the worker's periodic jobs now, the way
+its cron does, and answers `{ result, output }`. The jobs are in-process crons
+(`@nestjs/schedule`), not queued jobs, so nothing in Redis can start one early; instead a
+short-lived process (`support/run-job.cjs`, from `apps/api` with the stack's environment)
+builds the built worker's module through Nest's testing module with the schedule explorer
+and the BullMQ registrar replaced, so it mounts no cron and consumes no queue, calls the
+scheduler method the cron calls, and exits. It refuses to run if any cron was mounted.
+The stack's worker keeps its own schedule, which these jobs already tolerate (claims,
+advisory locks, conditional updates). Names (`WORKER_JOBS`): `billing-reconcile`,
+`billing-outbox`, `mau-notices`, `usage-rollup`, `factor-reset-sweep`,
+`incident-reminders`, `segment-refresh` and `journey-tick`.
+
+- Each cron method catches and logs its own failures, so a run whose output has a Nest
+  `ERROR` line throws; pass `{ allowErrors: true }` to read the output instead.
+- `segment-refresh` only enqueues; the stack's worker materialises, so poll
+  `last_materialized_at` afterwards. Jobs keyed on time (the usage roll-up's days,
+  factor-reset waits, incident ages, journey waits) are moved by ageing rows in SQL.
+- The once-a-minute jobs (`billing-outbox`, `incident-reminders`, `journey-tick`) also run
+  on the stack's own worker, so a case cannot tell whose run did the work; assert the
+  outcome, not who produced it.
+- It runs the built API (`apps/api/dist`): rebuild (run without `E2E_SKIP_BUILD`) after
+  changing worker code.
+
+`tests/_helpers/jobs.spec.ts` shows it in use.
+
 ## Known gaps
 
 - **P1 and P2 cases are not automated yet.** The area folders hold the P0 cases only.
@@ -271,14 +299,11 @@ the text with BOM and CR made visible), `decodeQr` / `decodeQrOnPage` (jsqr), `m
 - **Real providers and devices.** Real FCM delivery to a device, real Twilio, Meta,
   Gupshup, Interakt and Mixpanel accounts, and real phones and apps for deep links are
   manual.
-- **Mixpanel credentials need a key the harness does not set.** Without
-  `MIXPANEL_ENCRYPTION_KEY` in the runner's environment the two cases that store real
-  Mixpanel credentials skip themselves; with it set they pass.
 - **Outbound webhooks and DNS.** Webhook deliveries need a public receiver, and domain
   proof needs a real TXT record, so both are manual beyond the address checks and
   refusals.
-- **Failure injection.** Redis or Postgres going away, a database failure inside a
-  webhook, and triggering the billing reconcile job on demand are not covered.
+- **Failure injection.** Redis or Postgres going away and a database failure inside a
+  webhook are not covered.
 - **Billing stops at the mock.** The real Razorpay Checkout (its script, frames and
   content security policy) is replaced in the browser.
 - **Deployment checks.** Production config refusals, nginx and the server scripts are

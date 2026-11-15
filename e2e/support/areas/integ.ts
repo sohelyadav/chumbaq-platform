@@ -205,29 +205,11 @@ export function webhookCard(page: Page, text: string): Locator {
 export const MIXPANEL_ACCOUNT = { username: 'svc.e2e@mixpanel.com', password: 's3cret-pass', projectId: '123456' };
 
 /**
- * Whether the stack can store Mixpanel credentials: the API encrypts them with
- * MIXPANEL_ENCRYPTION_KEY (32 characters or more), which the harness does not set, so
- * it comes from the runner's environment or the .env. Without it, configure answers 500.
- */
-export function mixpanelKeyAvailable(): boolean {
-  const key = process.env.MIXPANEL_ENCRYPTION_KEY ?? stackEnv().MIXPANEL_ENCRYPTION_KEY;
-  return typeof key === 'string' && key.length >= 32;
-}
-
-export const MIXPANEL_KEY_NEEDED = 'Needs MIXPANEL_ENCRYPTION_KEY in the stack environment';
-
-/**
- * Mixpanel connected for a case about what comes after: through the real configure route
- * when the stack can store credentials, otherwise as a stored row (status, cohorts and
- * view-as refusals never decrypt it).
+ * Mixpanel connected for a case about what comes after, through the real configure route
+ * (the stack sets a per-run MIXPANEL_ENCRYPTION_KEY, so credentials can be stored).
  */
 export async function connectMixpanel(person: Pick<Person, 'accessToken' | 'ip'>, projectId: string): Promise<void> {
-  if (mixpanelKeyAvailable()) return configureMixpanel(person, projectId);
-  await sql(
-    `INSERT INTO mixpanel_configs ("projectId", "serviceAccountUsername", "serviceAccountPasswordEncrypted", "encryptionIv", "encryptionTag", "mixpanelProjectId", "isActive")
-     VALUES ($1, $2, $3, $4, $5, $6, true)`,
-    [projectId, MIXPANEL_ACCOUNT.username, randomBytes(16).toString('hex'), randomBytes(16).toString('hex'), randomBytes(16).toString('hex'), MIXPANEL_ACCOUNT.projectId],
-  );
+  return configureMixpanel(person, projectId);
 }
 
 /** Connects Mixpanel through the real configure route, as an owner or admin. */
