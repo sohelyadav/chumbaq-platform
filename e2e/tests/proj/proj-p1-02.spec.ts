@@ -354,6 +354,7 @@ test('PROJ-078 settings form validation', async ({ page, clientIp }) => {
     await expect(settingsInput(page, label), label).toBeFocused();
     await expect(errors, label).toHaveCount(0);
     await expect(page.getByText('Invalid url'), label).toHaveCount(0);
+    await expect(page.getByRole('status'), label).toHaveCount(0);
     await settingsInput(page, label).fill('');
   }
   expect(patches.count()).toBe(0);
@@ -379,6 +380,8 @@ test('PROJ-079 server refusals on save show a generic toast', async ({ page, cli
     ['Project Name', 'n'.repeat(256), name, 'name must be shorter than or equal to 255 characters'],
   ];
   for (const [label, value, restore, message] of cases) {
+    // The previous case's toast is gone, so the one asserted below is this case's.
+    await expect(toastWith(page, 'Failed to update project'), label).toHaveCount(0);
     await settingsInput(page, label).fill(value);
     const response = await saveSettings(page, project.id);
     expect(response.status(), label).toBe(400);
@@ -728,6 +731,8 @@ test('PROJ-119 domains saved from the UI as a URL, with a port or with a leading
   let previousToken = (await projectRow(project.id))!.domain_verification_token!;
   let rows = 0;
   for (const domain of ['https://links.example.test/app', 'links.example.test:8443', ' links.example.test']) {
+    // The previous round's toasts are gone, so the ones asserted below are this round's.
+    await expect(page.getByRole('status'), domain).toHaveCount(0);
     await settingsInput(page, 'Domain').fill(domain);
     const saved = await saveSettings(page, project.id);
     expect(saved.status(), domain).toBe(200);
