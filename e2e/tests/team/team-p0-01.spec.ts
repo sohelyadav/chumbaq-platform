@@ -74,6 +74,14 @@ function watchStatuses(page: Page, method: string, urlEnd: string): number[] {
   return statuses;
 }
 
+/** The `message` of the first response answering 403 to `method` on a URL ending in `urlEnd`. */
+async function refusalMessage(page: Page, method: string, urlEnd: string): Promise<unknown> {
+  const response = await page.waitForResponse(
+    (r) => r.request().method() === method && new URL(r.url()).pathname.endsWith(urlEnd) && r.status() === 403,
+  );
+  return (await response.json()).message;
+}
+
 // ---- A. Members list
 
 test('TEAM-001 owner opens the Members page', async ({ page }) => {
@@ -359,7 +367,9 @@ test('TEAM-013 demoting another owner needs a recent sign-in', async ({ page }) 
   await signInStale(page, owner);
   await openMembers(page, project.id);
   const statuses = watchStatuses(page, 'PATCH', `/members/${coOwner.userId}`);
+  const refused = refusalMessage(page, 'PATCH', `/members/${coOwner.userId}`);
   await chooseRole(page, coOwner.email, 'Admin');
+  expect(await refused).toBe(REAUTH_REQUIRED);
   await expect(page.getByRole('dialog', { name: 'Confirm it is you' })).toBeVisible();
   await confirmWithPassword(page, owner.password);
   await expect(toastTitled(page, 'Role changed')).toContainText('Cara Coowner is now admin.');
@@ -637,7 +647,9 @@ test('TEAM-029 removing an owner needs a recent sign-in', async ({ page }) => {
 
   // Cancelling the prompt: nothing happens, and nothing is said.
   await page.getByRole('button', { name: 'Remove Cara Coowner' }).click();
+  const refused = refusalMessage(page, 'DELETE', `/members/${coOwner.userId}`);
   await dialog.getByRole('button', { name: 'Remove', exact: true }).click();
+  expect(await refused).toBe(REAUTH_REQUIRED);
   await expect(reauth).toBeVisible();
   await reauth.getByRole('button', { name: 'Cancel' }).click();
   await expect(reauth).toBeHidden();
@@ -734,7 +746,7 @@ test('TEAM-037 removing a member frees a seat and brings the invite form back', 
 
 // ---- D. Leave a project
 
-test('TEAM-038 member leaves a project', async ({ page }) => {
+test('TEAM-038 member leaves a project', async ({ page, browser, baseURL }) => {
   const { owner, project, people } = await makeTeam('Omar Owner', { member: ['member', 'Mia Member'] }, 'Team project');
   const { member } = people;
 
@@ -771,6 +783,10 @@ test('TEAM-038 member leaves a project', async ({ page }) => {
   expect((await projectsOf(member)).map((p) => p.id)).not.toContain(project.id);
   const entry = (await teamActivity(project.id, owner)).find((e) => e.action === 'member.left');
   expect(entry).toMatchObject({ actorUserId: member.userId, targetId: member.userId, targetLabel: personLabel(member) });
+  const ownerPage = await personPage(browser, baseURL, owner);
+  await ownerPage.goto(`/projects/${project.id}/activity`);
+  await expect(ownerPage.getByText('Mia Member left the project', { exact: true })).toBeVisible();
+  await ownerPage.context().close();
 });
 
 test('TEAM-039 billing owner cannot leave', async ({ page }) => {
@@ -803,7 +819,9 @@ test('TEAM-040 a co-owner leaving needs a recent sign-in', async ({ page }) => {
 
   // Cancelling the prompt: the dialog closes, nothing is said, and they stay.
   await card.getByRole('button', { name: 'Leave project' }).click();
+  const refused = refusalMessage(page, 'POST', `/api/projects/${project.id}/leave`);
   await dialog.getByRole('button', { name: 'Leave project' }).click();
+  expect(await refused).toBe(REAUTH_REQUIRED);
   await expect(reauth).toBeVisible();
   await reauth.getByRole('button', { name: 'Cancel' }).click();
   await expect(reauth).toBeHidden();
