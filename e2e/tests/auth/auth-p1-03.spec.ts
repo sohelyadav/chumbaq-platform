@@ -47,6 +47,7 @@ import {
   suspendAccount,
   toastTitled,
   totpLastUsedStep,
+  trapAlarmKeys,
   unusedRecoveryCodes,
   viewAsToken,
   waitForAuthEvent,
@@ -357,9 +358,11 @@ test('AUTH-212 /auth/me refusals', async ({ page, clientIp }) => {
 
   // (a) No bearer.
   expect((await me()).status).toBe(401);
-  // (b) Expired.
+  // (b) Expired; the same token re-signed with a future expiry still works.
   const expired = resignedAccessToken(account.accessToken, { exp: Math.floor(Date.now() / 1000) - 60 });
   expect((await me(expired)).status).toBe(401);
+  const unexpired = resignedAccessToken(account.accessToken, { exp: Math.floor(Date.now() / 1000) + 600 });
+  expect((await me(unexpired)).status).toBe(200);
   // (c) After signing out everywhere.
   const other = await createAccount(clientIp, 'auth212-all', 'All Out');
   expect((await post('/api/auth/logout-all', undefined, { ip: newClientIp(), token: other.accessToken })).status).toBe(204);
@@ -386,7 +389,7 @@ function withoutTimestamp(text: string): Record<string, unknown> {
 
 test('AUTH-215 trap addresses answer like any other address', async ({ clientIp }) => {
   const trap = uniqueEmail('auth215-trap');
-  await seedTrapAddress(trap, `E2E AUTH-215 ${randomBytes(3).toString('hex')}`);
+  const trapId = await seedTrapAddress(trap, `E2E AUTH-215 ${randomBytes(3).toString('hex')}`);
   const taken = await createAccount(clientIp, 'auth215-taken', 'Ta Ken');
   const unknown = uniqueEmail('auth215-nobody');
   const wrong = 'not-the-password-1';
@@ -416,6 +419,10 @@ test('AUTH-215 trap addresses answer like any other address', async ({ clientIp 
   await waitForMail(unknown, { subjectIncludes: 'Finish creating your Chumbaq account' });
   await waitForMail(taken.email, { subjectIncludes: 'already' });
   expect(await mailsTo(trap)).toEqual([]);
+  // The address really is a trap: each of the three touches raised its alarm.
+  await expect
+    .poll(() => trapAlarmKeys(trapId), { timeout: 15_000 })
+    .toEqual([`${trapId}:password_reset`, `${trapId}:sign_in`, `${trapId}:sign_up`]);
 });
 
 test('AUTH-217 a mistyped address on the first submit is stopped by the browser, not zod', async ({ page }) => {
@@ -522,7 +529,18 @@ test('AUTH-225 the recovery-code link disappears once every code is used', async
   const passkeyContext = await browser.newContext({ baseURL, ignoreHTTPSErrors: true, extraHTTPHeaders: { 'X-Forwarded-For': newClientIp() } });
   const passkeyPage = await passkeyContext.newPage();
   const { account: keyed } = await passkeyTenant(passkeyPage, clientIp, 'auth225-key');
+  const keyedToken = await pageBearer(passkeyPage);
+  const keyedFactorsBefore = await call('GET', '/api/auth/factors', undefined, { ip: newClientIp(), token: keyedToken });
+  expect(keyedFactorsBefore.body).toMatchObject({ recoveryCodesRemaining: 10, methods: ['webauthn', 'recovery_code'] });
   await markAllRecoveryCodesUsed(keyed.userId);
+  const keyedFactors = await call('GET', '/api/auth/factors', undefined, { ip: newClientIp(), token: keyedToken });
+  expect(keyedFactors.body).toMatchObject({ recoveryCodesRemaining: 0, methods: ['webauthn'] });
+  await withStaffLink(passkeyPage, keyed, { stale: true });
+  await bannerCancel(passkeyPage).click();
+  const keyedDialog = reauthDialog(passkeyPage);
+  await expect(keyedDialog.getByRole('button', { name: 'Use passkey' })).toBeVisible();
+  await expect(keyedDialog.getByRole('button', { name: LOST_DEVICE })).toHaveCount(0);
+  await keyedDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await signOutFromMenu(passkeyPage, keyed.name);
   const keyedStep = await passwordStep(keyed, newClientIp());
   expect(keyedStep.body.methods).toEqual(['webauthn']);
@@ -611,9 +629,9 @@ test('AUTH-228 an authenticator secret that cannot be decrypted answers 503, on 
       answers.push((await post('/api/auth/login/totp', { handle, code: totpCode(totp.secret, 0) }, { ip: newClientIp() })).status);
     }
     expect(answers).toEqual(Array(10).fill(503));
-    // Only what follows is expected to fail: an outage should not count against the person.
-    knownDefect('AUTH-228');
     const eleventh = await post('/api/auth/login/totp', { handle, code: totpCode(totp.secret, 0) }, { ip: newClientIp() });
+    expect([[503, NOT_AVAILABLE], [429, LIMITED]]).toContainEqual([eleventh.status, eleventh.body.message]);
+    knownDefect('AUTH-228');
     expect([eleventh.status, eleventh.body.message]).toEqual([503, NOT_AVAILABLE]);
   } finally {
     await restore();
@@ -681,7 +699,7 @@ test('AUTH-232 suspension or a 503 at the second step stays on the step', async 
   }
 });
 
-test('AUTH-233 successful password re-authentications use up the per-network sign-in allowance', async ({ clientIp }) => {
+test('AUTH-233 successful password re-authentications leave the per-network sign-in allowance alone', async ({ clientIp }) => {
   test.setTimeout(5 * 60_000);
   const account = await createAccount(clientIp, 'auth233', 'Ree Auth');
   const reauth = () => post('/api/auth/reauth', { password: account.password }, { ip: clientIp, token: account.accessToken });
@@ -694,9 +712,9 @@ test('AUTH-233 successful password re-authentications use up the per-network sig
     }
     expect(answers).toEqual(Array(10).fill(200));
     await sleep(61_000);
-    // Only what follows is expected to fail: right passwords are no wrong guesses.
-    knownDefect('AUTH-233');
     const eleventh = await reauth();
+    expect([[200, undefined], [429, LIMITED]]).toContainEqual([eleventh.status, eleventh.body.message]);
+    knownDefect('AUTH-233');
     expect([eleventh.status, eleventh.body.message]).toEqual([200, undefined]);
     expect((await passwordStep(account, clientIp)).status).toBe(200);
   } finally {
@@ -704,7 +722,7 @@ test('AUTH-233 successful password re-authentications use up the per-network sig
   }
 });
 
-test("AUTH-234 successful authenticator re-authentications use up the account's second-factor allowance", async ({ clientIp }) => {
+test("AUTH-234 successful authenticator re-authentications leave the account's second-factor allowance alone", async ({ clientIp }) => {
   const account = await createAccount(clientIp, 'auth234', 'Tee Reauth');
   const { secret, accessToken } = await enrolTotp({ ip: clientIp }, account);
   const reauth = async () => {
@@ -715,9 +733,10 @@ test("AUTH-234 successful authenticator re-authentications use up the account's 
     const answers: number[] = [];
     for (let i = 0; i < 10; i++) answers.push((await reauth()).status);
     expect(answers).toEqual(Array(10).fill(200));
-    // Only what follows is expected to fail: right codes are no wrong guesses.
+    const eleventh = await reauth();
+    expect([[200, undefined], [429, LIMITED]]).toContainEqual([eleventh.status, eleventh.body.message]);
     knownDefect('AUTH-234');
-    expect((await reauth()).status).toBe(200);
+    expect(eleventh.status).toBe(200);
     const handle = await handleFor(account, newClientIp());
     await resetTotpStep(account.userId);
     const signIn = await post('/api/auth/login/totp', { handle, code: totpCode(secret, 0) }, { ip: newClientIp() });
@@ -815,7 +834,9 @@ test('AUTH-241 a refresh that succeeds while /auth/me fails keeps the session on
     await page.context().clearCookies();
     await page.evaluate(() => localStorage.clear());
   }
-  // Only what follows is expected to fail: a passing error should not end the session here.
+  const intended = (variant: string) => ({ variant, note: '1', refreshes: 1, url: '/projects' });
+  const today = (variant: string) => ({ variant, note: null, refreshes: 0, url: '/login' });
+  for (const seen of observed) expect([intended(seen.variant), today(seen.variant)]).toContainEqual(seen);
   knownDefect('AUTH-241');
   expect(observed).toEqual([
     { variant: '500', note: '1', refreshes: 1, url: '/projects' },
@@ -1098,7 +1119,10 @@ test('AUTH-254 the exact key set of GET /api/auth/me', async ({ page, clientIp }
 
 test('AUTH-264 ?next= wins over a pending invite and a pending verification', async ({ page, clientIp, baseURL }) => {
   const account = await createAccount(clientIp, 'auth264', 'Nex Twins');
+  // Seeded once per tab, so what is read back later is what the app left there.
   await page.addInitScript(() => {
+    if (sessionStorage.getItem('e2e_seeded')) return;
+    sessionStorage.setItem('e2e_seeded', '1');
     sessionStorage.setItem('chumbaq_pending_invite', 'A'.repeat(43));
     sessionStorage.setItem('chumbaq_pending_verification', 'some-verification-token');
   });
@@ -1107,10 +1131,15 @@ test('AUTH-264 ?next= wins over a pending invite and a pending verification', as
   await expect(page).toHaveURL(`${baseURL}${CANCEL_PAGE}`);
   await expect(page.getByText('No support link is waiting', { exact: true })).toBeVisible();
   // Both were still pending: next won, not an empty store.
-  expect(await page.evaluate(() => [sessionStorage.getItem('chumbaq_pending_invite'), sessionStorage.getItem('chumbaq_pending_verification')])).toEqual([
-    'A'.repeat(43),
-    'some-verification-token',
-  ]);
+  const pending = () => page.evaluate(() => [sessionStorage.getItem('chumbaq_pending_invite'), sessionStorage.getItem('chumbaq_pending_verification')]);
+  expect(await pending()).toEqual(['A'.repeat(43), 'some-verification-token']);
+
+  // Control: the same tab without next goes to the invite.
+  await page.goto('/projects');
+  await signOutFromMenu(page, account.name);
+  expect(await pending()).toEqual(['A'.repeat(43), 'some-verification-token']);
+  await submitLogin(page, account.email, account.password);
+  await expect(page).toHaveURL(`${baseURL}/invite`);
 });
 
 test('AUTH-265 ?next= is honoured after every way of finishing sign-in', async ({ page, clientIp, baseURL }) => {

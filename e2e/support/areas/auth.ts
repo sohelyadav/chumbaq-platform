@@ -1026,9 +1026,22 @@ export async function markAllRecoveryCodesUsed(userId: string): Promise<void> {
   await sql('UPDATE recovery_codes SET used_at = now() WHERE user_id = $1', [userId]);
 }
 
-/** A trap address, stored as the admin app's tripwire form stores one (only its sha256). */
-export async function seedTrapAddress(email: string, label: string): Promise<void> {
-  await sql(`INSERT INTO security_tripwires (kind, value_hash, label) VALUES ('account', $1, $2)`, [sha256Hex(email.trim().toLowerCase()), label]);
+/** A trap address, stored as the admin app's tripwire form stores one (only its sha256). Answers its id. */
+export async function seedTrapAddress(email: string, label: string): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO security_tripwires (kind, value_hash, label) VALUES ('account', $1, $2) RETURNING id`,
+    [sha256Hex(email.trim().toLowerCase()), label],
+  );
+  return row.id;
+}
+
+/** The alarm keys (`<trap id>:<action>`) raised so far for a trap address. */
+export async function trapAlarmKeys(trapId: string): Promise<string[]> {
+  const rows = await sql<{ dedupe_key: string }>(
+    `SELECT dedupe_key FROM security_alerts WHERE kind = 'tripwire.account' AND dedupe_key LIKE $1 ORDER BY dedupe_key`,
+    [`${trapId}:%`],
+  );
+  return rows.map((row) => row.dedupe_key);
 }
 
 /**
