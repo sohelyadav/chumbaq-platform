@@ -22,6 +22,7 @@ import {
   redisDel,
   redisExists,
   runApiCli,
+  seedCustomerPasskeyRow,
   signInStaffInPage,
   sql,
   staffApi,
@@ -270,16 +271,29 @@ test('ADMAUTH-016 login request validation errors', async ({ clientIp }) => {
     ['extra key', { email: staff.email, password: staff.password, remember: true }, 'property remember should not exist'],
     ['long code', { email: staff.email, password: staff.password, enrolmentCode: 'c'.repeat(201) }, 'enrolmentCode must be shorter than or equal to 200 characters'],
   ];
+  const refusedFrom: string[] = [];
   for (const [label, body, message] of cases) {
-    const answer = await login(body);
+    const ip = newClientIp();
+    refusedFrom.push(ip);
+    const answer = await staffApi('POST', '/api/staff/auth/login', body, { ip });
     expect(answer.status, label).toBe(400);
     expect(messagesOf(answer), label).toContain(message);
   }
-  const empty = await staffApi('POST', '/api/staff/auth/login', undefined, { ip: newClientIp() });
+  const emptyIp = newClientIp();
+  refusedFrom.push(emptyIp);
+  const empty = await staffApi('POST', '/api/staff/auth/login', undefined, { ip: emptyIp });
   expect(empty.status).toBe(400);
   expect(messagesOf(empty)).toEqual(expect.arrayContaining(['Please provide a valid email address', 'Password is required']));
 
-  // A 400 never reaches the password check. The right request after them is the only one recorded.
+  // A 400 never reaches the password check: nothing recorded from any of those addresses.
+  for (const ip of refusedFrom) expect(await authEventsFromIp(ip, since), ip).toEqual([]);
+  expect(
+    await sql(`SELECT id FROM admin_audit_logs WHERE action = 'staff.sign_in_failed' AND created_at >= $1 AND ip_address = ANY($2)`, [
+      since,
+      refusedFrom,
+    ]),
+  ).toEqual([]);
+  // The right request after them is the only one recorded for the address.
   const accepted = await login({ email: staff.email, password: staff.password });
   expect(accepted.status).toBe(200);
   expect((await authEvents({ email: staff.email }, since)).map((row) => [row.type, row.reason])).toEqual([
@@ -484,6 +498,7 @@ test('ADMAUTH-049 new-device alarm on staff sign-in', async ({ page, browser, ba
   // 3. A brand-new staff member's first sign-in, from the browser they enrolled in, raises nothing.
   const other = await newPersonContext(browser, baseURL);
   const fresh = await makeStaff(newClientIp(), 'fresh-staff');
+  const blank = await makeStaff(newClientIp(), 'blank-staff');
   try {
     const pageB = await other.context.newPage();
     await enrolStaffPasskey(pageB, fresh);
@@ -492,6 +507,18 @@ test('ADMAUTH-049 new-device alarm on staff sign-in', async ({ page, browser, ba
     await staffPasskeySignInAs(pageB, WINDOWS_FIREFOX);
     await expect.poll(async () => (await newDeviceAlerts(fresh.userId)).length).toBe(1);
     expect((await newDeviceAlerts(fresh.userId))[0].details.device).toMatch(/Firefox/);
+
+    // With no earlier staff session at all (the enrolment one pruned) and no earlier
+    // sign-in, a first sign-in from a browser never seen raises nothing either.
+    const pageC = await other.context.newPage();
+    await enrolStaffPasskey(pageC, blank);
+    await sql(`DELETE FROM staff_sessions WHERE user_id = $1`, [blank.userId]);
+    const first = await staffPasskeySignInAs(pageC, WINDOWS_FIREFOX);
+    expect(first.accessToken).toBeTruthy();
+    // The next one, from another device, is compared with that first session and raises.
+    await staffPasskeySignInAs(pageC, MAC_SAFARI);
+    await expect.poll(async () => (await newDeviceAlerts(blank.userId)).length).toBe(1);
+    expect((await newDeviceAlerts(blank.userId)).map((row) => row.details.device)).toEqual([expect.stringMatching(/Safari/)]);
   } finally {
     await other.context.close();
   }
@@ -543,11 +570,7 @@ test('ADMAUTH-053 CLI output and refusals for the enrolment code', async ({ clie
 test('ADMAUTH-059 two sign-ins racing on one code', async ({ clientIp }) => {
   const staff = await makeStaff(clientIp);
   // Any passkey on the account makes the code necessary.
-  await sql(
-    `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, transports, device_type, backed_up, name, scope)
-     VALUES ($1, $2, $3, 0, '[]', 'singleDevice', false, 'Customer key', 'customer')`,
-    [staff.userId, `e2e-placeholder-${staff.userId}`, Buffer.from('not-a-key')],
-  );
+  await seedCustomerPasskeyRow(staff.userId);
   const issued = await issueEnrolmentCode(staff.userId);
   const since = new Date();
 
