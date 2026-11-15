@@ -289,7 +289,7 @@ test('SEG-034 property filter values stay text except for ordered numbers', asyn
   await page.getByPlaceholder('property name').fill('amount');
   await choose(page.getByRole('combobox').filter({ hasText: /^is$/ }), 'is greater than');
 
-  const ordered = previewResponse(page, (d) => d.children[0].where?.[0]?.value !== undefined);
+  const ordered = previewResponse(page, (d) => String(d.children[0].where?.[0]?.value) === '100');
   await page.getByPlaceholder('value', { exact: true }).fill('100');
   const orderedResponse = await ordered;
   expect(orderedResponse.request().postDataJSON().definition.children[0].where).toEqual([
@@ -299,7 +299,7 @@ test('SEG-034 property filter values stay text except for ordered numbers', asyn
   expect(await orderedResponse.json()).toEqual({ data: { count: 1 } });
   await expect(countFigure(page)).toHaveText('1');
 
-  const equal = previewResponse(page, (d) => d.children[0].where?.[0]?.op === 'eq');
+  const equal = previewResponse(page, (d) => d.children[0].where?.[0]?.op === 'eq' && String(d.children[0].where[0].value) === '150');
   await choose(page.getByRole('combobox').filter({ hasText: /^is greater than$/ }), 'is');
   await page.getByPlaceholder('value', { exact: true }).fill('150');
   const equalResponse = await equal;
@@ -378,6 +378,12 @@ test('SEG-065 changing a materialised audience’s rules clears its membership',
     status: 'active',
   });
   await markMaterialised(segment.id, pid, ['u-member']);
+  const as = { ip: clientIp, token: p.owner.accessToken };
+  // A send's audience step (the push audience count walks the same membership).
+  const sendAudience = () => raw('POST', '/api/push-notifications/audience-preview', { projectId: pid, segmentId: segment.id }, as);
+  const beforeEdit = await sendAudience();
+  expect(beforeEdit.status).toBe(201);
+  expect(beforeEdit.body.data).toMatchObject({ targetType: 'segment' });
 
   await signIn(page, p.owner);
   await openAudiences(page, pid);
@@ -386,22 +392,25 @@ test('SEG-065 changing a materialised audience’s rules clears its membership',
   await expect(page.getByRole('heading', { name: 'SEG-065 buyers' })).toBeVisible();
   await page.locator('input[type="number"][max="365"]').fill('14');
   const [patch] = await Promise.all([
-    page.waitForRequest((r) => r.method() === 'PATCH' && r.url().endsWith(`/segments/${segment.id}`)),
+    page.waitForResponse((r) => r.request().method() === 'PATCH' && r.url().endsWith(`/segments/${segment.id}`)),
     page.getByRole('button', { name: 'Save', exact: true }).click(),
   ]);
-  expect(patch.postDataJSON().definition.children[0].withinDays).toBe(14);
+  expect(patch.request().postDataJSON().definition.children[0].withinDays).toBe(14);
+  // The saved row as the update wrote it, before any refresh run could stamp it again.
+  expect((await patch.json()).data).toMatchObject({ lastMaterializedAt: null, lastMemberCount: null });
   await expect(toastTitled(page, 'Audience saved')).toBeVisible();
 
   const row = await segmentRow(segment.id);
   expect(row?.last_materialized_at).toBeNull();
   expect(row?.last_member_count).toBeNull();
   expect(await memberKeys(segment.id)).toEqual([]);
-  const members = await raw('GET', `/api/projects/${pid}/segments/${segment.id}/members`, undefined, {
-    ip: clientIp,
-    token: p.owner.accessToken,
-  });
+  const members = await raw('GET', `/api/projects/${pid}/segments/${segment.id}/members`, undefined, as);
   expect(members.status).toBe(400);
   expect(messageOf(members)).toBe(notMaterialised(segment.id, 'SEG-065 buyers'));
+  // A send before the next refresh is refused rather than going to the old members.
+  const afterEdit = await sendAudience();
+  expect(afterEdit.status).toBe(400);
+  expect(messageOf(afterEdit)).toBe(notMaterialised(segment.id, 'SEG-065 buyers'));
 
   await openAudiences(page, pid);
   await expect(rowNamed(page, 'SEG-065 buyers').getByRole('cell').nth(3)).toHaveText('not yet refreshed');
@@ -473,6 +482,14 @@ test('SEG-069 definitions the editor cannot show are read-only', async ({ page, 
   }
   expect(previews).toEqual([]);
   expect(writes).toEqual([]);
+
+  // The same recorder sees the preview of a definition the editor can show.
+  const plain = await createSegment(p.owner, pid, clientIp, { name: 'SEG-069 plain', definition: KNOWN_COUNTRY, evaluationMode: 'live', status: 'active' });
+  await page.goto(`/projects/${pid}/segments/${plain.id}`);
+  await expect(page.getByRole('heading', { name: 'SEG-069 plain', exact: true })).toBeVisible();
+  await expect(page.getByText('This definition was not built here')).toHaveCount(0);
+  await expect.poll(() => previews.length).toBeGreaterThan(0);
+  expect(previews.every((path) => path === `/api/projects/${pid}/segments/preview`)).toBe(true);
 });
 
 // ---- Members
@@ -914,7 +931,8 @@ test('SEG-112 activation is refused when the journey’s audience is gone', asyn
       { type: 'exit' },
     ],
   });
-  await raw('DELETE', `/api/projects/${pid}/segments/${lapsed.id}`, undefined, { ip: clientIp, token: p.owner.accessToken });
+  const removed = await raw('DELETE', `/api/projects/${pid}/segments/${lapsed.id}`, undefined, { ip: clientIp, token: p.owner.accessToken });
+  expect(removed.status).toBe(200);
 
   await signIn(page, p.owner);
   await openJourneys(page, pid);
