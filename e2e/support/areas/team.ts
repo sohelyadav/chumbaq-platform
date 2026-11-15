@@ -750,7 +750,6 @@ export async function activityCount(projectId: string): Promise<number> {
 // ---- P1: activity log page and CSV, role matrix, view-as and team additions
 
 export const TOO_MANY_TO_EXPORT = 'Too many entries to download. Choose a shorter date range.';
-export const LAST_OWNER = 'A project needs at least one owner.';
 
 /** Activity rows at fixed instants (`'2026-11-10T23:59:59.999999Z'`), written directly. Answers their ids in order. */
 export async function insertActivityAt(projectId: string, rows: Array<SeedActivity & { at: string }>): Promise<string[]> {

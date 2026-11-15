@@ -659,9 +659,10 @@ test('TEAM-169 role refusal text reaches the UI', async ({ page }) => {
   expect((await response.json()).message).toBe(ROLE_REFUSAL);
   const keys = await call('GET', `/api/projects/${project.id}/api-keys`, { as: owner });
   expect(keys.body.data).toEqual([]);
-  const toast = toastTitled(page, 'Failed to create key');
-  await expect(toast).toBeVisible();
-  await expect(toast).toContainText(ROLE_REFUSAL);
+  // By text: the open dialog hides the notifications region from role queries.
+  await expect(page.getByText('Failed to create key', { exact: true })).toBeVisible();
+  // Wherever the page puts it (toast or inline), the API's own words arrive.
+  await expect(page.getByText(ROLE_REFUSAL, { exact: true })).toBeVisible();
 });
 
 test('TEAM-171 membership writes re-check the caller\'s role under the lock', async () => {
@@ -848,6 +849,7 @@ test('TEAM-184 the billing owner\'s own seat refusal from a stale page', async (
   await setSeatLimit(owner, 4);
   const seatLine = page.getByText(SEAT_LINE);
 
+  await page.clock.install();
   await signIn(page, owner);
   await openMembers(page, project.id);
   await expect(seatLine).toHaveText('3 of 4 seats');
@@ -869,12 +871,13 @@ test('TEAM-184 the billing owner\'s own seat refusal from a stale page', async (
   await expect(cardTitled(page, 'Invite').getByRole('alert')).toHaveCount(0);
   await expect(seatLine).toHaveText('4 of 4 seats');
 
-  // Coming back to the window refetches nothing.
+  // Coming back to the window refetches nothing, even once the seats read is stale. The
+  // one query that does refetch on focus (/auth/me) shows the focus event got through.
+  await page.clock.fastForward(31_000);
   const refetches = watchRequests(page, 'GET', '/api/projects');
-  await page.evaluate(() => {
-    window.dispatchEvent(new Event('focus'));
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
+  const focusReads = watchRequests(page, 'GET', '/api/auth/me');
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange', { bubbles: true })));
+  await expect.poll(() => focusReads.length).toBeGreaterThan(0);
   await page.waitForLoadState('networkidle');
   expect(refetches).toEqual([]);
   await expect(status).toBeVisible();
@@ -1314,6 +1317,7 @@ test('TEAM-204 unknown actions and missing labels in the log', async ({ page }) 
   const rows = [
     { action: 'team.future_thing', ...by },
     { action: 'member.removed', ...by, targetType: 'member' },
+    { action: 'member.role_changed', ...by, targetType: 'member' },
     { action: 'member.role_changed', ...by, targetType: 'member', details: { from: 'member', to: 'admin' } },
     { action: 'invite.resent', ...by, targetType: 'invitation' },
     { action: 'invite.cancelled', ...by, targetType: 'invitation' },
@@ -1337,6 +1341,7 @@ test('TEAM-204 unknown actions and missing labels in the log', async ({ page }) 
   await expect(whatColumn(page)).toHaveText([
     'Omar Owner did team.future_thing',
     'Omar Owner removed a member from the project',
+    'Omar Owner changed the role of a member',
     'Omar Owner changed the role of a member from member to admin',
     'Omar Owner resent an invite',
     'Omar Owner cancelled an invite',
@@ -1346,7 +1351,7 @@ test('TEAM-204 unknown actions and missing labels in the log', async ({ page }) 
     'Omar Owner invited someone as an admin',
   ]);
   await choose(page, 'Kind', 'Team');
-  await expect(activityRowsOnPage(page)).toHaveCount(8);
+  await expect(activityRowsOnPage(page)).toHaveCount(rows.length - 1);
   await expect(page.getByText('Omar Owner did team.future_thing', { exact: true })).toHaveCount(0);
 
   const csv = await rawGet(exportPath(project.id), owner.accessToken, owner.ip);
