@@ -3,7 +3,7 @@ import { api, createApiKey, newClientIp } from '../../support/api';
 import { expect, signIn, test } from '../../support/fixtures';
 import {
   PROJECT_NOT_FOUND,
-  apiLogCount,
+  apiLogFailures,
   bodyRows,
   cardTitled,
   channelCounts,
@@ -234,11 +234,13 @@ test('ANLY-091 a do-not-track device writes no touchpoint', async () => {
   await identify(p, { deviceFingerprint: fp, doNotTrack: true });
   const link = await seedLink(p.owner, p.project.id, 'anly091');
   expect(await click(link.shortCode, newClientIp(), { cookie: `chumbaq_did=${fp}`, query: '?utm_source=dnt-test' })).toBe(302);
-  // Control: the same click from a device without the flag does write one.
+  await waitForLinkClicks(link.id, 1);
+  // Control, sent only once the first click is stored: the same click from a device
+  // without the flag writes one. Its touchpoint goes through the same check and then an
+  // insert, so once it is stored the first click's touchpoint has long been decided.
   expect(await click(link.shortCode, newClientIp(), { cookie: `chumbaq_did=${uniqueId('fp-ok')}`, query: '?utm_source=dnt-control' })).toBe(302);
   await waitForLinkClicks(link.id, 2);
   await waitForTouchpoints(p.project.id, 1);
-  await sleep(1500);
 
   expect(await channelCounts(p.owner, p.project.id)).toEqual([['dnt-control', 1]]);
   const summary = await getAs(p.owner, `/api/projects/${p.project.id}/analytics/summary`);
@@ -456,17 +458,20 @@ test('ANLY-112 an event named with an empty string', async ({ page }) => {
   test.fail(true, 'ANLY-112');
   test.info().annotations.push({ type: 'issue', description: 'ANLY-112' });
   const p = await sdkProject('anly112');
+  // Accepted today (ANLY-125). Not asserted, so only the page can make this test fail:
+  // were the API to refuse the name, the page would have one event and this would pass.
   const tracked = await trackEvent(p, { eventName: '', distinctId: 'u-112' });
-  expect(tracked.status).toBe(201);
+  const stored = tracked.status === 201 ? 2 : 1;
   expect((await trackEvent(p, { eventName: 'named', distinctId: 'u-112' })).status).toBe(201);
+  expect(await countEvents(p.project.id)).toBe(stored);
 
   await signIn(page, p.owner);
   await page.goto(`/projects/${p.project.id}/events`);
-  await expect(page.getByText('Unexpected Application Error!')).toHaveCount(0, { timeout: 5_000 });
-  await expect(page.getByRole('heading', { level: 1, name: 'Events' })).toBeVisible({ timeout: 5_000 });
-  await expect(cardTitled(page, 'Event Log').locator('tbody tr')).toHaveCount(2, { timeout: 5_000 });
+  await expect(cardTitled(page, 'Event Log').locator('tbody tr')).toHaveCount(stored, { timeout: 5_000 });
+  await expect(page.getByRole('heading', { level: 1, name: 'Events' })).toBeVisible();
   const options = await eventSelectOptions(page);
   expect(options).toContain('named (1)');
+  await expect(page.getByText('Unexpected Application Error!')).toHaveCount(0);
 });
 
 test('ANLY-116 events list parameters', async () => {
@@ -574,18 +579,24 @@ test('ANLY-125 ingest validation errors', async () => {
   expect(stored.map((row) => row.event_name).sort()).toEqual(['', '123', 'y'.repeat(255)].sort());
 });
 
-test('ANLY-131 events keep flowing for a suspended account', async () => {
+test('ANLY-131 events keep flowing for a suspended account', async ({ page }) => {
   const p = await sdkProject('anly131');
+  await openEvents(page, p);
+  await expect(cardTitled(page, 'Event Log').getByText('No events found.', { exact: true })).toBeVisible();
   const reactivate = await suspendAccount(p.owner.userId);
   try {
     const tracked = await trackEvent(p, { eventName: 'while_suspended', distinctId: 'u-131' });
     expect(tracked.status).toBe(201);
     expect(typeof tracked.body.data.id).toBe('string');
-    expect(await countEvents(p.project.id)).toBe(1);
+    const [row] = await sql('SELECT event_name FROM user_events WHERE id = $1 AND project_id = $2', [tracked.body.data.id, p.project.id]);
+    expect(row).toEqual({ event_name: 'while_suspended' });
 
     const refused = await getAs(p.owner, `/api/projects/${p.project.id}/events`);
     expect(refused.status).toBe(403);
     expect(refused.body.message).toBe('Account suspended');
+    // The signed-in dashboard is sent to the suspended notice instead of showing it.
+    await page.reload();
+    await expect(page).toHaveURL(/\/login\?suspended=1$/);
   } finally {
     await reactivate();
   }
@@ -676,8 +687,12 @@ test('ANLY-142 a long Referer loses the click and the touchpoint', async () => {
   expect(await summary()).toBe(0);
   expect(await channelCounts(p.owner, p.project.id)).toEqual([]);
   const referer = (length: number) => `https://example.com/?q=${'a'.repeat(length - 'https://example.com/?q='.length)}`;
-  const clickFailures = apiLogCount('Failed to record click event');
-  const touchpointFailures = apiLogCount('Failed to record touchpoint');
+  // Failures caused by this column's length, so another test's long utm_source does not count here.
+  const tooLong = 'value too long for type character varying(2048)';
+  const clickFailures = () => apiLogFailures('Failed to record click event', tooLong);
+  const touchpointFailures = () => apiLogFailures('Failed to record touchpoint', tooLong);
+  const clicksBefore = clickFailures();
+  const touchpointsBefore = touchpointFailures();
 
   const fits = await clickResponse(link.shortCode, newClientIp(), { referer: referer(2048) });
   expect(fits).toEqual({ status: 302, location: target });
@@ -690,9 +705,10 @@ test('ANLY-142 a long Referer loses the click and the touchpoint', async () => {
   for (const length of [2049, 3000]) {
     expect(await clickResponse(link.shortCode, newClientIp(), { referer: referer(length) }), String(length)).toEqual({ status: 302, location: target });
   }
-  await expect.poll(() => apiLogCount('Failed to record click event') - clickFailures, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
-  await expect.poll(() => apiLogCount('Failed to record touchpoint') - touchpointFailures, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
-  await sleep(1000);
+  // Both inserts of both clicks have ended once their failures are logged, so the counts below are final.
+  await expect.poll(() => clickFailures() - clicksBefore, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+  await expect.poll(() => touchpointFailures() - touchpointsBefore, { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+  // The case's "no click webhook fires" needs a public receiver, which the local stack has not.
   expect(await summary()).toBe(1);
   expect(await referrers()).toHaveLength(1);
   expect(await channelCounts(p.owner, p.project.id)).toEqual([['referral', 1]]);
@@ -956,9 +972,11 @@ test('ANLY-171 a trap API key on ingest answers like any wrong key', async () =>
     description: `median ms: trap ${median(answers.trap.map((a) => a.ms)).toFixed(1)}, made-up ${median(answers.madeUp.map((a) => a.ms)).toFixed(1)}`,
   });
 
+  // One alarm row for the trap, counting all 20 uses; the 20 made-up keys from the same
+  // address raise none.
   await expect
-    .poll(async () => (await sql('SELECT details FROM security_alerts WHERE kind = $1 AND dedupe_key = $2', ['tripwire.api_key', trap.id])).map((row) => row.details.route))
-    .toEqual(['POST /api/events/track']);
+    .poll(async () => sql('SELECT kind, dedupe_key, details->>\'route\' AS route, count FROM security_alerts WHERE ip_address = $1', [ip]))
+    .toEqual([{ kind: 'tripwire.api_key', dedupe_key: trap.id, route: 'POST /api/events/track', count: 20 }]);
   // Control: the project's own key is accepted on the same route.
   expect((await trackEvent(p, { eventName: 'real' })).status).toBe(201);
 });

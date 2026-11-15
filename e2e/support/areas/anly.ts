@@ -629,13 +629,19 @@ export async function seedTrapKey(label: string): Promise<{ id: string; key: str
   return { id: row.id, key };
 }
 
-/** How many lines of the stack's API log contain `text` so far. */
-export function apiLogCount(text: string): number {
+/**
+ * How many `message` lines of the stack's API log are followed by an error line
+ * containing `detail` (Nest logs the error on the line after the message), so a
+ * failure of another test's making with another cause is not counted.
+ */
+export function apiLogFailures(message: string, detail: string): number {
+  let lines: string[];
   try {
-    return readFileSync(path.join(LOG_DIR, 'api.log'), 'utf8').split('\n').filter((line) => line.includes(text)).length;
+    lines = readFileSync(path.join(LOG_DIR, 'api.log'), 'utf8').split('\n');
   } catch {
     return 0;
   }
+  return lines.filter((line, i) => line.includes(message) && (lines[i + 1] ?? '').includes(detail)).length;
 }
 
 /** Staff suspension as it is stored: `suspended_at` set. Answers a function that reactivates. */
