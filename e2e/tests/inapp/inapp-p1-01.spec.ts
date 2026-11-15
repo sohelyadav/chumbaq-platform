@@ -56,6 +56,9 @@ const STATUS_LABEL: Record<string, string> = {
   archived: 'Archived',
 };
 
+/** The button the SDK clicks reports (its id is the click's buttonId). */
+const GO_BUTTON = { id: 'go', text: 'Go', action: 'dismiss', style: 'primary' };
+
 /** One message in each status, named `S-<status>`. */
 async function oneOfEach(p: InAppProject): Promise<Record<string, string>> {
   const ids: Record<string, string> = {};
@@ -128,6 +131,7 @@ test('INAPP-004 rows show name, title, type, trigger, status, counters and CTR',
     title: 'Welcome',
     messageType: 'modal',
     triggerType: 'on_app_open',
+    buttons: [GO_BUTTON],
   });
   const device = await identifyDevice(p);
   await recordEvents(p, message.id, device.fingerprint, 'impression', 4);
@@ -149,8 +153,8 @@ test('INAPP-004 rows show name, title, type, trigger, status, counters and CTR',
 
 test('INAPP-008 stat cards sum the loaded rows', async ({ page }) => {
   const p = await inAppProject('inapp-008');
-  const a = await messageIn(p.owner, p.project.id, 'active', { name: 'Stats A' });
-  const b = await messageIn(p.owner, p.project.id, 'active', { name: 'Stats B' });
+  const a = await messageIn(p.owner, p.project.id, 'active', { name: 'Stats A', buttons: [GO_BUTTON] });
+  const b = await messageIn(p.owner, p.project.id, 'active', { name: 'Stats B', buttons: [GO_BUTTON] });
   await messageIn(p.owner, p.project.id, 'draft', { name: 'Stats C' });
   const device = await identifyDevice(p);
   await recordEvents(p, a.id, device.fingerprint, 'impression', 10);
@@ -222,6 +226,10 @@ test('INAPP-011 search filters by name, case-insensitively, in the browser', asy
   await expect(campaignRow(page, 'Spring Sale')).toHaveCount(0);
   await expect(statValue(page, 'Total Campaigns')).toHaveText('3');
   expect(requests).toEqual([]);
+
+  // Positive control: a filter click is a list request the same recorder sees.
+  await page.getByRole('button', { name: 'Draft', exact: true }).click();
+  await expect.poll(() => requests.length).toBe(1);
 });
 
 test('INAPP-016 clicking a row opens the detail page', async ({ page }) => {
@@ -349,9 +357,16 @@ test('INAPP-026 cancelling the delete prompt keeps the campaign', async ({ page 
   });
   await rowMenuItem(page, 'Keep me', 'Delete');
   await expect.poll(() => prompts).toEqual(['Are you sure you want to delete this campaign?']);
+  await expect(page.getByRole('menu')).toHaveCount(0);
 
-  // Nothing follows a dismissed prompt; give a request or toast a moment to appear.
-  await page.waitForTimeout(1000);
+  // A request the page sends after the prompt is answered: any DELETE the prompt had let
+  // through would have been sent, and recorded, before it.
+  const listed = recordRequests(page, 'GET', MESSAGES(p.project.id));
+  const filtered = page.waitForResponse((r) => new URL(r.url()).searchParams.get('status') === 'draft');
+  await page.getByRole('button', { name: 'Draft', exact: true }).click();
+  expect((await filtered).status()).toBe(200);
+  expect(listed).toHaveLength(1);
+
   expect(deletes).toEqual([]);
   await expect(campaignRow(page, 'Keep me')).toBeVisible();
   await expect(page.getByRole('region', { name: /Notifications/ }).locator('li')).toHaveCount(0);
@@ -637,6 +652,12 @@ test('INAPP-048 required name and title on save', async ({ page }) => {
   expect(posts).toEqual([]);
   await expect(page).toHaveURL(/\/in-app-messages\/new$/);
   expect(await messageRows(p.project.id)).toEqual([]);
+
+  // Positive control: with both filled, the same button sends the POST the recorder sees.
+  await editorField(page, 'Campaign Name').fill('Both now');
+  const id = await saveAndGetId(page, p.project.id);
+  expect(posts).toHaveLength(1);
+  expect((await messageRows(p.project.id)).map((row) => row.id)).toEqual([id]);
 });
 
 test('INAPP-051 server refusal shows Failed to save', async ({ page }) => {
