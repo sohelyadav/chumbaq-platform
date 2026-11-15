@@ -1,4 +1,6 @@
+import { execFile } from 'child_process';
 import { createHmac, randomBytes } from 'crypto';
+import path from 'path';
 import type { Browser, Locator, Page } from '@playwright/test';
 import { Queue } from 'bullmq';
 import { Client } from 'pg';
@@ -6,7 +8,7 @@ import { adminApi, enrolAndSignInStaff } from '../admin';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
 import { newPersonContext } from '../fixtures';
 import { runJobNow } from '../jobs';
-import { assertE2eDatabase, stackEnv } from '../stack';
+import { appEnvironment, assertE2eDatabase, REPO_ROOT, runSecrets, stackEnv, stackPorts } from '../stack';
 
 /**
  * Helpers for the audiences (segments) and journeys specs (SEG): a project with an
@@ -765,4 +767,192 @@ export async function selectOptions(trigger: Locator): Promise<string[]> {
   await page.keyboard.press('Escape');
   await page.getByRole('option').first().waitFor({ state: 'detached' });
   return names.map((name) => name.trim());
+}
+
+// ---- Journeys API, journey runtime and coverage additions (seg-p1-03)
+
+/**
+ * Runs the worker's journey tick now (enrol, then advance due runs), as its minute cron
+ * does. Other specs' runs fail on purpose and log errors in the same tick, so the run's
+ * own errors are not refused here: callers assert the outcome on their own rows.
+ */
+export async function tickNow(): Promise<string> {
+  const { output } = await runJobNow('journey-tick', { allowErrors: true, timeoutMs: 90_000 });
+  return output;
+}
+
+/**
+ * Runs one scheduler method of the built worker once (as `runJobNow` does, through the
+ * same `run-job.cjs`), for a method `WORKER_JOBS` does not list. Answers what it printed.
+ */
+export async function runWorkerMethod(file: string, className: string, method: string): Promise<string> {
+  const env = { ...process.env, ...appEnvironment(runSecrets(), stackPorts()) };
+  return new Promise<string>((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [path.join(__dirname, '../run-job.cjs'), file, className, method],
+      { cwd: path.join(REPO_ROOT, 'apps/api'), env, timeout: 90_000, maxBuffer: 16 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        const all = `${stdout}${stderr}`;
+        if (error) reject(new Error(`Worker method ${className}.${method} failed (${error.message.split('\n')[0]}):\n${all}`));
+        else resolve(all);
+      },
+    );
+  });
+}
+
+/** The journey scheduler's five-minute sweep of stranded runs, now. */
+export async function sweepStrandedRunsNow(): Promise<string> {
+  return runWorkerMethod('queue/scheduler/journey.scheduler.js', 'JourneyScheduler', 'handleStrandedRuns');
+}
+
+/** Makes every active run of the journey due now, as if its wait had run out. */
+export async function makeRunsDue(journeyId: string): Promise<void> {
+  await sql(
+    `UPDATE journey_runs SET next_due_at = now() - interval '1 second' WHERE journey_id = $1 AND status = 'active'`,
+    [journeyId],
+  );
+}
+
+export interface PushDevice {
+  id: string;
+  fingerprint: string;
+  token: string | null;
+}
+
+/**
+ * One Android device through the SDK's identify route (an external id gets its userHash),
+ * with a push token registered through the SDK's register route unless `token` is false.
+ */
+export async function addPushDevice(
+  p: SegProject,
+  ip: string,
+  { externalUserId, pushOptIn, token = true }: { externalUserId?: string; pushOptIn?: boolean; token?: boolean } = {},
+): Promise<PushDevice> {
+  const fingerprint = `seg-push-${randomBytes(8).toString('hex')}`;
+  const body: Record<string, unknown> = { projectId: p.project.id, platform: 'android', deviceFingerprint: fingerprint };
+  if (externalUserId) {
+    body.externalUserId = externalUserId;
+    body.distinctId = externalUserId;
+    body.userHash = userHash(p.secret, externalUserId);
+  }
+  if (pushOptIn !== undefined) body.pushOptIn = pushOptIn;
+  const identity = await api<{ id: string }>('POST', '/api/identity/identify', body, { apiKey: p.sdkKey, ip });
+  let registered: string | null = null;
+  if (token) {
+    registered = `seg-fcm-${randomBytes(16).toString('hex')}`;
+    await api(
+      'POST',
+      '/api/push-tokens/register',
+      { projectId: p.project.id, deviceFingerprint: fingerprint, token: registered, platform: 'android' },
+      { apiKey: p.sdkKey, ip },
+    );
+  }
+  return { id: identity.id, fingerprint, token: registered };
+}
+
+/** Identify again from a device already known by its fingerprint, now naming a signed-in person. */
+export async function identifyAs(p: SegProject, ip: string, fingerprint: string, externalUserId: string): Promise<string> {
+  const identity = await api<{ id: string }>(
+    'POST',
+    '/api/identity/identify',
+    {
+      projectId: p.project.id,
+      platform: 'web',
+      deviceFingerprint: fingerprint,
+      externalUserId,
+      distinctId: externalUserId,
+      userHash: userHash(p.secret, externalUserId),
+    },
+    { apiKey: p.sdkKey, ip },
+  );
+  return identity.id;
+}
+
+export interface CampaignRow {
+  id: string;
+  channel: string;
+  title: string;
+  target_type: string;
+  target_device_ids: string[] | null;
+  data: Record<string, string> | null;
+}
+
+/** The project's push campaign rows, oldest first. */
+export async function campaignsOf(projectId: string): Promise<CampaignRow[]> {
+  return sql<CampaignRow>(
+    `SELECT id, channel, title, target_type, target_device_ids, data FROM push_notification_logs WHERE project_id = $1 ORDER BY sent_at, id`,
+    [projectId],
+  );
+}
+
+/**
+ * Queues one materialisation of the audience for the worker, as the refresh scheduler
+ * does (claim stamped, job added), without waiting for it to finish.
+ */
+export async function enqueueMaterialise(segmentId: string, projectId: string): Promise<void> {
+  const env = stackEnv();
+  const queue = new Queue('segment-materialize', {
+    connection: {
+      host: env.REDIS_HOST || '127.0.0.1',
+      port: Number(env.REDIS_PORT || 6379),
+      password: env.REDIS_PASSWORD || undefined,
+      db: Number(env.REDIS_DB),
+    },
+  });
+  try {
+    await sql(`UPDATE segments SET materializing_at = now() WHERE id = $1`, [segmentId]);
+    await queue.add('materialize-segment', { segmentId, projectId });
+  } finally {
+    await queue.close();
+  }
+}
+
+/**
+ * Holds `LOCK TABLE <table> IN ACCESS EXCLUSIVE MODE` in an open transaction on a
+ * connection of its own, so the next statement that reads the table waits. Answers the
+ * release (commit). The API's lock timeout is 10 s: release well before that.
+ */
+export async function lockTable(table: 'segments' | 'device_identities'): Promise<() => Promise<void>> {
+  const env = stackEnv();
+  const client = new Client({
+    host: env.DATABASE_HOST,
+    port: Number(env.DATABASE_PORT || 5432),
+    user: env.DATABASE_USER,
+    password: env.DATABASE_PASSWORD,
+    database: assertE2eDatabase(env),
+  });
+  await client.connect();
+  await client.query('BEGIN');
+  await client.query(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`);
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    try {
+      await client.query('COMMIT');
+    } finally {
+      await client.end();
+    }
+  };
+}
+
+/** Waits until some other session is waiting for a lock on `table`. */
+export async function waitForLockWaiter(table: string, timeoutMs = 8000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [row] = await sql<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_locks WHERE relation = $1::regclass AND NOT granted`,
+      [table],
+    );
+    if (row.n > 0) return;
+    if (Date.now() > deadline) throw new Error(`Nothing waited on ${table}`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+/** Activity rows of the project, as a count, for "this wrote nothing". */
+export async function activityCount(projectId: string): Promise<number> {
+  const [row] = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM project_activity WHERE project_id = $1`, [projectId]);
+  return row.n;
 }
