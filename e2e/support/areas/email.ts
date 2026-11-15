@@ -562,3 +562,92 @@ export async function openViewAs(page: Page, url: string): Promise<void> {
   await page.goto(url);
   await page.getByRole('region', { name: 'Impersonation session' }).waitFor();
 }
+
+// ---- P1 chunk: page shell, campaign list, suppressions, sender and provider settings
+
+export type CampaignStatus = 'scheduled' | 'queued' | 'sending' | 'sent' | 'failed' | 'partial' | 'expanded' | 'cancelled';
+
+export interface SeedCampaign {
+  subject: string;
+  status?: CampaignStatus;
+  channel?: 'email' | 'push' | 'sms';
+  totalTokens?: number;
+  successCount?: number;
+  processedTokens?: number;
+  scheduledAt?: Date | null;
+}
+
+/**
+ * A campaign row written straight into the table, as the worker or the scheduler leaves
+ * one (no queue job, so nothing picks it up). Email rows carry their content, with the
+ * title mirroring the subject as the send route writes it.
+ */
+export async function seedCampaign(projectId: string, c: SeedCampaign): Promise<string> {
+  const channel = c.channel ?? 'email';
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO push_notification_logs
+       (project_id, title, channel, status, total_tokens, success_count, processed_tokens, scheduled_at, email_content)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+    [
+      projectId,
+      c.subject,
+      channel,
+      c.status ?? 'sent',
+      c.totalTokens ?? 1,
+      c.successCount ?? 1,
+      c.processedTokens ?? c.totalTokens ?? 1,
+      c.scheduledAt ?? null,
+      channel === 'email' ? JSON.stringify({ subject: c.subject, html: `<p>${c.subject}</p>`, text: null, preheader: null }) : null,
+    ],
+  );
+  return row.id;
+}
+
+/** A provider event for (campaign, identity), as the webhook ingest stores one. */
+export async function seedCampaignEvent(
+  projectId: string,
+  campaignId: string,
+  identityId: string,
+  type: 'delivered' | 'impression' | 'click' | 'bounced',
+): Promise<void> {
+  await sql(
+    `INSERT INTO push_notification_events (project_id, campaign_id, device_identity_id, type, platform, occurred_at)
+     VALUES ($1, $2, $3, $4, 'email', now())`,
+    [projectId, campaignId, identityId, type],
+  );
+}
+
+/** The row of the campaign list whose subject is `subject`. */
+export function campaignRow(page: Page, subject: string): Locator {
+  return page.getByRole('row').filter({ has: page.getByRole('cell', { name: subject, exact: true }) });
+}
+
+/** The cells of a table row, as text. */
+export async function cellTexts(row: Locator): Promise<string[]> {
+  return (await row.getByRole('cell').allInnerTexts()).map((text) => text.trim());
+}
+
+/** The webhook URL shown in the Provider card's Delivery events box. */
+export function webhookCode(page: Page): Locator {
+  return page.locator('code').filter({ hasText: '/api/email/webhooks/' });
+}
+
+/** A tab of the Provider card (its name may carry an `Active` badge). */
+export function providerTab(page: Page, label: 'Resend' | 'Amazon SES' | 'Brevo'): Locator {
+  return page.getByRole('tab', { name: new RegExp(`^${label}(\\s*Active)?$`) });
+}
+
+/** Credential rows stored for a project, by provider. */
+export async function credentialProviders(projectId: string): Promise<string[]> {
+  return (
+    await sql<{ provider: string }>(`SELECT provider FROM push_channel_credentials WHERE project_id = $1 ORDER BY provider`, [projectId])
+  ).map((row) => row.provider);
+}
+
+/** The toast with this title and description (shadcn toasts stack, so match on both). */
+export function toastWith(page: Page, title: string, description: string): Locator {
+  return page
+    .locator('li')
+    .filter({ has: page.getByText(title, { exact: true }) })
+    .filter({ has: page.getByText(description, { exact: true }) });
+}
