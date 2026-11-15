@@ -110,6 +110,8 @@ test('PROJ-012 the count shows billed projects, not every project listed', async
   const { meta } = await listProjects(a, clientIp);
 
   await signIn(page, a);
+  // Exactly the two joined projects, and no third card of the account's own.
+  await expect(page.locator('[data-slot="card"]').filter({ has: page.locator('[data-slot="badge"]') })).toHaveCount(2);
   const adminCard = projectCard(page, administered.name);
   const memberCard = projectCard(page, joined.name);
   await expect(adminCard.getByText('Admin', { exact: true })).toBeVisible();
@@ -732,10 +734,24 @@ test('PROJ-057 log out from the selector', async ({ page, clientIp }) => {
   await expect(page).toHaveURL(/\/login$/);
   await expect(page.getByLabel('Email')).toBeVisible();
 
+  const sawProjects = () => page.evaluate(() => (window as unknown as { __sawProjects?: boolean }).__sawProjects ?? false);
+  // Signing out replaces the selector's history entry with /login, so Back stays there.
   await page.goBack();
   await expect(page).toHaveURL(/\/login$/);
   await expect(page.getByLabel('Email')).toBeVisible();
-  expect(await page.evaluate(() => (window as unknown as { __sawProjects?: boolean }).__sawProjects ?? false)).toBe(false);
+  expect(await sawProjects()).toBe(false);
+  await expect(page.getByText(project.name)).toHaveCount(0);
+
+  // The selector's own address, loaded signed out, sends to /login without drawing the list.
+  const visited: string[] = [];
+  page.on('framenavigated', (frame) => {
+    if (frame === page.mainFrame()) visited.push(new URL(frame.url()).pathname);
+  });
+  await page.goto('/projects');
+  await expect(page).toHaveURL(/\/login$/);
+  await expect(page.getByLabel('Email')).toBeVisible();
+  expect(visited[0]).toBe('/projects');
+  expect(await sawProjects()).toBe(false);
   await expect(page.getByText(project.name)).toHaveCount(0);
 });
 
@@ -883,8 +899,13 @@ test('PROJ-065 clicks on a suspended billing owner\'s link do not move the dashb
   expect(refused.contentType).toContain('text/html');
   expect(refused.body).toContain('This link is unavailable');
 
-  // Nothing arrives afterwards either (clicks are written after the answer).
-  await new Promise((resolve) => setTimeout(resolve, 3000));
+  // Clicks are written after the answer, so a later click on a live link (B's own
+  // project, not suspended) is waited for: once it is stored, the refused request has
+  // had every chance to write one too.
+  const control = await createProject(b, clientIp, `PROJ-065 control ${hex()}`);
+  const controlLink = await createLink(b, clientIp, control.id, { title: 'PROJ-065 control link' });
+  expect((await openShortLink(controlLink.shortCode, clientIp)).status).toBe(302);
+  await expect.poll(async () => (await projectStats(b, clientIp, control.id)).body.data.clicks24h, { timeout: 15_000 }).toBe(1);
   const after = await projectStats(b, clientIp, project.id);
   expect(after.status).toBe(200);
   expect(after.body.data.clicks24h).toBe(1);
