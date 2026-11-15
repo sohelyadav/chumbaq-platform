@@ -1,5 +1,6 @@
 import { createHmac, randomBytes } from 'crypto';
 import type { Browser, Locator, Page } from '@playwright/test';
+import { Queue } from 'bullmq';
 import { Client } from 'pg';
 import { adminApi, enrolAndSignInStaff } from '../admin';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
@@ -437,4 +438,193 @@ export function previewResponse(page: Page, matches: (definition: any) => boolea
     if (request.method() !== 'POST' || !new URL(response.url()).pathname.endsWith('/segments/preview')) return false;
     return matches((request.postDataJSON() as { definition: unknown }).definition);
   });
+}
+
+// ---- Journeys: editor, runtime and staff (seg-p0-02)
+
+/** The journey editor's inputs (their labels have no htmlFor). */
+export function journeyName(page: Page): Locator {
+  return page.getByPlaceholder('e.g. Abandoned cart follow-up');
+}
+
+export function journeyDescription(page: Page): Locator {
+  return page.getByPlaceholder('Optional — what this journey does and why.');
+}
+
+export function journeyEventName(page: Page): Locator {
+  return page.getByPlaceholder('e.g. cart_abandoned');
+}
+
+/** The sentence in the editor's sticky bar naming the first problem, or what saving does. */
+export function journeyActionBar(page: Page): Locator {
+  return page.locator('div.sticky.bottom-0 p');
+}
+
+/** One step's card in the journey editor, by its "Step N" badge. */
+export function stepCard(page: Page, n: number): Locator {
+  return page.locator('div.rounded-lg.border.p-4').filter({ has: page.getByText(`Step ${n}`, { exact: true }) });
+}
+
+/** A step card's icon buttons, in order: up, down, delete. */
+export function stepButtons(card: Locator): { up: Locator; down: Locator; remove: Locator } {
+  const buttons = card.getByRole('button');
+  return { up: buttons.nth(0), down: buttons.nth(1), remove: buttons.nth(2) };
+}
+
+/** The "add a step" buttons under the list ("Wait", "Send push", "Branch", ...). */
+export function addStepButton(page: Page, label: string): Locator {
+  return page.getByRole('button', { name: label, exact: true });
+}
+
+/** A branch step's three selects: segment, member path, non-member path. */
+export function branchSelects(card: Locator): { segment: Locator; member: Locator; nonMember: Locator } {
+  const selects = card.getByRole('combobox');
+  return { segment: selects.nth(0), member: selects.nth(1), nonMember: selects.nth(2) };
+}
+
+export async function deviceFingerprint(deviceId: string): Promise<string> {
+  const [row] = await sql<{ device_fingerprint: string }>(`SELECT device_fingerprint FROM device_identities WHERE id = $1`, [deviceId]);
+  if (!row) throw new Error(`No device row ${deviceId}`);
+  return row.device_fingerprint;
+}
+
+/** An event through the SDK's track route, from that device. Answers the stored timestamp. */
+export async function trackEvent(p: SegProject, ip: string, deviceId: string, eventName: string, timestamp?: Date): Promise<Date> {
+  const body: Record<string, unknown> = {
+    projectId: p.project.id,
+    eventName,
+    deviceFingerprint: await deviceFingerprint(deviceId),
+  };
+  if (timestamp) body.timestamp = timestamp.toISOString();
+  const event = await api<{ id: string; timestamp: string }>('POST', '/api/events/track', body, { apiKey: p.sdkKey, ip });
+  if (!event?.id) throw new Error('The track route stored nothing');
+  return new Date(event.timestamp);
+}
+
+export interface RunRow {
+  id: string;
+  person_key: string;
+  status: string;
+  current_step_index: number;
+  next_due_at: Date | null;
+  completed_at: Date | null;
+  last_error: string | null;
+}
+
+export async function runsOf(journeyId: string): Promise<RunRow[]> {
+  return sql<RunRow>(
+    `SELECT id, person_key, status, current_step_index, next_due_at, completed_at, last_error
+       FROM journey_runs WHERE journey_id = $1 ORDER BY created_at, person_key`,
+    [journeyId],
+  );
+}
+
+/** A run as the runner leaves it, for a person and step of the test's choosing. */
+export async function insertRun(
+  projectId: string,
+  journeyId: string,
+  personKey: string,
+  { status = 'active', stepIndex = 1, dueInSeconds = 3600 }: { status?: string; stepIndex?: number; dueInSeconds?: number | null } = {},
+): Promise<RunRow> {
+  const [row] = await sql<RunRow>(
+    `INSERT INTO journey_runs (project_id, journey_id, person_key, current_step_index, steps_taken, status, next_due_at, completed_at)
+     VALUES ($1, $2, $3, $4, $4, $5::varchar,
+             CASE WHEN $5::varchar = 'active' AND $6::int IS NOT NULL THEN now() + ($6::int * interval '1 second') END,
+             CASE WHEN $5::varchar = 'active' THEN NULL ELSE now() END)
+     RETURNING id, person_key, status, current_step_index, next_due_at, completed_at, last_error`,
+    [projectId, journeyId, personKey, stepIndex, status, dueInSeconds],
+  );
+  return row;
+}
+
+export async function watermarkOf(journeyId: string): Promise<Date | null> {
+  const row = await journeyRow(journeyId);
+  return row?.enrolled_through ? new Date(row.enrolled_through) : null;
+}
+
+/**
+ * Waits until the worker's minute tick has run for this active journey after
+ * `after`: every tick moves an active journey's watermark on to its own now (or,
+ * for a suspended tenant, holds it at now), whether or not anyone enrolled.
+ * The tick advances runs after enrolling, so a short pause follows.
+ */
+export async function waitForTickAfter(journeyId: string, after: Date, timeoutMs = 150_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const watermark = await watermarkOf(journeyId);
+    if (watermark && watermark.getTime() > after.getTime()) break;
+    if (Date.now() > deadline) throw new Error(`No journey tick for ${journeyId} after ${after.toISOString()}`);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 4000));
+}
+
+/**
+ * Returns once the clock is clear of the worker's minute boundary (ticks run at
+ * second 0, segment refreshes every fifth minute at second 0), so a short sequence of
+ * requests cannot be interleaved with a tick.
+ */
+export async function clearOfTick(): Promise<void> {
+  for (;;) {
+    const second = new Date().getSeconds();
+    if (second >= 4 && second <= 40) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+/**
+ * Runs the segment refresh now: the same job the five-minute refresh scheduler
+ * enqueues, on its queue, for the worker's processor to run. Waits until the run has
+ * stamped `last_materialized_at` later than when it was asked for.
+ */
+export async function materialiseNow(segmentId: string, projectId: string, timeoutMs = 60_000): Promise<Date> {
+  const env = stackEnv();
+  const asked = new Date();
+  const queue = new Queue('segment-materialize', {
+    connection: {
+      host: env.REDIS_HOST || '127.0.0.1',
+      port: Number(env.REDIS_PORT || 6379),
+      password: env.REDIS_PASSWORD || undefined,
+      db: Number(env.REDIS_DB),
+    },
+  });
+  try {
+    await sql(`UPDATE segments SET materializing_at = now() WHERE id = $1`, [segmentId]);
+    await queue.add('materialize-segment', { segmentId, projectId });
+  } finally {
+    await queue.close();
+  }
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const row = await segmentRow(segmentId);
+    const at = row?.last_materialized_at ? new Date(row.last_materialized_at) : null;
+    if (at && at.getTime() >= asked.getTime() - 1000 && row?.materializing_at === null) return at;
+    if (Date.now() > deadline) throw new Error(`Segment ${segmentId} was not materialised`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+/**
+ * A super admin signed in to the admin app in a browser of their own (the flag set
+ * directly, a passkey enrolled). Answers a staff token fresh enough for suspend.
+ */
+export async function staffSession(browser: Browser, baseURL: string | undefined): Promise<{ token: string; ip: string }> {
+  const ip = newClientIp();
+  const staff = await createAccount(ip, 'seg-staff', 'Sid Staff');
+  await sql(`UPDATE users SET is_super_admin = true WHERE id = $1`, [staff.userId]);
+  const { context } = await newPersonContext(browser, baseURL);
+  try {
+    const page = await context.newPage();
+    return { token: await enrolAndSignInStaff(page, staff), ip };
+  } finally {
+    await context.close();
+  }
+}
+
+export async function suspendTenant(staff: { token: string; ip: string }, tenant: Account): Promise<void> {
+  await adminApi('POST', `/api/admin/tenants/${tenant.userId}/suspend`, { reason: 'E2E: journey suspension check' }, staff.token, staff.ip);
+}
+
+export async function reactivateTenant(staff: { token: string; ip: string }, tenant: Account): Promise<void> {
+  await adminApi('POST', `/api/admin/tenants/${tenant.userId}/reactivate`, { reason: 'E2E: journey suspension over' }, staff.token, staff.ip);
 }
