@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from 'crypto';
-import type { Browser, Locator, Page, Response as PageResponse } from '@playwright/test';
+import { devices, type Browser, type Locator, type Page, type Response as PageResponse } from '@playwright/test';
 import { Client } from 'pg';
 import { adminApi, enrolAndSignInStaff, grantSuperAdmin } from '../admin';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
@@ -393,4 +393,112 @@ export function eventTimeLabel(at: Date): string {
 /** Waits for a page response whose URL path is exactly `path` (query ignored). */
 export function responseFor(page: Page, path: string): Promise<PageResponse> {
   return page.waitForResponse((response) => new URL(response.url()).pathname === path);
+}
+
+// ---- P1 helpers (anly-p1-01): links, clicks and conversions set up for one page
+
+/** iPhone Safari and Pixel Chrome, as Playwright's device profiles report them. */
+export const IPHONE_UA = devices['iPhone 15'].userAgent;
+export const ANDROID_UA = devices['Pixel 7'].userAgent;
+
+/** A link with or without a title (`seedLink` always sets one). */
+export async function createLink(owner: Person, projectId: string, label: string, title: string | null): Promise<SeededLink> {
+  const shortCode = `${label}-${randomBytes(3).toString('hex')}`.slice(0, 30);
+  return api<SeededLink>(
+    'POST',
+    `/api/projects/${projectId}/links`,
+    { longUrl: `https://example.com/${label}`, shortCode, ...(title === null ? {} : { title }) },
+    { token: owner.accessToken, ip: owner.ip },
+  );
+}
+
+/** `n` desktop clicks, each from an address of its own, and waits until all are stored. */
+export async function clickTimes(link: SeededLink, n: number, extra: { userAgent?: string; referer?: string; query?: string } = {}): Promise<void> {
+  for (let i = 0; i < n; i += 1) await click(link.shortCode, newClientIp(), extra);
+}
+
+/** Moves a link's clicks to the given times, oldest stored first; answers the ids moved. */
+export async function backdateClicks(linkId: string, times: Date[]): Promise<string[]> {
+  const rows = await sql<{ id: string }>('SELECT id FROM click_events WHERE link_id = $1 ORDER BY clicked_at, id', [linkId]);
+  if (rows.length < times.length) throw new Error(`Link ${linkId} has ${rows.length} clicks, ${times.length} to move`);
+  for (let i = 0; i < times.length; i += 1) {
+    await sql('UPDATE click_events SET clicked_at = $2 WHERE id = $1', [rows[i].id, times[i]]);
+  }
+  return rows.slice(0, times.length).map((row) => row.id);
+}
+
+/** Waits until the project has `expected` touchpoints (the redirect writes them after answering). */
+export async function waitForTouchpoints(projectId: string, expected: number, timeoutMs = 20_000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  let seen = -1;
+  while (Date.now() < until) {
+    const [row] = await sql<{ n: string }>('SELECT count(*)::text AS n FROM touchpoints WHERE project_id = $1', [projectId]);
+    seen = Number(row.n);
+    if (seen >= expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`Expected ${expected} touchpoints in ${projectId}, saw ${seen}`);
+}
+
+/** `POST /api/conversions` with the SDK key, any body, answering status and body. */
+export function conversionRaw(p: SdkProject, body: Record<string, unknown>): Promise<RawResponse> {
+  return raw('POST', '/api/conversions', { projectId: p.project.id, ...body }, { apiKey: p.sdkKey, ip: p.owner.ip });
+}
+
+/** The Click Trends card (its title is a plain paragraph, not a card title). */
+export function clickTrendsCard(page: Page): Locator {
+  return page.locator('[data-slot="card"]').filter({ has: page.getByText('Click Trends', { exact: true }) });
+}
+
+/** The x-axis labels a Recharts chart drew inside `scope`. */
+export function xAxisLabels(scope: Locator): Locator {
+  return scope.locator('.recharts-xAxis .recharts-cartesian-axis-tick-value');
+}
+
+/** date-fns `MMM d` in this machine's zone (the browser's, here). */
+export function dayLabel(at: Date): string {
+  return `${MONTHS[at.getMonth()]} ${at.getDate()}`;
+}
+
+/** Local midnight `days` days ago, plus `hour` hours. */
+export function localDay(days: number, hour = 12): Date {
+  const at = daysAgo(days);
+  return new Date(at.getFullYear(), at.getMonth(), at.getDate(), hour, 0, 0);
+}
+
+/** The bars under a heading in Devices & Browsers ("Operating System", "Browser") as [name, "count (pct%)"]. */
+export async function barRows(page: Page, heading: string): Promise<string[][]> {
+  const list = cardTitled(page, 'Devices & Browsers').locator('h4', { hasText: heading }).locator('xpath=following-sibling::div[1]');
+  return list.locator(':scope > div').evaluateAll((rows) =>
+    rows.map((row) => Array.from(row.querySelectorAll(':scope > div:first-child > span')).map((span) => (span.textContent ?? '').trim())),
+  );
+}
+
+/** Whether a range or model button is the selected one (the selected one is filled). */
+export async function isSelected(button: Locator): Promise<boolean> {
+  return (await button.getAttribute('class'))?.split(/\s+/).includes('bg-primary') ?? false;
+}
+
+/** The query of a request, as an object. */
+export function queryOf(url: string): Record<string, string> {
+  return Object.fromEntries(new URL(url).searchParams.entries());
+}
+
+/** Back-dates every attribution result of a conversion. */
+export async function backdateAttribution(conversionId: string, at: Date): Promise<void> {
+  await sql('UPDATE attribution_results SET created_at = $2 WHERE conversion_id = $1', [conversionId, at]);
+}
+
+/** The time-decay credit the API gives each touchpoint: weights 2^(-Δt / 7 days) from the last one, rounded as it rounds. */
+export function timeDecayCredits(times: Date[]): number[] {
+  const last = Math.max(...times.map((t) => t.getTime()));
+  const halfLife = 7 * 24 * 60 * 60 * 1000;
+  const weights = times.map((t) => Math.pow(2, -(last - t.getTime()) / halfLife));
+  const total = weights.reduce((sum, w) => sum + w, 0);
+  return weights.map((w) => Math.round((w / total) * 10000) / 10000);
+}
+
+/** A channel's credit as the attribution tables show it: rounded to 2 decimals server-side, then shown as a percent. */
+export function creditLabel(credit: number): string {
+  return `${((Math.round(credit * 100) / 100) * 100).toFixed(1)}%`;
 }
