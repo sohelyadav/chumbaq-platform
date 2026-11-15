@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'crypto';
+import { createHash, createHmac, randomBytes } from 'crypto';
 import path from 'path';
 import type { Locator, Page } from '@playwright/test';
 import Redis from 'ioredis';
@@ -937,4 +937,58 @@ export function withBrokenSignature<T extends { response: { signature: string } 
   const bytes = Buffer.from(assertion.response.signature, 'base64url');
   bytes[bytes.length - 1] ^= 0xff;
   return { ...assertion, response: { ...assertion.response, signature: bytes.toString('base64url') } };
+}
+
+// ---- Sign-up, session restore, verify email and reset (P1, chunk 2)
+
+/**
+ * A second customer API on the lane's database, Redis and secrets, with `overrides` on
+ * top of the stack's environment (an empty value unsets a setting the stack gives). On a
+ * free port at the API port + 92..96, like `startTenantPasskeysOffApi`.
+ */
+export async function startCustomerApiWith(label: string, overrides: Record<string, string>): Promise<ExtraApi> {
+  const ports = stackPorts();
+  const taken = new Set(Object.values(ports));
+  let port = 0;
+  for (let candidate = ports.api + 92; candidate <= ports.api + 96; candidate++) {
+    if (!taken.has(candidate) && !(await portInUse(candidate))) {
+      port = candidate;
+      break;
+    }
+  }
+  if (!port) throw new Error('No free port for the extra customer API');
+  const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ...overrides, API_PORT: String(port) };
+  const started = run(`api-${label}-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
+  try {
+    await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    throw error;
+  }
+  return { url: `http://localhost:${port}`, stop: () => stopAll([started]) };
+}
+
+/**
+ * An access token with the same claims as `token` and `changes` applied, signed with the
+ * run's JWT secret the way the API signs one (HS256). For a token that has expired
+ * (`{ exp: <past> }`) without waiting for one to.
+ */
+export function resignedAccessToken(token: string, changes: Record<string, unknown>): string {
+  const [header] = token.split('.');
+  const payload = Buffer.from(JSON.stringify({ ...jwtClaimsOf(token), ...changes })).toString('base64url');
+  const signature = createHmac('sha256', runSecrets().jwtSecret).update(`${header}.${payload}`).digest('base64url');
+  return `${header}.${payload}.${signature}`;
+}
+
+/** The view-as access token this tab holds (the customer app keeps it in sessionStorage). */
+export async function viewAsAccessTokenIn(page: Page): Promise<string> {
+  const raw = await page.evaluate(() => sessionStorage.getItem('chumbaq_impersonation'));
+  const token = raw ? (JSON.parse(raw) as { accessToken?: string }).accessToken : undefined;
+  if (!token) throw new Error('This tab holds no view-as session');
+  return token;
+}
+
+/** The email-verification banner (a region named after what it asks). */
+export function verificationBanner(page: Page): Locator {
+  return page.getByRole('region', { name: 'Confirm your email address' });
 }
