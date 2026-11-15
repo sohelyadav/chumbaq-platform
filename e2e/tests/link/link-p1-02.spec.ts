@@ -182,11 +182,15 @@ test('LINK-090 copy the short URL from the detail page', async ({ page, clientIp
 
   const copy = labelledBlock(page, 'Short URL').getByRole('button').first();
   await expect(copy.locator('svg.lucide-copy')).toBeVisible();
+  const clickedAt = Date.now();
   await copy.click();
   await expect(copy.locator('svg.text-green-600')).toBeVisible();
   expect(await readClipboard(page)).toBe(`${new URL(page.url()).origin}/${code}`);
   // Back to the copy icon after about two seconds.
   await expect(copy.locator('svg.text-green-600')).toHaveCount(0, { timeout: 5000 });
+  const shownFor = Date.now() - clickedAt;
+  expect(shownFor).toBeGreaterThanOrEqual(1500);
+  expect(shownFor).toBeLessThan(4000);
   await expect(copy.locator('svg.lucide-copy')).toBeVisible();
 });
 
@@ -212,7 +216,7 @@ test('LINK-092 QR code dialog shows a scannable code for the short link', async 
   release();
 
   const origin = new URL(page.url()).origin;
-  await expect(dialog.getByText(`${origin}/${code}`, { exact: true })).toBeVisible();
+  await expect(dialog).toHaveAccessibleDescription(`${origin}/${code}`);
   const image = dialog.getByRole('img', { name: 'QR Code' });
   await expect(image).toBeVisible();
   const src = (await image.getAttribute('src'))!;
@@ -308,9 +312,11 @@ test('LINK-101 referrer with HTML is shown as text', async ({ page, clientIp }) 
   await openDetail(page, project.id, link.id);
   await page.getByRole('tab', { name: 'Referrers & Conversions' }).click();
   const referrers = card(page, 'Referrers');
-  await expect(referrers.locator('tbody').getByRole('row').first().getByRole('cell').first()).toHaveText(referer);
-  await expect(referrers.locator('img')).toHaveCount(0);
-  await page.waitForTimeout(500);
+  const cell = referrers.locator('tbody').getByRole('row').first().getByRole('cell').first();
+  await expect(cell).toHaveText(referer);
+  // The cell holds one text node and nothing the browser could run.
+  expect(await cell.evaluate((el) => [...el.childNodes].map((n) => n.nodeName))).toEqual(['#text']);
+  await expect(page.locator('img[src="x"]')).toHaveCount(0);
   expect(dialogs).toEqual([]);
 });
 
@@ -452,8 +458,12 @@ test('LINK-114 variant refused by the API leaves the dialog open', async ({ page
   expect(((await heavy.json()) as { message: string[] }).message).toContain('weight must not be greater than 100');
   await expect(dialog).toBeVisible();
   await expect(dialog.getByPlaceholder('e.g., Variant B')).toHaveValue('Bad');
-  // The refusal is not handled by the page: each one surfaces as an uncaught error.
-  await expect.poll(() => pageErrors.length).toBeGreaterThanOrEqual(2);
+  await expect.poll(() => pageErrors).toEqual(['Request failed with status code 400', 'Request failed with status code 400']);
+  // The open dialog hides the rest of the page from the accessibility tree, so look for the toast list by markup.
+  const notifications = page.locator('[role="region"][aria-label^="Notifications"]');
+  await expect(notifications).toHaveCount(1);
+  await expect(notifications.locator('li')).toHaveCount(0);
+  await expect(dialog.getByText(/must be a URL|must not be greater/)).toHaveCount(0);
   const [rows] = await sql<{ n: string }>('SELECT count(*)::text AS n FROM link_variants WHERE link_id = $1', [link.id]);
   expect(rows.n).toBe('0');
 });
