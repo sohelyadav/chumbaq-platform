@@ -368,6 +368,9 @@ test('ADMTEN-176 a random well-formed code is refused the same way', async ({ pa
   const tenant = await createAccount(newClientIp(), 'tenant', 'Tess Tenant');
   const spent = codeFromViewAsUrl((await startViewAs(staff, tenant.userId, clientIp)).url);
   expect((await exchange(spent, clientIp)).status).toBe(200);
+  // The exchange route records this test's address, so counting by it would see a row.
+  const exchanged = await auditRows({ action: 'tenant.impersonation_exchanged', targetId: tenant.userId });
+  expect(exchanged.map((row) => row.ip_address)).toEqual([clientIp]);
   const auditBefore = await auditCountFromIp(clientIp);
 
   const timed = async (code: string) => {
@@ -574,8 +577,33 @@ test('ADMTEN-198 view-as hides account-only surfaces', async ({ page, browser, b
 
 // ---- L. Second factor reset (staff side)
 
-test.skip('ADMTEN-203 tenant with factors while account email is off', async () => {
-  // Account email is configured in the e2e stack, so this card state cannot be produced locally.
+test('ADMTEN-203 tenant with factors while account email is off', async ({ page, clientIp }) => {
+  const staff = await signedInStaff(page, clientIp);
+  const tenant = await tenantWithFactor();
+  const path = `/api/admin/tenants/${tenant.userId}/factor-reset`;
+  // This stack has account email on, so the real state offers a reset.
+  const real = await adminApi<{ hasFactors: boolean; emailConfigured: boolean }>('GET', path, undefined, staff.token, clientIp);
+  expect(real).toMatchObject({ hasFactors: true, emailConfigured: true });
+
+  // The card is handed the server's own answer with only `emailConfigured` turned off,
+  // which is what an install without account email answers.
+  let routed = 0;
+  await page.route(`**${path}`, async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    const body = (await response.json()) as { data: { emailConfigured: boolean } };
+    body.data.emailConfigured = false;
+    routed += 1;
+    await route.fulfill({ response, json: body });
+  });
+  await openTenantPage(page, tenant);
+
+  const card = secondFactorsCard(page);
+  await expect(card).toContainText('Account email is not set up, so the owner cannot be warned and no reset can be started.');
+  expect(routed).toBeGreaterThan(0);
+  await expect(card.getByRole('button', { name: 'Reset second factors' })).toHaveCount(0);
+  await expect(card).not.toContainText(RESET_INTRO);
+  await expect(card).not.toContainText('This account has no second factors');
 });
 
 test('ADMTEN-205 reset card with factors and email set up', async ({ page, clientIp }) => {
