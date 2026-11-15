@@ -200,7 +200,8 @@ test('AUTH-019 a wrong password shows the generic message and stays on the form'
   expect(await refreshCookie(page)).toBeUndefined();
   const events = await authEventsFor(account.email, since);
   expect(events).toContainEqual(expect.objectContaining({ type: 'login.failed', reason: 'wrong_password' }));
-  await page.waitForTimeout(1000);
+  // The 401 interceptor decides on a refresh before the form gets the error, so with the
+  // message on screen any refresh it started has already been sent.
   expect(refreshes).toEqual([]);
 });
 
@@ -555,6 +556,8 @@ test('AUTH-058 a passkey as the second factor', async ({ page, clientIp }) => {
   await expect(page.getByLabel('Code from your authenticator app')).toHaveCount(0);
   const usePasskey = page.getByRole('button', { name: 'Use passkey' });
   await expect(usePasskey).toBeVisible();
+  // The primary (filled) button, not the outlined one shown beside an authenticator app.
+  await expect(usePasskey).toHaveClass(/\bbg-primary\b/);
   const release = await holdRequests(page, '/api/auth/login/passkey/verify');
   const options = page.waitForResponse(isApi('/api/auth/login/passkey/options'));
   await usePasskey.click();
@@ -647,6 +650,19 @@ test('AUTH-064 a super admin with a customer passkey is never offered TOTP or re
   const byRecovery = await post('/api/auth/login/recovery-code', { handle, code: totp.recoveryCodes[0] }, { ip });
   expect(byRecovery.status).toBe(401);
   expect(byRecovery.body.message).toBe(CODE_REFUSED);
+  expect(byRecovery.setCookie).toBeNull();
+
+  // Both refusals were about the account, not the codes: once it is no longer a super
+  // admin the same recovery code, still unspent, signs in.
+  await sql('UPDATE users SET is_super_admin = false WHERE id = $1', [account.userId]);
+  const tenantIp = newClientIp();
+  const asTenant = await post<{ user: { id: string } }>(
+    '/api/auth/login/recovery-code',
+    { handle: await handleFor(account, tenantIp), code: totp.recoveryCodes[0] },
+    { ip: tenantIp },
+  );
+  expect(asTenant.status).toBe(200);
+  expect(asTenant.body.user.id).toBe(account.userId);
 });
 
 // ---- Sign in with a passkey (no password)
