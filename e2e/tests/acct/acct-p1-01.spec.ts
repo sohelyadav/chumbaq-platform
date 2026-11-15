@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { createAccount, createProject, newClientIp, PASSWORD } from '../../support/api';
+import { apiUrl, createAccount, createProject, newClientIp, PASSWORD } from '../../support/api';
 import { adminUrl, enrolAndSignInStaff } from '../../support/admin';
 import { downloadFrom } from '../../support/browser-tools';
 import {
@@ -75,6 +75,10 @@ async function fillPasswordForm(page: Page, values: { current: string; next: str
   await passwordField(page, 'newPassword').fill(values.next);
   await passwordField(page, 'confirmPassword').fill(values.confirm);
 }
+
+/** The form's message directly under a field (the <p> after its input). */
+const messageUnder = (page: Page, name: 'currentPassword' | 'newPassword' | 'confirmPassword') =>
+  passwordField(page, name).locator('xpath=following-sibling::p[1]');
 
 /** Opens the authenticator setup on /settings, answering "Confirm it is you" with the password if asked. */
 async function openTotpSetup(page: Page, password: string): Promise<string> {
@@ -183,19 +187,34 @@ test('ACCT-013 Back after a password change does not restore the session', async
   const account = await createAccount(clientIp, 'acct013');
   await signIn(page, account);
   await page.goto('/settings');
+  await expect(page.getByRole('heading', { name: 'Account Settings' })).toBeVisible();
+  // The refresh cookie the settings page was loaded with, to replay after the change.
+  const before = (await page.context().cookies()).find((c) => c.name.endsWith('chumbaq_refresh'));
+  expect(before, 'refresh cookie before the change').toBeTruthy();
   await fillPasswordForm(page, { current: PASSWORD, next: NEW_PASSWORD, confirm: NEW_PASSWORD });
   await page.getByRole('button', { name: 'Update Password' }).click();
   await page.waitForURL(`${baseURL}/login?passwordChanged=1`);
+  const since = await dbNow();
 
   const sessionReads = recordResponses(page, 'GET', '/api/auth/sessions');
+  const visited: string[] = [];
+  page.on('framenavigated', (frame) => {
+    if (frame === page.mainFrame()) visited.push(new URL(frame.url()).pathname);
+  });
   await page.goBack();
   await expect(page).toHaveURL(`${baseURL}/login`);
   await expect(page.getByRole('heading', { name: 'Login to your account' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Account Settings' })).toHaveCount(0);
+  expect(visited[0]).toBe('/settings');
   expect(sessionReads.filter((r) => r.ok())).toEqual([]);
-  // Whatever cookie the browser still holds is refused.
-  const refresh = await page.request.post('/api/auth/refresh', { headers: { 'X-Chumbaq-Client': 'web' }, data: {} });
-  expect(refresh.status()).toBe(401);
+
+  // The session's own cookie from before the change is refused, by its session version.
+  const replay = await fetch(apiUrl('/api/auth/refresh'), {
+    method: 'POST',
+    headers: { Cookie: `${before!.name}=${before!.value}`, 'X-Chumbaq-Client': 'web', 'X-Forwarded-For': clientIp },
+  });
+  expect(replay.status).toBe(401);
+  expect(await authEvents(account.userId, since, 'refresh.failed')).toContainEqual({ type: 'refresh.failed', reason: 'session_version' });
 });
 
 test('ACCT-014 the current password is required', async ({ page, clientIp }) => {
@@ -206,6 +225,7 @@ test('ACCT-014 the current password is required', async ({ page, clientIp }) => 
   await fillPasswordForm(page, { current: '', next: NEW_PASSWORD, confirm: NEW_PASSWORD });
   await page.getByRole('button', { name: 'Update Password' }).click();
   await expect(settingsCard(page, 'Change Password').getByText('Current password is required', { exact: true })).toBeVisible();
+  await expect(messageUnder(page, 'currentPassword')).toHaveText('Current password is required');
   await expect(page.getByRole('button', { name: 'Update Password' })).toBeEnabled();
   expect(patches).toEqual([]);
 });
@@ -218,6 +238,7 @@ test('ACCT-015 a new password under 8 characters is refused in the form', async 
   await fillPasswordForm(page, { current: PASSWORD, next: 'short7!', confirm: 'short7!' });
   await page.getByRole('button', { name: 'Update Password' }).click();
   await expect(settingsCard(page, 'Change Password').getByText(TOO_SHORT, { exact: true })).toBeVisible();
+  await expect(messageUnder(page, 'newPassword')).toHaveText(TOO_SHORT);
   await expect(page.getByRole('button', { name: 'Update Password' })).toBeEnabled();
   expect(patches).toEqual([]);
 });
@@ -233,6 +254,7 @@ test('ACCT-016 a new password over 72 bytes is refused in the form', async ({ pa
     await fillPasswordForm(page, { current: PASSWORD, next: tooLong, confirm: tooLong });
     await page.getByRole('button', { name: 'Update Password' }).click();
     await expect(card.getByText(TOO_LONG, { exact: true })).toBeVisible();
+    await expect(messageUnder(page, 'newPassword')).toHaveText(TOO_LONG);
     await expect(page.getByRole('button', { name: 'Update Password' })).toBeEnabled();
   }
   expect(patches).toEqual([]);
@@ -247,14 +269,14 @@ test('ACCT-017 the confirmation is required and must match', async ({ page, clie
 
   await fillPasswordForm(page, { current: PASSWORD, next: NEW_PASSWORD, confirm: '' });
   await page.getByRole('button', { name: 'Update Password' }).click();
-  await expect(card.getByText('Please confirm your new password', { exact: true })).toBeVisible();
+  await expect(messageUnder(page, 'confirmPassword')).toHaveText('Please confirm your new password');
 
   await passwordField(page, 'confirmPassword').fill('Different-Passw0rd!');
   await page.getByRole('button', { name: 'Update Password' }).click();
   const mismatch = card.getByText("Passwords don't match", { exact: true });
   await expect(mismatch).toBeVisible();
   // Under Confirm New Password: the message follows that field.
-  await expect(passwordField(page, 'confirmPassword').locator('xpath=following-sibling::p[1]')).toHaveText("Passwords don't match");
+  await expect(messageUnder(page, 'confirmPassword')).toHaveText("Passwords don't match");
   await expect(card.getByText('Please confirm your new password', { exact: true })).toHaveCount(0);
   expect(patches).toEqual([]);
 });
