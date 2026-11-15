@@ -21,6 +21,7 @@ import {
   consentRows,
   createLiveSegment,
   dataOf,
+  emailPreview,
   emailProject,
   emailSettingsRow,
   eventRows,
@@ -817,25 +818,33 @@ test('EMAIL-203 re-connecting SES after a reload drops the configuration set', a
   await expect(page.getByRole('button', { name: /Amazon SES$/ })).toHaveCount(0);
 
   // The connect checks the keys with AWS; the request it sends is what matters here.
-  let sent: Record<string, unknown> | undefined;
+  const sent: Array<Record<string, unknown>> = [];
   await page.route('**/api/email/providers', async (route) => {
-    sent = JSON.parse(route.request().postDataJSON().credentials);
+    sent.push(JSON.parse(route.request().postDataJSON().credentials));
     await route.abort();
   });
-  await page.getByLabel('Region').fill('eu-west-1');
+  const typedSecret = 'e2e-typed-secret-access-key-00000000000';
+  // Only the two key fields typed: the stored configuration set is not sent.
   await page.getByLabel('Access key ID').fill(typedKey);
-  await page.getByLabel('Secret access key').fill('e2e-typed-secret-access-key-00000000000');
+  await page.getByLabel('Secret access key').fill(typedSecret);
   await replace.click();
-  await expect.poll(() => sent).toBeDefined();
-  expect(sent).toEqual({ region: 'eu-west-1', accessKeyId: typedKey, secretAccessKey: 'e2e-typed-secret-access-key-00000000000' });
+  await expect.poll(() => sent.length).toBe(1);
+  expect(sent[0]).toEqual({ region: 'ap-south-1', accessKeyId: typedKey, secretAccessKey: typedSecret });
+  await expect(toasts(page).filter({ hasText: 'Could not connect' })).toBeVisible();
+
+  // A region other than the stored one is taken as typed.
+  await page.getByLabel('Region').fill('eu-west-1');
+  await replace.click();
+  await expect.poll(() => sent.length).toBe(2);
+  expect(sent[1]).toEqual({ region: 'eu-west-1', accessKeyId: typedKey, secretAccessKey: typedSecret });
 
   // What an accepted connect stores is exactly what was sent.
   await page.unroute('**/api/email/providers');
-  await seedEmailCredentials(p.project.id, 'ses', { credentials: sent as never });
+  await seedEmailCredentials(p.project.id, 'ses', { credentials: sent[0] as never });
   await page.reload();
   await openEmail(page, p.project.id, 'Settings');
   await expect(stored).toHaveText(
-    `Access key ending ${typedKey.slice(-4)} in eu-west-1 (no configuration set: delivery events will not be recorded)`,
+    `Access key ending ${typedKey.slice(-4)} in ap-south-1 (no configuration set: delivery events will not be recorded)`,
   );
 });
 
@@ -926,6 +935,7 @@ test('EMAIL-216 settings that fail to load look like "not set up"', async ({ pag
   expect(attempts).toBeGreaterThanOrEqual(2);
   await expect(page.getByRole('tab', { name: 'Campaigns', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('link', { name: 'New email' })).toHaveAttribute('disabled');
+  await expect(toasts(page)).toHaveCount(0);
 
   await page.getByRole('tab', { name: 'Settings', exact: true }).click();
   await expect(page.getByLabel('From address')).toHaveValue('');
@@ -936,6 +946,8 @@ test('EMAIL-216 settings that fail to load look like "not set up"', async ({ pag
   );
   await expect(card(page, 'Provider')).toContainText('Save the sender first, then connect Amazon SES, Resend or Brevo.');
   await expect(card(page, 'Send a test')).toHaveCount(0);
+  await expect(toasts(page)).toHaveCount(0);
+  await expect(page.getByText('boom')).toHaveCount(0);
 
   await page.goto(`/projects/${p.project.id}/email/new`);
   await expect(page.getByRole('heading', { name: 'New email', exact: true })).toBeVisible();
@@ -1079,23 +1091,32 @@ test('EMAIL-231 confirmation mailer claims the send even when the provider refus
   expect((refused[0].body as { subject: string }).subject).toBe('Confirm you want emails from E2E News');
   expect((await identityRows(p.project.id, address))[0].email_confirmed_at).toBeNull();
 
-  // Another tick claims nothing new.
-  await new Promise((resolve) => setTimeout(resolve, 70_000));
+  // Another tick claims nothing new. An address reported after the claim can only be
+  // claimed by a later tick, so once it is, that tick has passed over the first one.
+  const marker = uniqueEmail('email-231-marker');
+  await identifyEmail(p, p.owner.ip, { email: marker, emailOptIn: true });
+  await expect
+    .poll(async () => (await identityRows(p.project.id, marker))[0].email_confirm_sent_at, { timeout: 100_000, intervals: [2_000] })
+    .not.toBeNull();
   expect(new Date((await sentAt())!).getTime()).toBe(new Date(claimedAt).getTime());
   expect(await brevoCallsTo(address)).toHaveLength(1);
-  expect(await sends(p.project.id)).toHaveLength(1);
+  expect((await sends(p.project.id)).filter((row) => row.address_hash === claim.address_hash)).toEqual([claim]);
+  expect(await sends(p.project.id)).toHaveLength(2);
   // Neither a suppressed address nor a project not requiring opt-in is claimed.
   expect((await identityRows(p.project.id, suppressed))[0].email_confirm_sent_at).toBeNull();
   expect(await brevoCallsTo(suppressed)).toHaveLength(0);
   expect((await identityRows(off.project.id, offAddress))[0].email_confirm_sent_at).toBeNull();
   expect(await sends(off.project.id)).toEqual([]);
 
-  // The link for that send confirms, though the mail never went out.
+  // The link for that send confirms, though the mail never went out, and the person
+  // becomes reachable (nobody else here is confirmed or unsuppressed).
+  expect((await emailPreview(p.owner, p.project.id)).recipients).toBe(0);
   const confirmed = await publicRequest('POST', pathAndQuery(signConfirmLink(p.project.id, address, new Date(claimedAt))), FORM);
   expect(confirmed.status).toBe(200);
   expect(confirmed.text).toContain('<title>Confirmed</title>');
   expect((await identityRows(p.project.id, address))[0].email_confirmed_at).not.toBeNull();
   expect(await consentRows(person)).toContainEqual({ channel: 'email', granted: true, source: 'email_confirmation' });
+  expect((await emailPreview(p.owner, p.project.id)).recipients).toBe(1);
 });
 
 test('EMAIL-234 unsubscribe link for an address the suppression store refuses', async ({ page }) => {
