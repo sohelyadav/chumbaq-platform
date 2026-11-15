@@ -82,9 +82,11 @@ test('ADMTEN-167 opening the link lands read-only in the tenant dashboard', asyn
   const staff = await signedInStaff(page, clientIp);
   const tenant = await createAccount(newClientIp(), 'tenant', 'Tess Tenant');
   const project = await createProject(tenant, clientIp, `Viewed project ${hex()}`);
-  // Held a moment, so the page's waiting state can be seen.
+  // Held until the page's waiting state has been seen.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
   await context.route(`**${EXCHANGE}`, async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    await held;
     await route.continue();
   });
   const documents: string[] = [];
@@ -101,6 +103,7 @@ test('ADMTEN-167 opening the link lands read-only in the tenant dashboard', asyn
   const [viewAs] = await Promise.all([context.waitForEvent('page'), ready.getByRole('link', { name: 'Open view-as' }).click()]);
 
   await expect(viewAs.getByText('Opening view-as...')).toBeVisible();
+  release();
   await expect(viewAs).toHaveURL(`${baseURL}/projects`);
   // A full page load into the dashboard, not a client-side route change.
   expect(documents).toContain(`${baseURL}/projects`);
@@ -117,9 +120,8 @@ test('ADMTEN-167 opening the link lands read-only in the tenant dashboard', asyn
   expect(new Date(Number(claims.exp) * 1000).toISOString()).toBe(stored?.expiresAt);
 
   // Nothing of the session outlives the tab: no localStorage entry, no refresh cookie.
-  const local = await viewAs.evaluate(() => Object.entries(localStorage));
-  expect(local.map(([key]) => key)).not.toContain('chumbaq_signed_in');
-  for (const [, value] of local) expect(value).not.toContain(String(stored?.accessToken));
+  // This context never signed in to the customer app, so its localStorage stays empty.
+  expect(await viewAs.evaluate(() => Object.keys(localStorage))).toEqual([]);
   // Every cookie of the context (a URL filter would leave out the refresh cookie's path).
   const cookies = await context.cookies();
   expect(cookies.filter((cookie) => CUSTOMER_REFRESH_COOKIE.test(cookie.name))).toEqual([]);
@@ -293,7 +295,7 @@ test('ADMTEN-178 the recheck refuses a code whose staff member stopped being sta
 });
 
 test('ADMTEN-179 the recheck: staff signed out, version changed, suspended', async ({ page, browser, baseURL, clientIp }) => {
-  test.slow(); // Two staff members enrol passkeys, and one signs in twice.
+  test.slow(); // Two staff members enrol passkeys, and one signs in three times.
   const staff = await signedInStaff(page, clientIp);
   const tenant = await createAccount(newClientIp(), 'tenant', 'Tess Tenant');
 
@@ -309,20 +311,24 @@ test('ADMTEN-179 the recheck: staff signed out, version changed, suspended', asy
   expect([r4.status, r4.json?.message]).toEqual([400, LINK_INVALID]);
   expect(await exchangeAudit(tenant.userId)).toEqual([]);
 
-  // Signed in again: codes 1 and 2 from the new session.
+  // 1: signed in again, the code made, then the staff session ended without the sweep
+  // of unused codes.
   const token = await staffPasskeySignIn(page);
   const again: Staff = { ...staff, token, sessionId: String(jwtClaims(token).sid) };
   expect(again.sessionId).not.toBe(staff.sessionId);
   const first = await startViewAs(again, tenant.userId, clientIp);
-  const second = await startViewAs(again, tenant.userId, clientIp);
-  const [row1, row2] = await handoffRows({ actorId: staff.account.userId });
-
-  // 1: the staff session ended without the sweep of unused codes.
+  const [row1] = await handoffRows({ actorId: staff.account.userId });
   await sql(`UPDATE staff_sessions SET revoked_at = now() WHERE id = $1`, [again.sessionId]);
   const r1 = await exchange(codeFromViewAsUrl(first.url), clientIp);
   expect([r1.status, r1.json?.message]).toEqual([400, LINK_INVALID]);
 
-  // 2: the staff member's session version moved on.
+  // 2: signed in once more, so the code's staff session is live and only the staff
+  // member's session version moves on.
+  const token2 = await staffPasskeySignIn(page);
+  const third: Staff = { ...staff, token: token2, sessionId: String(jwtClaims(token2).sid) };
+  const second = await startViewAs(third, tenant.userId, clientIp);
+  const [, row2] = await handoffRows({ actorId: staff.account.userId });
+  expect(row2.staff_session_id).toBe(third.sessionId);
   await sql(`UPDATE users SET session_version = session_version + 1 WHERE id = $1`, [staff.account.userId]);
   const r2 = await exchange(codeFromViewAsUrl(second.url), clientIp);
   expect([r2.status, r2.json?.message]).toEqual([400, LINK_INVALID]);
@@ -527,8 +533,9 @@ test('ADMTEN-189 view-as is per tab', async ({ page, context, baseURL, clientIp 
   await ownView();
 
   await viewAs.bringToFront();
+  const leaving = leavingFor(viewAs, tenant.userId);
   await viewAsBanner(viewAs).getByRole('button', { name: 'Exit' }).click();
-  await expect(viewAs).toHaveURL(adminUrl(`/tenants/${tenant.userId}`));
+  await leaving;
   await ownView();
 
   const cookies = await context.cookies();
@@ -553,6 +560,11 @@ test('ADMTEN-191 expiry after 30 minutes returns to the admin app', async ({ pag
   await leaving;
   await expect(viewAs).toHaveURL(new RegExp(`^${escapeRegExp(adminUrl(''))}/`));
   await expect(viewAs.getByText(project.name)).toHaveCount(0);
+
+  // The record is gone from the tab: read on a static file of the dashboard's origin, where
+  // no app code runs (any dashboard page would drop an expired record on load as well).
+  await viewAs.goto('/logo.svg');
+  expect(await viewAs.evaluate(() => sessionStorage.getItem('chumbaq_impersonation'))).toBeNull();
 
   await viewAs.goto('/projects');
   expect(await storedViewAs(viewAs)).toBeNull();
@@ -622,16 +634,16 @@ test('ADMTEN-214 staff cancel a pending reset', async ({ page, clientIp }) => {
   const card = secondFactorsCard(page);
   await expect(card).toContainText('Reset scheduled for');
   await expect(card).toContainText(`Requested by ${staff.account.email} on`);
-  let held = false;
+  // The cancel is held until its in-flight state has been seen.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
   await page.route('**/factor-reset', async (route) => {
-    if (route.request().method() === 'DELETE' && !held) {
-      held = true;
-      await new Promise((resolve) => setTimeout(resolve, 1_500));
-    }
+    if (route.request().method() === 'DELETE') await held;
     await route.continue();
   });
   await card.getByRole('button', { name: 'Cancel reset' }).click();
   await expect(card.getByRole('button', { name: 'Cancelling...' })).toBeDisabled();
+  release();
   await expect(adminToast(page, 'Reset cancelled')).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'Confirm it is you' })).toHaveCount(0);
 
