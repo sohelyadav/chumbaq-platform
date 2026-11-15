@@ -186,11 +186,13 @@ test('INTEG-097 import fails when Mixpanel refuses the credentials', async ({ pa
 });
 
 test('INTEG-097 import on a project with no Mixpanel config is refused as a bad request', async () => {
-  test.fail(true, 'INTEG-097');
-  test.info().annotations.push({ type: 'issue', description: 'INTEG-097' });
   const p = await ownerWithProject();
   const response = await as(p.owner, 'POST', `/api/projects/${p.project.id}/mixpanel/cohorts/import`, { mixpanelCohortId: 1 });
   expect(await sql(`SELECT id FROM mixpanel_cohorts WHERE "projectId" = $1`, [p.project.id])).toHaveLength(0);
+  expect(response.status).toBeGreaterThanOrEqual(400);
+  // Only the status and message below are expected to fail; the checks above must hold.
+  test.fail(true, 'INTEG-097');
+  test.info().annotations.push({ type: 'issue', description: 'INTEG-097' });
   expect(response.status).toBe(400);
   expect(messageOf(response)).toBe(NOT_CONFIGURED);
 });
@@ -672,17 +674,23 @@ test('INTEG-110 the members filter', async ({ page }) => {
 });
 
 test('INTEG-111 member count and pages', async ({ page }) => {
-  test.fail(true, 'INTEG-111');
-  test.info().annotations.push({ type: 'issue', description: 'INTEG-111' });
   const p = await ownerWithProject();
   const cohort = await seedCohortWith(p.project.id, {
     name: 'Big cohort',
-    members: Array.from({ length: 120 }, (_, i) => ({ deviceIdentityId: null, distinctId: `member-${String(i).padStart(3, '0')}` })),
+    members: Array.from({ length: 120 }, (_, i) => ({
+      deviceIdentityId: null,
+      distinctId: `member-${String(i).padStart(3, '0')}`,
+      addedAt: new Date(Date.now() - (120 - i) * 1000),
+    })),
   });
   await signIn(page, p.owner);
   await openCohort(page, p.project.id, cohort.id, 'Big cohort');
   const members = cardTitled(page, 'Members');
   await expect(members.locator('tbody tr')).toHaveCount(50);
+  await expect(members.locator('tbody tr td:first-child').first()).toHaveText('member-119');
+  // Only the count and paging below are expected to fail; the first page above must hold.
+  test.fail(true, 'INTEG-111');
+  test.info().annotations.push({ type: 'issue', description: 'INTEG-111' });
   await expect(members.getByText('120 total members', { exact: true })).toBeVisible({ timeout: 5000 });
   await expect(members.getByText('Page 1 of 3', { exact: true })).toBeVisible();
   await expect(members.getByRole('button', { name: 'Previous' })).toBeDisabled();
@@ -743,8 +751,14 @@ test('INTEG-119 push form validation', async ({ page }) => {
   await form.getByRole('button', { name: 'Send Push' }).click();
   await expect(form.getByText('Body is required', { exact: true })).toBeVisible();
   await expect(form.getByText('Title is required', { exact: true })).toHaveCount(0);
-  await page.waitForTimeout(500);
   expect(posts).toEqual([]);
+
+  // Positive control: with a body too the form does send, and that is the only request.
+  await form.getByPlaceholder('Notification body').fill('And a body');
+  const sent = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith(`/cohorts/${cohort.id}/push`));
+  await form.getByRole('button', { name: 'Send Push' }).click();
+  await sent;
+  expect(posts).toHaveLength(1);
 });
 
 test('INTEG-120 platform choice', async ({ page }) => {
@@ -986,13 +1000,13 @@ test('INTEG-138 view-as sees the privacy option but cannot make a privacy key', 
   await dialog.getByPlaceholder('e.g., Production API Key').fill('va-priv');
 
   await refusedAsReadOnly(page, `/projects/${p.project.id}/api-keys`, 'POST', () => dialog.getByRole('button', { name: 'Create', exact: true }).click());
+  // The create fails only once the request has settled; a re-authentication would hold it
+  // open, so with this toast shown no dialog for it can still be coming.
   await expect(toast(page, 'Failed to create key')).toBeVisible();
   await expect(page.getByRole('dialog', { name: /Confirm it is you/ })).toHaveCount(0);
   await expect(dialog.getByRole('heading', { name: 'Create API Key' })).toBeVisible();
   await expect(dialog.getByPlaceholder('e.g., Production API Key')).toHaveValue('va-priv');
   await expect(dialog.getByRole('checkbox')).toBeChecked();
-  await page.waitForTimeout(500);
-  await expect(page.getByRole('dialog', { name: /Confirm it is you/ })).toHaveCount(0);
 
   expect(await apiKeyRows(p.project.id)).toHaveLength(0);
   expect(await activityRows(p.project.id, 'api_key.created')).toHaveLength(0);
@@ -1029,6 +1043,8 @@ test('INTEG-144 closing the secret dialog any way loses the secret', async ({ pa
   await expect(reveal.locator('code')).toHaveText(createdSecret);
   await page.keyboard.press('Escape');
   await expect(reveal).toBeHidden();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
   await expect(webhookCard(page, url).getByText(`Signing secret ending ${createdSecret.slice(-4)}`)).toBeVisible();
   expect(await page.content()).not.toContain(createdSecret);
 
@@ -1041,6 +1057,8 @@ test('INTEG-144 closing the secret dialog any way loses the secret', async ({ pa
   await expect(fresh.locator('code')).toHaveText(rotatedSecret);
   await page.mouse.click(5, 5);
   await expect(fresh).toBeHidden();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
   await expect(webhookCard(page, other.url).getByText(`Signing secret ending ${rotatedSecret.slice(-4)}`)).toBeVisible();
   expect(dialogs).toEqual([]);
 
@@ -1089,11 +1107,13 @@ test('INTEG-147 PATCH webhook: request validation', async () => {
 });
 
 test('INTEG-147 PATCH webhook: a string isActive is refused', async () => {
-  test.fail(true, 'INTEG-147');
-  test.info().annotations.push({ type: 'issue', description: 'INTEG-147' });
   const p = await ownerWithProject();
   const webhook = await createWebhook(p.owner, p.project.id, { url: literalHookUrl('patch-off'), events: ['click'], isActive: false });
   const [before] = await webhookRows(p.project.id);
+  expect(before.is_active).toBe(false);
+  // Only what follows is expected to fail; the inactive starting row above must hold.
+  test.fail(true, 'INTEG-147');
+  test.info().annotations.push({ type: 'issue', description: 'INTEG-147' });
   const response = await as(p.owner, 'PATCH', `/api/projects/${p.project.id}/webhooks/${webhook.id}`, { isActive: 'no' });
   expect(await webhookRows(p.project.id)).toEqual([before]);
   expect(response.status).toBe(400);
