@@ -1,12 +1,21 @@
-import { randomBytes } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
 import { expect, type Browser, type Locator, type Page } from '@playwright/test';
 import { Client } from 'pg';
 import { adminApi, enrolAndSignInStaff } from '../admin';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
-import { connectFakeSmsProvider, smsWebhookPath, type SeededSms } from '../channels';
+import {
+  connectFakeSmsProvider,
+  connectFakeWhatsAppProvider,
+  smsWebhookPath,
+  whatsappWebhookPath,
+  type SeededSms,
+  type SeededWhatsApp,
+  type WhatsAppProviderChoice,
+  type WhatsAppProviderName,
+} from '../channels';
 import { newPersonContext } from '../fixtures';
-import { stubCalls } from '../provider-stub';
-import { publicApiUrl, twilioSignature } from '../signing';
+import { stubCalls, type StubProvider } from '../provider-stub';
+import { hubSignature, interaktSignature, publicApiUrl, twilioSignature } from '../signing';
 import { assertE2eDatabase, stackEnv } from '../stack';
 
 /**
@@ -383,4 +392,222 @@ export async function viewAsHandoff(browser: Browser, baseURL: string | undefine
 export async function openViewAs(page: Page, url: string): Promise<void> {
   await page.goto(url);
   await page.getByRole('region', { name: 'Impersonation session' }).waitFor();
+}
+
+// ---- WhatsApp
+
+export const ONLY_OWNERS = 'Only owners and admins can see this.';
+
+/** A WhatsApp provider seeded into an `SmsProject` (optionally alongside Twilio for SMS). */
+export interface WaProject<P extends WhatsAppProviderName = WhatsAppProviderName> extends SmsProject {
+  wa: SeededWhatsApp<P>;
+}
+
+type StoredName<P extends WhatsAppProviderChoice> = P extends 'twilio' ? 'twilio_whatsapp' : P;
+
+/**
+ * A project of a new owner (or `owner`) with an SDK key and `provider` connected for
+ * WhatsApp (seeded). `signed: false` leaves out Meta's app secret or Interakt's webhook
+ * secret; `twilio` also seeds Twilio for SMS.
+ */
+export async function waProject<P extends WhatsAppProviderChoice>(
+  label: string,
+  provider: P,
+  { signed, requireOptIn, twilio = false }: { signed?: boolean; requireOptIn?: boolean; twilio?: boolean } = {},
+  owner?: Person,
+): Promise<WaProject<StoredName<P>>> {
+  const base = await smsProject(label, { twilio }, owner);
+  const wa = await connectFakeWhatsAppProvider(base.project.id, provider, { signed, requireOptIn });
+  return { ...base, wa } as WaProject<StoredName<P>>;
+}
+
+export async function waSettingsRow(projectId: string): Promise<Record<string, any> | undefined> {
+  const [row] = await sql(`SELECT * FROM whatsapp_settings WHERE project_id = $1`, [projectId]);
+  return row;
+}
+
+export async function waPreview(as: Caller, projectId: string, extra: Record<string, unknown> = {}): Promise<number> {
+  return dataOf(await call('POST', '/api/whatsapp/audience-preview', as, { projectId, ...extra })).recipients;
+}
+
+export async function waSuppressionList(as: Caller, projectId: string): Promise<{ data: Array<Record<string, any>>; total: number }> {
+  return dataOf(await call('GET', `/api/whatsapp/suppressions/${projectId}`, as));
+}
+
+/** A hand-typed template as the composer sends it for a provider that cannot list templates. */
+export function handTyped(id = 'order_update', bodyParams: string[] = []): Record<string, unknown> {
+  return { template: { id, name: id, language: 'en' }, bodyParams, buttonParams: [], previewText: null };
+}
+
+/** A WhatsApp campaign through the API, scheduled a month ahead. */
+export async function scheduleWhatsAppCampaign(as: Caller, projectId: string, extra: Record<string, unknown> = {}) {
+  return call('POST', '/api/whatsapp/send', as, {
+    projectId,
+    content: handTyped(),
+    scheduledAt: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(),
+    ...extra,
+  });
+}
+
+/** A campaign row of `channel` written straight into the table (as a finished send leaves one). */
+export async function seedCampaignRow(projectId: string, channel: 'sms' | 'whatsapp' | 'push', title = 'E2E seeded'): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO push_notification_logs (project_id, title, channel, status, total_tokens, success_count, processed_tokens)
+     VALUES ($1, $2, $3, 'sent', 1, 1, 1) RETURNING id`,
+    [projectId, title, channel],
+  );
+  return row.id;
+}
+
+/** A `sent` event for (campaign, identity), `daysAgo` days back, as the worker records one. */
+export async function seedSentEvent(projectId: string, campaignId: string, identityId: string, daysAgo: number): Promise<void> {
+  await sql(
+    `INSERT INTO push_notification_events (project_id, campaign_id, device_identity_id, type, platform, occurred_at)
+     VALUES ($1, $2, $3, 'sent', 'whatsapp', now() - make_interval(days => $4::int))`,
+    [projectId, campaignId, identityId, daysAgo],
+  );
+}
+
+/** POSTs a JSON body, sent byte for byte as `raw`, with `headers`. */
+export async function postJson(path: string, raw: string, headers: Record<string, string> = {}): Promise<RawResponse> {
+  const response = await fetch(apiUrl(path), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': newClientIp(), ...headers },
+    body: raw,
+  });
+  const text = await response.text();
+  let parsed: any = text;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    // Not JSON.
+  }
+  return { status: response.status, headers: response.headers, text, body: parsed };
+}
+
+export interface MetaValue {
+  statuses?: Array<Record<string, unknown>>;
+  messages?: Array<Record<string, unknown>>;
+  user_preferences?: Array<Record<string, unknown>>;
+}
+
+/** Meta's webhook body around one change value. */
+export function metaBody(value: MetaValue): string {
+  return JSON.stringify({ object: 'whatsapp_business_account', entry: [{ id: '0', changes: [{ field: 'messages', value }] }] });
+}
+
+/**
+ * Posts a Meta webhook to the project's Meta URL, signed with the stored app secret
+ * unless `signature` says otherwise (`null`: no header; a string: that header).
+ */
+export function metaPost(wa: SeededWhatsApp<'meta'>, value: MetaValue, signature?: string | null): Promise<RawResponse> {
+  const raw = metaBody(value);
+  const secret = wa.credentials.appSecret;
+  const header = signature === undefined ? (secret ? hubSignature(secret, raw) : null) : signature;
+  return postJson(whatsappWebhookPath('meta', wa.webhookToken), raw, header ? { 'X-Hub-Signature-256': header } : {});
+}
+
+/** A Meta status for `number` (digits, no plus), tagged with campaign and identity when given. */
+export function metaStatus(number: string, status: string, tags: { c?: string; i?: string } = {}, extra: Record<string, unknown> = {}) {
+  return {
+    id: `wamid.${randomBytes(8).toString('hex')}`,
+    status,
+    recipient_id: number,
+    timestamp: String(Math.floor(Date.now() / 1000)),
+    ...(tags.c || tags.i ? { biz_opaque_callback_data: JSON.stringify(tags) } : {}),
+    ...extra,
+  };
+}
+
+/** A Meta text reply from `number`; no timestamp means the API's own time. */
+export function metaReply(number: string, text: string, timestamp?: number) {
+  return { from: number, id: `wamid.${randomBytes(8).toString('hex')}`, type: 'text', text: { body: text }, ...(timestamp ? { timestamp: String(timestamp) } : {}) };
+}
+
+/** Posts an Interakt webhook, signed with the stored webhook secret unless `signature` says otherwise. */
+export function interaktPost(wa: SeededWhatsApp<'interakt'>, body: Record<string, unknown>, signature?: string | null): Promise<RawResponse> {
+  const raw = JSON.stringify(body);
+  const secret = wa.credentials.webhookSecret;
+  const header = signature === undefined ? (secret ? interaktSignature(secret, raw) : null) : signature;
+  return postJson(whatsappWebhookPath('interakt', wa.webhookToken), raw, header ? { 'Interakt-Signature': header } : {});
+}
+
+export function interaktReceived(number: string, text: string) {
+  return { type: 'message_received', data: { customer: { channel_phone_number: number }, message: { message: text } } };
+}
+
+export function gupshupPost(webhookToken: string, body: Record<string, unknown>): Promise<RawResponse> {
+  return postJson(whatsappWebhookPath('gupshup', webhookToken), JSON.stringify(body));
+}
+
+/** A Twilio WhatsApp webhook (form body) to the project's URL, signed with `authToken`. */
+export function twilioWhatsAppPost(
+  wa: SeededWhatsApp<'twilio_whatsapp'>,
+  params: Record<string, string>,
+  query: { c?: string; i?: string } = {},
+  options: TwilioPost = { authToken: wa.credentials.authToken },
+): Promise<RawResponse> {
+  const search = new URLSearchParams(query as Record<string, string>).toString();
+  return postTwilio(`${whatsappWebhookPath('twilio_whatsapp', wa.webhookToken)}${search ? `?${search}` : ''}`, params, options);
+}
+
+/** The provider stub's calls to `provider` whose path or body mentions `needle`. */
+export async function providerCallsMentioning(provider: StubProvider, needle: string) {
+  return (await stubCalls(provider)).filter((entry) => `${entry.path} ${JSON.stringify(entry.body)}`.includes(needle));
+}
+
+/** Opens the WhatsApp page on a tab. */
+export async function openWhatsApp(page: Page, projectId: string, tab: 'Campaigns' | 'Suppressions' | 'Settings'): Promise<void> {
+  await page.goto(`/projects/${projectId}/whatsapp`);
+  await page.getByRole('heading', { name: 'WhatsApp', exact: true }).waitFor();
+  const trigger = page.getByRole('tab', { name: tab, exact: true });
+  await trigger.click();
+  await expect(trigger).toHaveAttribute('aria-selected', 'true');
+}
+
+/** The WhatsApp Consent card's switch (its label has no htmlFor). */
+export function waConsentSwitch(page: Page): Locator {
+  return page.getByText('Only message people who opted in to WhatsApp', { exact: true }).locator('../..').getByRole('switch');
+}
+
+/** The Webhook block of the WhatsApp Provider card. */
+export function waWebhookBlock(page: Page): Locator {
+  return page.locator('div.rounded-md.border').filter({ has: page.getByText('Webhook', { exact: true }) });
+}
+
+/** The green summary line of a provider tab with stored credentials. */
+export function waSummaryLine(page: Page): Locator {
+  return page.locator('p').filter({ hasText: 'secret ending' });
+}
+
+/** Erases one person (device identity) through the dashboard route, as the owner. */
+export async function erasePerson(as: Caller, projectId: string, identityId: string): Promise<void> {
+  const answered = await call('DELETE', `/api/projects/${projectId}/users/${identityId}`, as);
+  if (answered.status !== 200) throw new Error(`Erasure answered ${answered.status}: ${answered.text.slice(0, 300)}`);
+}
+
+/** A live segment (anyone with a country) in a project, through the API. */
+export async function createSegmentIn(as: Caller, projectId: string): Promise<string> {
+  const created = dataOf(
+    await call('POST', `/api/projects/${projectId}/segments`, as, {
+      name: `smswa-${randomBytes(3).toString('hex')}`,
+      definition: { type: 'group', operator: 'and', children: [{ type: 'attribute', field: 'country', op: 'exists', value: null }] },
+      evaluationMode: 'live',
+    }),
+  );
+  return created.id;
+}
+
+export async function identitySecretOf(as: Caller, projectId: string): Promise<string> {
+  return dataOf(await call('GET', `/api/projects/${projectId}/identity-secret`, as)).secret;
+}
+
+/** HMAC-SHA256 of the external id under the project's identity secret, as hex. */
+export function userHashOf(secret: string, externalUserId: string): string {
+  return createHmac('sha256', secret).update(externalUserId, 'utf8').digest('hex');
+}
+
+/** A phone number no other test draws: +91 98 and eight random digits. */
+export function uniquePhone(): string {
+  return `+9198${Array.from(randomBytes(8), (b) => String(b % 10)).join('')}`;
 }
