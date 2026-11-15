@@ -400,3 +400,124 @@ export async function holdRequests(page: Page, method: string, pathPart: string)
   );
   return release;
 }
+
+// ---- Bulk rows and list page (P1)
+
+export interface SeedDevice {
+  fingerprint: string;
+  platform?: string;
+  /** How long ago it was last seen, as a Postgres interval ('5 minutes', '40 days'). */
+  lastSeenAgo?: string;
+  distinctId?: string | null;
+  externalUserId?: string | null;
+}
+
+/**
+ * Device rows written straight to the table, for counts and ordering the list must
+ * show (dozens of rows, exact last-seen times) rather than what identify stores.
+ * `first_seen_at` follows `last_seen_at`, so an old row is not new this week either.
+ */
+export async function insertDevices(projectId: string, devices: SeedDevice[]): Promise<string[]> {
+  const ids: string[] = [];
+  for (const device of devices) {
+    const age = device.lastSeenAgo ?? '0 seconds';
+    const [row] = await sql<{ id: string }>(
+      `INSERT INTO device_identities (project_id, device_fingerprint, platform, distinct_id, external_user_id, first_seen_at, last_seen_at)
+       VALUES ($1, $2, $3, $4, $5, now() - $6::interval, now() - $6::interval) RETURNING id`,
+      [projectId, device.fingerprint, device.platform ?? 'web', device.distinctId ?? null, device.externalUserId ?? null, age],
+    );
+    ids.push(row.id);
+  }
+  return ids;
+}
+
+/** Moves a device's last (and first) sighting back by `age`, a Postgres interval. */
+export async function ageDevice(id: string, age: string): Promise<void> {
+  await sql(`UPDATE device_identities SET last_seen_at = now() - $2::interval, first_seen_at = now() - $2::interval WHERE id = $1`, [id, age]);
+}
+
+/** The value of one stat card on the people list, by its exact title. */
+export function statValue(page: Page, title: string): Locator {
+  return page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.locator('[data-slot="card-title"]').getByText(title, { exact: true }) })
+    .locator('[data-slot="card-content"]');
+}
+
+/** The people list's filter bar: the search box and the three selects, in order. */
+export function listFilters(page: Page): Locator {
+  return page.locator('div').filter({ has: page.getByPlaceholder('Search by name, email, or ID...') }).filter({ has: page.getByRole('combobox') }).last();
+}
+
+/** Picks an option of the nth select of the filter bar (0 status, 1 push, 2 platform). */
+export async function chooseFilter(page: Page, index: number, option: string): Promise<void> {
+  await listFilters(page).getByRole('combobox').nth(index).click();
+  await page.getByRole('option', { name: option, exact: true }).click();
+}
+
+/** Body rows of the people table (the header row left out). */
+export function bodyRows(page: Page): Locator {
+  return page.locator('[data-slot="table-body"] [data-slot="table-row"]');
+}
+
+/** Waits for the people list request whose query matches every given parameter (and lacks the absent ones). */
+export function waitForList(page: Page, projectId: string, params: Record<string, string | null>) {
+  return page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    if (url.pathname !== `/api/projects/${projectId}/users` || response.request().method() !== 'GET') return false;
+    return Object.entries(params).every(([key, value]) => url.searchParams.get(key) === value);
+  });
+}
+
+// ---- Person profile (P1)
+
+/** A section of the profile page's main column ("Events", "Push Notifications"), by its heading. */
+export function profileSection(page: Page, heading: string): Locator {
+  return page
+    .getByRole('heading', { name: heading, exact: true })
+    .locator('xpath=ancestor::div[contains(@class, "rounded-xl")][1]');
+}
+
+/** The "Profile Properties" cards in page order, as [label, value] pairs. */
+export async function profileProperties(page: Page): Promise<Array<[string, string]>> {
+  const cards = profileSection(page, 'Profile Properties').locator('.overflow-y-auto > div');
+  const out: Array<[string, string]> = [];
+  for (const card of await cards.all()) {
+    const parts = await card.locator('p').allTextContents();
+    out.push([parts[0], parts[1]]);
+  }
+  return out;
+}
+
+/** user_events rows written straight to the table, at exact local times ('yyyy-MM-dd HH:mm:ss'). */
+export async function insertEvents(
+  projectId: string,
+  distinctId: string,
+  deviceIdentityId: string | null,
+  events: Array<{ name: string; at: string; properties?: Record<string, unknown> }>,
+): Promise<void> {
+  for (const event of events) {
+    await sql(
+      `INSERT INTO user_events (project_id, distinct_id, device_identity_id, event_name, properties, timestamp)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::timestamp)`,
+      [projectId, distinctId, deviceIdentityId, event.name, event.properties ? JSON.stringify(event.properties) : null, event.at],
+    );
+  }
+}
+
+/** A campaign row (push unless named) sent at an exact local time ('yyyy-MM-dd HH:mm:ss'). */
+export async function insertCampaign(projectId: string, title: string, sentAt: string, channel = 'push'): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO push_notification_logs (project_id, title, channel, status, sent_at) VALUES ($1, $2, $3, 'sent', $4::timestamp) RETURNING id`,
+    [projectId, title, channel, sentAt],
+  );
+  return row.id;
+}
+
+/** One per-recipient event of a campaign, as a device reports it, at an exact local time. */
+export async function insertCampaignEvent(projectId: string, campaignId: string, deviceIdentityId: string, type: string, occurredAt: string): Promise<void> {
+  await sql(
+    `INSERT INTO push_notification_events (project_id, campaign_id, device_identity_id, type, occurred_at) VALUES ($1, $2, $3, $4, $5::timestamp)`,
+    [projectId, campaignId, deviceIdentityId, type, occurredAt],
+  );
+}
