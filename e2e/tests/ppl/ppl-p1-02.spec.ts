@@ -1257,7 +1257,7 @@ test('PPL-175 The identify response returns the whole stored row', async ({ clie
   await sql(`UPDATE device_identities SET email_confirmed_at = now() WHERE id = $1`, [asha.id]);
   const sessionsBefore = (await deviceRow(asha.id))!.total_sessions;
 
-  // Only the public key and the fingerprint, from another address.
+  // A call naming only the fingerprint, from another client address.
   const caller = newClientIp();
   const answer = await raw('POST', '/api/identity/identify', { projectId: p.project.id, deviceFingerprint: fp, platform: 'ios' }, { ip: caller, apiKey: p.sdkKey });
   expect(answer.status).toBe(201);
