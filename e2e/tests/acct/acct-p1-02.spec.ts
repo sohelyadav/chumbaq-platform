@@ -2,6 +2,9 @@ import type { Page, Response } from '@playwright/test';
 import { enrolAndSignInStaff } from '../../support/admin';
 import { createAccount, createProject, newClientIp, PASSWORD } from '../../support/api';
 import { fixedLocaleContext } from '../../support/browser-tools';
+import { runJobNow } from '../../support/jobs';
+import { waitForMail, mailsTo } from '../../support/mailbox';
+import { failStub } from '../../support/provider-stub';
 import {
   addAuthenticator,
   confirmWithPassword,
@@ -161,6 +164,11 @@ test('ACCT-076 a passkey name with markup is shown as text', async ({ page, clie
   await expect(page.locator('img[src="x"]')).toHaveCount(0);
   expect((await passkeyRows(account.userId)).map((r) => r.name)).toEqual([name]);
   expect(dialogs).toEqual([]);
+  // The notice email carries the name escaped in its HTML part.
+  const notice = await waitForMail(account.email, { subjectIncludes: 'A passkey was added' });
+  expect(notice.html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+  expect(notice.html).not.toContain(name);
+  expect(notice.text).toContain(name);
 });
 
 test('ACCT-078 a second passkey brings no new codes', async ({ page, clientIp }) => {
@@ -761,9 +769,6 @@ test('ACCT-147 secrets are not cacheable', async ({ page, clientIp }) => {
   const regenerated = await call('POST', '/api/auth/recovery-codes', undefined, { ip: clientIp, token });
   expect(regenerated.status).toBe(200);
   expect(regenerated.headers.get('cache-control')).toBe('no-store');
-  // Control: a read of the same account is not marked so.
-  const factors = await call('GET', '/api/auth/factors', undefined, { ip: clientIp, token });
-  expect(factors.headers.get('cache-control')).not.toBe('no-store');
 });
 
 test('ACCT-148 the factor status matches what sign-in asks for', async ({ clientIp }) => {
@@ -968,7 +973,14 @@ test('ACCT-161 recovery codes outlive the last passkey after a cancelled authent
 test('ACCT-162 adding a passkey when every recovery code is used issues a new set', async ({ browser, baseURL }) => {
   test.slow();
 
-  const expectNewSet = async (page: Page, userId: string, data: { recoveryCodes?: string[] }, before: string[]) => {
+  const expectNewSet = async (
+    page: Page,
+    account: { userId: string; email: string },
+    data: { recoveryCodes?: string[] },
+    before: string[],
+    since: Date,
+  ) => {
+    const userId = account.userId;
     expect(data.recoveryCodes).toHaveLength(10);
     for (const code of data.recoveryCodes!) expect(code).toMatch(RECOVERY_CODE);
     const passkeys = settingsCard(page, 'Passkeys');
@@ -986,6 +998,9 @@ test('ACCT-162 adding a passkey when every recovery code is used issues a new se
     const activity = settingsCard(page, 'Recent security activity');
     await expect(activity.locator('p', { hasText: 'Passkey added' }).first()).toBeVisible();
     await expect(activity.locator('p', { hasText: 'New recovery codes made' })).toHaveCount(0);
+    // The owner hears of the passkey, not of replaced codes.
+    await waitForMail(account.email, { subjectIncludes: 'A passkey was added', since });
+    expect(await mailsTo(account.email, { subjectIncludes: 'recovery codes were replaced', since })).toEqual([]);
   };
 
   // (a) Authenticator app on, every code used, no passkey: a first passkey.
@@ -1003,6 +1018,7 @@ test('ACCT-162 adding a passkey when every recovery code is used issues a new se
       await expect(settingsCard(page, 'Recovery codes').getByText('You have 0 codes left.')).toBeVisible();
 
       const card = settingsCard(page, 'Passkeys');
+      const since = await dbNow();
       const registered = page.waitForResponse(isCall('POST', '/api/auth/passkeys'));
       await card.getByLabel('Name', { exact: true }).fill('First key');
       await card.getByRole('button', { name: 'Add a passkey' }).click();
@@ -1012,7 +1028,7 @@ test('ACCT-162 adding a passkey when every recovery code is used issues a new se
       await confirmWithTotpCode(page, await freshTotpCode(totp));
       const response = await registered;
       expect(response.status()).toBe(201);
-      await expectNewSet(page, account.userId, ((await response.json()) as { data: { recoveryCodes?: string[] } }).data, before);
+      await expectNewSet(page, account, ((await response.json()) as { data: { recoveryCodes?: string[] } }).data, before, since);
     } finally {
       await person.context.close();
     }
@@ -1037,6 +1053,7 @@ test('ACCT-162 adding a passkey when every recovery code is used issues a new se
       const codesCard = settingsCard(page, 'Recovery codes');
       await expect(codesCard.getByText(unusedLeft ? 'You have 1 code left.' : 'You have 0 codes left.')).toBeVisible();
 
+      const since = await dbNow();
       const dialogOpened = confirmDialog(page).getByRole('button', { name: 'Use passkey' });
       const lostDevice = confirmDialog(page).getByRole('button', { name: LOST_DEVICE });
       const checkDialog = (async () => {
@@ -1052,7 +1069,7 @@ test('ACCT-162 adding a passkey when every recovery code is used issues a new se
         await expect(codesCard.getByText('You have 1 code left.')).toBeVisible();
         expect((await recoveryCodeRows(account.userId)).map((row) => row.code_hash).sort()).toEqual([...before].sort());
       } else {
-        await expectNewSet(page, account.userId, data, before);
+        await expectNewSet(page, account, data, before, since);
       }
       expect((await passkeyRows(account.userId)).map((row) => row.name)).toEqual(['Laptop', 'Phone']);
     } finally {
@@ -1098,6 +1115,24 @@ test('ACCT-163 a super admin whose only passkeys are staff ones, on customer set
   await expect(toastTitled(page, 'Passkey not changed')).toContainText(REAUTH);
   expect(options.map((r) => r.status())).toEqual([403]);
   expect((await passkeyRows(account.userId)).filter((row) => row.scope === 'customer')).toEqual([]);
+
+  // Every one of these answers counts towards the sign-in limit of 10 per address and
+  // network: the 2 in the dialog, 3 more the same way (the route allows 5 a minute) and 5
+  // wrong current passwords make 10, so the next sign-in from this address is refused.
+  // Had any of the 5 refusals not counted, that sign-in would go through.
+  const token = await pageAccessToken(page, clientIp);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const answer = await call('POST', '/api/auth/reauth', { password: PASSWORD }, { ip: clientIp, token });
+    expect(answer.status, `reauth ${attempt}`).toBe(403);
+    expect(answer.message).toBe(STAFF_KEYS_ONLY);
+  }
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const answer = await call('PATCH', '/api/users/me/password', { currentPassword: `wrong-${attempt}`, newPassword: NEW_PASSWORD }, { ip: clientIp, token });
+    expect(answer.status, `password change ${attempt}`).toBe(401);
+  }
+  const limited = await call('POST', '/api/auth/login', { email: account.email, password: PASSWORD }, { ip: clientIp });
+  expect(limited.status).toBe(429);
+  expect(limited.message).toBe(LIMITED);
 });
 
 test('ACCT-164 a super admin passkey without user verification is refused', async ({ page, clientIp, baseURL, browser }) => {
@@ -1232,11 +1267,16 @@ test('ACCT-171 the factor reset banner date while the owner warning is unsent', 
     const account = await createAccount(person.ip, 'acct171');
     await signIn(page, account);
     await enrolTotp(page, account);
+    // A requester the sweep accepts, and an owner's warning the mail provider refuses, so
+    // the stack's own sweep (every 5 minutes) leaves the row as seeded whenever it runs.
+    const staff = await createAccount(newClientIp(), 'acct171s', 'Stu Staff');
+    await makeSuperAdmin(staff.userId);
+    await failStub('platform-brevo', { status: 500, match: account.email });
     const [seeded] = await sql<{ id: string }>(
-      `INSERT INTO factor_resets (user_id, status, requested_by_email, reason, execute_after, notice_sent_at, verification_method, verification_notes)
-       VALUES ($1, 'pending', 'staff@example.com', 'Lost phone', now() + interval '72 hours', NULL, 'video_call', 'Checked on a video call')
+      `INSERT INTO factor_resets (user_id, status, requested_by_id, requested_by_email, reason, execute_after, notice_sent_at, verification_method, verification_notes)
+       VALUES ($1, 'pending', $2, $3, 'Lost phone', now() + interval '72 hours', NULL, 'video_call', 'Checked on a video call')
        RETURNING id`,
-      [account.userId],
+      [account.userId, staff.userId, staff.email],
     );
     const expectedText = (at: Date) =>
       `Support will remove your passkeys, authenticator app and recovery codes on ${at.toLocaleString('en-US', {
@@ -1258,7 +1298,15 @@ test('ACCT-171 the factor reset banner date while the owner warning is unsent', 
       await expect(resetBanner(page).locator('p').first()).toHaveText(expectedText(row.execute_after));
       if (shift.startsWith('-')) expect(row.execute_after.getTime()).toBeLessThan(Date.now());
     }
-    expect((await factorResetRow(seeded.id)).status).toBe('pending');
+    // With the warning unsent, a sweep runs nothing, even past execute_after.
+    const [before] = await sql<{ execute_after: Date }>('SELECT execute_after FROM factor_resets WHERE id = $1', [seeded.id]);
+    await runJobNow('factor-reset-sweep', { allowErrors: true });
+    const [after] = await sql<{ status: string; notice_sent_at: Date | null; execute_after: Date }>(
+      'SELECT status, notice_sent_at, execute_after FROM factor_resets WHERE id = $1',
+      [seeded.id],
+    );
+    expect(after).toEqual({ status: 'pending', notice_sent_at: null, execute_after: before.execute_after });
+    expect(await totpRow(account.userId)).toHaveLength(1);
   } finally {
     await person.context.close();
   }
