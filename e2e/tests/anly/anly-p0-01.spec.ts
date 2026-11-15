@@ -336,9 +336,19 @@ test('ANLY-067 channel and campaign names are shown as text', async ({ page }) =
 test('ANLY-071 attribution routes: role matrix and refusals', async () => {
   const set = await roleSet('anly071');
   const base = `/api/projects/${set.project.id}`;
-  const conversion = `${base}/conversions/${randomUUID()}/attribution`;
+  // A real conversion with attribution, so a 200 carries its rows rather than an empty list.
+  const p = { owner: set.owner, project: set.project, sdkKey: await createApiKey(set.owner, set.project.id, set.owner.ip) };
+  const link = await seedLink(set.owner, set.project.id, 'anly071');
+  await seedTouchpoints(set.project.id, [{ distinctId: 'u-71', channel: 'google', touchedAt: daysAgo(1) }]);
+  const conversionId = await postConversion(p, link.shortCode, 'u-71');
+  await waitForAttribution(p, conversionId);
+  const conversion = `${base}/conversions/${conversionId}/attribution`;
   for (const path of [`${base}/attribution/channels`, `${base}/attribution/campaigns`, `${base}/attribution/compare`, conversion]) {
     await checkRoleMatrix(set, path);
+  }
+  for (const role of ['admin', 'member'] as const) {
+    expect((await getAs(set[role], conversion)).body.data, role).toHaveLength(4);
+    expect((await getAs(set[role], `${base}/attribution/channels`)).body.data, role).toEqual([{ channel: 'google', credit: 1, conversions: 1 }]);
   }
   for (const path of [`${base}/attribution/channels`, `${base}/attribution/campaigns`, `${base}/attribution/compare`, conversion]) {
     await checkSecondProjectId(set, path);
@@ -401,11 +411,16 @@ test('ANLY-098 a tracked event appears in the log', async ({ page }) => {
   const volume = page.locator('[data-slot="card"]').filter({ hasText: 'Event Volume' });
   await expect(volume.getByText('No events in this period')).toHaveCount(0);
   await expect(volume.locator('.recharts-area')).toHaveCount(1);
-  const points = await api<Array<{ count: number }>>('GET', `/api/projects/${p.project.id}/events/volume`, undefined, {
+  const points = await api<Array<{ date: string; count: number }>>('GET', `/api/projects/${p.project.id}/events/volume`, undefined, {
     token: p.owner.accessToken,
     ip: p.owner.ip,
   });
   expect(points.map((point) => point.count)).toEqual([1]);
+  // The one point is today's: its bucket starts at or before the event, less than a day
+  // ago (a minute of slack for a run that crosses midnight).
+  const bucket = new Date(points[0].date).getTime();
+  expect(bucket).toBeLessThanOrEqual(at.getTime());
+  expect(Date.now() - bucket).toBeLessThan(24 * 60 * 60 * 1000 + 60_000);
 
   await page.getByRole('combobox').click();
   await expect(page.getByRole('option', { name: 'checkout_started (1)', exact: true })).toBeVisible();
@@ -465,6 +480,8 @@ test('ANLY-118 the event filter cannot inject SQL', async () => {
 
   const all = await getAs(p.owner, base);
   expect(all.body.data.total).toBe(1);
+  const allVolume = await getAs(p.owner, `${base}/volume`);
+  expect(allVolume.body.data.map((point: { count: number }) => point.count)).toEqual([1]);
   const list = await getAs(p.owner, `${base}?eventName=${injected}`);
   expect(list.status).toBe(200);
   expect(list.body.data).toEqual({ data: [], total: 0 });
@@ -549,6 +566,13 @@ test('ANLY-126 API key missing, wrong or not an SDK key', async () => {
   const expired = await api<{ apiKey: { id: string }; fullKey: string }>('POST', keyPath, { name: 'Expired' }, owner);
   await sql(`UPDATE api_keys SET expires_at = now() - interval '1 day' WHERE id = $1`, [expired.apiKey.id]);
   const privacy = await api<{ fullKey: string }>('POST', keyPath, { name: 'Privacy', permissions: ['privacy'] }, owner);
+  // Each key is refused for its own reason: the revoked one is off, the expired one still on.
+  const states = await sql<{ id: string; is_active: boolean; expired: boolean }>(
+    'SELECT id, is_active, expires_at < now() AS expired FROM api_keys WHERE id = ANY($1)',
+    [[revoked.apiKey.id, expired.apiKey.id]],
+  );
+  expect(states.find((s) => s.id === revoked.apiKey.id)).toMatchObject({ is_active: false });
+  expect(states.find((s) => s.id === expired.apiKey.id)).toMatchObject({ is_active: true, expired: true });
 
   const body = { projectId: p.project.id, eventName: 'refused', distinctId: 'u-1' };
   const post = (headers: { apiKey?: string; token?: string }) => raw('POST', '/api/events/track', body, { ip: p.owner.ip, ...headers });
@@ -672,10 +696,16 @@ test('ANLY-136 view-as cannot open a project the tenant only joined', async ({ p
 
   const handoff = await viewAsHandoff(browser, baseURL, tenant);
   const viewAsToken = await openViewAs(page, handoff);
+  const dataRequests: string[] = [];
+  page.on('request', (request) => {
+    if (request.url().includes(`/api/projects/${joined.id}/`)) dataRequests.push(request.url());
+  });
   const [answer] = await Promise.all([responseFor(page, `/api/projects/${joined.id}`), page.goto(`/projects/${joined.id}/analytics`)]);
   expect(answer.status()).toBe(404);
   await expect(page).toHaveURL(/\/projects$/);
   await expect(page.getByRole('heading', { name: 'Your Projects' })).toBeVisible();
+  await expect(page.getByText(joined.name)).toHaveCount(0);
+  expect(dataRequests).toEqual([]);
 
   const refused = await raw('GET', `/api/projects/${joined.id}/events`, undefined, { token: viewAsToken, ip: tenant.ip });
   expect(refused.status).toBe(404);
