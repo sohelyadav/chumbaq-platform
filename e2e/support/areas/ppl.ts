@@ -1,10 +1,13 @@
 import { createHmac, randomBytes } from 'crypto';
-import type { Browser, Page } from '@playwright/test';
+import { readFileSync } from 'fs';
+import path from 'path';
+import type { Browser, Locator, Page, Route } from '@playwright/test';
 import { Client } from 'pg';
 import { adminApi, enrolAndSignInStaff, grantSuperAdmin } from '../admin';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
 import { newPersonContext } from '../fixtures';
-import { assertE2eDatabase, stackEnv } from '../stack';
+import { deriveCredentialsKey } from '../signing';
+import { LOG_DIR, assertE2eDatabase, stackEnv } from '../stack';
 
 /**
  * Helpers for the people, identity and consent specs (PPL): SDK identify with a
@@ -242,4 +245,154 @@ export async function viewAsToken(browser: Browser, baseURL: string | undefined,
 export async function openViewAs(page: Page, url: string): Promise<void> {
   await page.goto(url);
   await page.getByRole('region', { name: 'Impersonation session' }).waitFor();
+}
+
+// ---- API keys of a project
+
+export interface ProjectKey {
+  id: string;
+  fullKey: string;
+  name: string;
+}
+
+/** A new API key: an ordinary SDK key, or with `permissions: ['privacy']` a server-only privacy key. */
+export async function createKey(
+  owner: Account,
+  projectId: string,
+  ip: string,
+  { name = `E2E key ${randomBytes(2).toString('hex')}`, permissions, expiresAt }: { name?: string; permissions?: string[]; expiresAt?: string } = {},
+): Promise<ProjectKey> {
+  const created = await api<{ fullKey: string; apiKey: { id: string; name: string } }>(
+    'POST',
+    `/api/projects/${projectId}/api-keys`,
+    { name, ...(permissions ? { permissions } : {}), ...(expiresAt ? { expiresAt } : {}) },
+    { token: owner.accessToken, ip },
+  );
+  return { id: created.apiKey.id, fullKey: created.fullKey, name: created.apiKey.name };
+}
+
+export async function revokeKey(owner: Account, projectId: string, keyId: string, ip: string): Promise<void> {
+  await api('DELETE', `/api/projects/${projectId}/api-keys/${keyId}`, undefined, { token: owner.accessToken, ip });
+}
+
+// ---- Privacy rows
+
+export async function privacyLogRows(projectId: string): Promise<Array<Record<string, any>>> {
+  return sql(`SELECT * FROM privacy_request_logs WHERE project_id = $1 ORDER BY created_at`, [projectId]);
+}
+
+export async function devicesOf(projectId: string): Promise<Array<Record<string, any>>> {
+  return sql(`SELECT * FROM device_identities WHERE project_id = $1 ORDER BY id`, [projectId]);
+}
+
+/** Rows of `table` naming any of these device rows (`device_identity_id`). */
+export async function rowsNamingDevices(table: string, ids: string[]): Promise<number> {
+  const [row] = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM ${table} WHERE device_identity_id = ANY($1::uuid[])`, [ids]);
+  return row.n;
+}
+
+/** The keyed hash erasure stores for a suppressed address (`erased_suppressions`, `erased_addresses`). */
+export function addressHash(projectId: string, channel: string, address: string): string {
+  return createHmac('sha256', deriveCredentialsKey('erased-suppression-v1')).update([projectId, channel, address].join('\n')).digest('hex');
+}
+
+/** The keyed hash the privacy log stores for a subject. */
+export function subjectHash(projectId: string, type: 'externalUserId' | 'personId' | 'deviceFingerprint', value: string): string {
+  return createHmac('sha256', deriveCredentialsKey('privacy-subject-v1')).update([projectId, type, value].join('\n')).digest('hex');
+}
+
+/** An active push token row for a device, as a token registration leaves it. */
+export async function seedPushToken(projectId: string, deviceIdentityId: string, platform = 'ios'): Promise<string> {
+  const token = `e2e-push-token-${randomBytes(16).toString('hex')}`;
+  await sql(
+    `INSERT INTO push_tokens (project_id, device_identity_id, token, platform, provider) VALUES ($1, $2, $3, $4, 'fcm')`,
+    [projectId, deviceIdentityId, token, platform],
+  );
+  return token;
+}
+
+/** A link-click touchpoint keyed by the device's fingerprint, as the redirect records one. */
+export async function seedTouchpoint(projectId: string, deviceFingerprint: string | null, distinctId: string | null = null): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO touchpoints (project_id, device_fingerprint, distinct_id, touchpoint_type, channel, utm_source)
+     VALUES ($1, $2, $3, 'link_click', 'link', 'e2e') RETURNING id`,
+    [projectId, deviceFingerprint, distinctId],
+  );
+  return row.id;
+}
+
+/** A clear suppression row for an address, as an unsubscribe or STOP leaves it. */
+export async function seedSuppression(projectId: string, channel: string, address: string, reason = 'unsubscribed'): Promise<void> {
+  await sql(
+    `INSERT INTO channel_suppressions (project_id, channel, address, reason, source) VALUES ($1, $2, $3, $4, 'dashboard')`,
+    [projectId, channel, address, reason],
+  );
+}
+
+/** A segment with these person keys as members. */
+export async function seedSegmentMembers(projectId: string, personKeys: string[]): Promise<string> {
+  const [segment] = await sql<{ id: string }>(
+    `INSERT INTO segments (project_id, name, definition) VALUES ($1, $2, '{}'::jsonb) RETURNING id`,
+    [projectId, `E2E segment ${randomBytes(2).toString('hex')}`],
+  );
+  for (const key of personKeys) {
+    await sql(`INSERT INTO segment_members (segment_id, project_id, person_key) VALUES ($1, $2, $3)`, [segment.id, projectId, key]);
+  }
+  return segment.id;
+}
+
+/** An email campaign row and a per-recipient event of it for a device (address history). */
+export async function seedEmailEvent(projectId: string, deviceIdentityId: string): Promise<string> {
+  const [campaign] = await sql<{ id: string }>(
+    `INSERT INTO push_notification_logs (project_id, title, channel, status) VALUES ($1, 'E2E email', 'email', 'sent') RETURNING id`,
+    [projectId],
+  );
+  const [event] = await sql<{ id: string }>(
+    `INSERT INTO push_notification_events (project_id, campaign_id, device_identity_id, type, occurred_at)
+     VALUES ($1, $2, $3, 'delivered', now()) RETURNING id`,
+    [projectId, campaign.id, deviceIdentityId],
+  );
+  return event.id;
+}
+
+/** Moves every live session's sign-in 16 minutes back, so the next refresh is no longer recent. */
+export async function ageSignIn(userId: string): Promise<void> {
+  const updated = await sql(
+    `UPDATE auth_sessions SET authenticated_at = now() - interval '16 minutes' WHERE user_id = $1 AND revoked_at IS NULL RETURNING id`,
+    [userId],
+  );
+  if (updated.length === 0) throw new Error('No live session to age');
+}
+
+/** What the lane's customer API has written to its log so far. */
+export function apiLogText(): string {
+  return readFileSync(path.join(LOG_DIR, 'api.log'), 'utf8');
+}
+
+// ---- Page
+
+/**
+ * A toast in the notification list (not its screen-reader copy), by its exact title.
+ * Found by the toast's own element: while a modal dialog is open the region is hidden
+ * from the accessibility tree, though the toast is shown.
+ */
+export function toast(page: Page, title: string): Locator {
+  return page.locator('li[data-swipe-direction]').filter({ has: page.getByText(title, { exact: true }) });
+}
+
+/**
+ * Holds matching requests until the returned function is called, so a pending state
+ * can be seen.
+ */
+export async function holdRequests(page: Page, method: string, pathPart: string): Promise<() => void> {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  await page.route(
+    (url) => url.pathname.includes(pathPart),
+    async (route: Route) => {
+      if (route.request().method() === method) await released;
+      await route.fallback();
+    },
+  );
+  return release;
 }
