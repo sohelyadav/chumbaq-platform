@@ -628,3 +628,91 @@ export async function suspendTenant(staff: { token: string; ip: string }, tenant
 export async function reactivateTenant(staff: { token: string; ip: string }, tenant: Account): Promise<void> {
   await adminApi('POST', `/api/admin/tenants/${tenant.userId}/reactivate`, { reason: 'E2E: journey suspension over' }, staff.token, staff.ip);
 }
+
+// ---- Audience editor and list (seg-p1-01)
+
+/** A card of the project's pages, by its title. */
+export function cardTitled(page: Page, title: string): Locator {
+  return page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.locator('[data-slot="card-title"]').getByText(title, { exact: true }) });
+}
+
+/** The editor's rule cards (event and profile rules, inside groups too), in page order. */
+export function ruleCards(page: Page | Locator): Locator {
+  return page.locator('div.space-y-3.rounded-lg.border.bg-card.p-4');
+}
+
+/** The dashed box of a rule group, in page order. */
+export function groupBoxes(page: Page): Locator {
+  return page.locator('div.rounded-lg.border.border-dashed');
+}
+
+/** A rule card's bin (the first button: selects are comboboxes, not buttons). */
+export function ruleBin(card: Locator): Locator {
+  return card.getByRole('button').first();
+}
+
+/** The red line under the rules naming the first problem (or the count's error). */
+export function problemLine(page: Page): Locator {
+  return page.locator('p.text-destructive').filter({ has: page.locator('svg') });
+}
+
+/** The rule counter under the rules ("N of 50 rules"). */
+export function ruleCounter(page: Page): Locator {
+  return page.getByText(/^\d+ of 50 rules$/);
+}
+
+/** An event rule's select of event names (placeholder until one is chosen). */
+export function eventSelect(scope: Page | Locator, current = 'choose an event'): Locator {
+  return scope.getByRole('combobox').filter({ hasText: current });
+}
+
+/** The editor's breadcrumb trail. */
+export function breadcrumb(page: Page): Locator {
+  return page.locator('nav[aria-label="breadcrumb"]');
+}
+
+export interface AudiencePeople {
+  alice: string;
+  bob: string;
+  dnt: string;
+  /** The anonymous device's person key, `device:<row id>`. */
+  anon: string;
+  devices: { alice: string; bob: string; dnt: string; anon: string };
+}
+
+/**
+ * The catalogue's people: alice (IN, plan pro, score 99, three purchases of 50, 150
+ * and 250 in the last week, a signup), bob (US, plan free, score "100", one purchase
+ * 40 days ago, a signup), an anonymous device with no country, and a do-not-track
+ * person in IN with two purchases.
+ */
+export async function seedAudiencePeople(p: SegProject, ip: string): Promise<AudiencePeople> {
+  const alice = uniqueId('u-alice');
+  const bob = uniqueId('u-bob');
+  const dnt = uniqueId('u-dnt');
+  const pid = p.project.id;
+  const aliceDevice = await addDevice(p, ip, { externalUserId: alice, traits: { plan: 'pro', score: 99 }, emailOptIn: true, row: { country: 'IN' } });
+  const bobDevice = await addDevice(p, ip, { externalUserId: bob, traits: { plan: 'free', score: '100' }, emailOptIn: false, row: { country: 'US' } });
+  const anonDevice = await addDevice(p, ip, { row: { country: null } });
+  const dntDevice = await addDevice(p, ip, { externalUserId: dnt, row: { country: 'IN', do_not_track: true } });
+  for (const amount of [50, 150, 250]) await insertEvent(pid, aliceDevice, 'purchase', { amount }, 3);
+  await insertEvent(pid, bobDevice, 'purchase', { amount: 75 }, 40);
+  await insertEvent(pid, aliceDevice, 'signup', null, 5);
+  await insertEvent(pid, bobDevice, 'signup', null, 45);
+  await insertEvent(pid, dntDevice, 'purchase', { amount: 10 }, 2);
+  await insertEvent(pid, dntDevice, 'purchase', { amount: 20 }, 2);
+  return {
+    alice,
+    bob,
+    dnt,
+    anon: `device:${anonDevice}`,
+    devices: { alice: aliceDevice, bob: bobDevice, dnt: dntDevice, anon: anonDevice },
+  };
+}
+
+/** Members of a live audience for `definition`, sorted. */
+export async function sortedMembers(account: Account, projectId: string, ip: string, definition: Node): Promise<string[]> {
+  return (await liveMembers(account, projectId, ip, definition)).sort();
+}
