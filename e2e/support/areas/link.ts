@@ -2,7 +2,7 @@ import { randomBytes } from 'crypto';
 import { readdirSync, readFileSync } from 'fs';
 import path from 'path';
 import { Client } from 'pg';
-import type { Browser, Page } from '@playwright/test';
+import { devices, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { api, apiUrl, createAccount, newClientIp, type Account } from '../api';
 import { adminApi, enrolAndSignInStaff, grantSuperAdmin } from '../admin';
 import { tokenFromLink } from '../mailbox';
@@ -258,4 +258,134 @@ export function singleSegmentGetRoutes(): string[] {
     }
   }
   return [...words].sort();
+}
+
+// ---- Redirect and analytics (link-p0-02)
+
+/** Windows Chrome, as a desktop visitor's browser sends it. */
+export const WINDOWS_CHROME_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+/** iPhone Safari and Pixel Chrome, the user agents mobileContext gives its phones. */
+export const IPHONE_UA = devices['iPhone 15'].userAgent;
+export const PIXEL_UA = devices['Pixel 7'].userAgent;
+
+/** Polls `read` until `done` holds for its answer, or throws with the last answer. */
+export async function waitUntil<T>(read: () => Promise<T>, done: (value: T) => boolean, what: string, timeoutMs = 20_000): Promise<T> {
+  const until = Date.now() + timeoutMs;
+  let last: T = await read();
+  while (!done(last)) {
+    if (Date.now() > until) throw new Error(`Timed out waiting for ${what}; last saw ${JSON.stringify(last)}`);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    last = await read();
+  }
+  return last;
+}
+
+export async function countTouchpoints(linkId: string): Promise<number> {
+  const [row] = await sql<{ n: string }>('SELECT count(*)::text AS n FROM touchpoints WHERE link_id = $1', [linkId]);
+  return Number(row.n);
+}
+
+export async function waitForTouchpoints(linkId: string, expected: number): Promise<void> {
+  await waitUntil(() => countTouchpoints(linkId), (n) => n >= expected, `${expected} touchpoints of link ${linkId}`);
+}
+
+/** A conversion as the SDK records it (`POST /api/conversions` with the project's key). */
+export async function recordConversion(apiKey: string, linkId: string, eventType: string, ip: string): Promise<void> {
+  await api('POST', '/api/conversions', { eventType, linkId }, { apiKey, ip });
+}
+
+/** Suspends or reactivates an account the way the staff action leaves it: `users.suspended_at`. */
+export async function setSuspended(userId: string, suspended: boolean): Promise<void> {
+  await sql(`UPDATE users SET suspended_at = ${suspended ? 'now()' : 'NULL'} WHERE id = $1`, [userId]);
+}
+
+/** `link.changed` / `content.deleted` entries of a project, oldest first. */
+export async function activityEntries(projectId: string, action: string): Promise<{ target_label: string | null; details: Record<string, unknown> | null }[]> {
+  return sql('SELECT target_label, details FROM project_activity WHERE project_id = $1 AND action = $2 ORDER BY occurred_at, id', [projectId, action]);
+}
+
+/**
+ * Answers every request to the given hosts in the browser (deep links, stores, the
+ * destination) with `status`, so nothing leaves the machine: 204 keeps the current
+ * page, as an app that is not installed does; 200 serves a stand-in page.
+ */
+export async function stubHosts(target: Page | BrowserContext, hosts: string[], status: 200 | 204 = 204): Promise<string[]> {
+  const seen: string[] = [];
+  for (const host of hosts) {
+    await target.route(`https://${host}/**`, async (route) => {
+      seen.push(route.request().url());
+      await route.fulfill(status === 204 ? { status: 204 } : { status: 200, contentType: 'text/html', body: '<!doctype html><title>Stand-in</title><p>Stand-in page</p>' });
+    });
+  }
+  return seen;
+}
+
+/** RFC 4180 rows: quoted cells with doubled quotes, commas and newlines inside quotes. */
+export function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') {
+        cell += '"';
+        i++;
+      } else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') {
+      row.push(cell);
+      cell = '';
+    } else if (ch === '\n') {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = '';
+    } else cell += ch;
+  }
+  row.push(cell);
+  rows.push(row);
+  return rows;
+}
+
+/** One error body without its per-request fields, for comparing refusals. */
+export function refusalShape(body: Record<string, unknown>): Record<string, unknown> {
+  const { timestamp: _t, path: _p, ...rest } = body;
+  return rest;
+}
+
+export interface RedirectHop {
+  url: string;
+  status: number;
+  location: string | null;
+}
+
+/**
+ * Serves the dashboard host's `/redirect/<code>` hop from the test: the real response
+ * is fetched without following it and recorded; a redirect is then handed to the page
+ * as a tiny page that navigates to its Location, so `stubHosts` can answer the
+ * destination. (Chromium follows a redirect, even a fulfilled one, without routing it,
+ * which would reach the real destination host.) Anything else is passed on as it is.
+ */
+export async function routeRedirectHop(target: Page | BrowserContext): Promise<RedirectHop[]> {
+  const hops: RedirectHop[] = [];
+  await target.route('**/redirect/**', async (route) => {
+    const response = await route.fetch({ maxRedirects: 0 });
+    const location = response.headers()['location'] ?? null;
+    hops.push({ url: route.request().url(), status: response.status(), location });
+    if (response.status() >= 300 && response.status() < 400 && location) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: `<!doctype html><script>location.replace(${JSON.stringify(location)})</script>`,
+      });
+    } else {
+      await route.fulfill({ response });
+    }
+  });
+  return hops;
 }
