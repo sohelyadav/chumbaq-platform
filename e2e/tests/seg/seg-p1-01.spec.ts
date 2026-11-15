@@ -337,6 +337,9 @@ test('SEG-013 cancelling a delete leaves the audience', async ({ page, clientIp 
 
   await rowNamed(page, 'VIP').getByRole('button').click();
   await expect(dialog.getByRole('heading')).toHaveText('Delete “VIP”?');
+  // The dialog listens for Escape once it has taken focus; a key pressed before
+  // that is not one a person could press.
+  await expect.poll(() => page.evaluate(() => !!document.activeElement?.closest('[role="dialog"]'))).toBe(true);
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
 
@@ -533,7 +536,10 @@ test('SEG-028 "at most" and "exactly" counts', async ({ clientIp }) => {
 
   expect(await previewCount(p.owner, pid, clientIp, purchases('exactly', 3))).toBe(1);
   expect(await sortedMembers(p.owner, pid, clientIp, purchases('exactly', 3))).toEqual([people.alice]);
-  expect(await sortedMembers(p.owner, pid, clientIp, purchases('exactly', 2))).not.toContain(people.alice);
+  // Nobody bought exactly twice in the window: alice three times, bob and the anonymous
+  // device not at all, and the do-not-track person's two purchases are not counted.
+  expect(await previewCount(p.owner, pid, clientIp, purchases('exactly', 2))).toBe(0);
+  expect(await sortedMembers(p.owner, pid, clientIp, purchases('exactly', 2))).toEqual([]);
   expect(await previewCount(p.owner, pid, clientIp, purchases('at_most', 2))).toBe(2);
   expect(await sortedMembers(p.owner, pid, clientIp, purchases('at_most', 2))).toEqual([people.anon, people.bob].sort());
   expect(await previewCount(p.owner, pid, clientIp, purchases('at_least', 3))).toBe(1);
@@ -1039,13 +1045,14 @@ test('SEG-054 a name is required', async ({ page, clientIp }) => {
   await audienceName(page).fill('   ');
   await create.click();
   await expect(toast).toHaveCount(2);
-  await page.waitForTimeout(500);
   expect(posts).toEqual([]);
 
-  // Positive control: with a name the same form is sent.
+  // Positive control: with a name the same form is sent, and it is the only create
+  // the page ever sent (a refused click would have sent its own first).
   await audienceName(page).fill('SEG-054 named');
   await Promise.all([page.waitForRequest(isSegmentsPost(pid)), create.click()]);
   await expect(toastTitled(page, 'Audience created')).toBeVisible();
+  expect(posts).toHaveLength(1);
 });
 
 test('SEG-056 a materialised audience and its refresh interval', async ({ page, clientIp }) => {
@@ -1099,13 +1106,14 @@ test('SEG-057 the refresh interval must be 5 to 1440 whole minutes', async ({ pa
     shown += 1;
     await expect(toast, `refresh "${bad}"`).toHaveCount(shown);
   }
-  await expect(toast.first()).toContainText('It must be a whole number of minutes between 5 and 1440.');
-  await page.waitForTimeout(500);
+  await expect(toast).toHaveText(Array(shown).fill(/It must be a whole number of minutes between 5 and 1440\./));
   expect(posts).toEqual([]);
 
   await refresh.fill('5');
   const [request] = await Promise.all([page.waitForRequest(isSegmentsPost(pid)), create.click()]);
   expect(request.postDataJSON().refreshIntervalMinutes).toBe(5);
+  // The refused clicks sent nothing before this one.
+  expect(posts).toHaveLength(1);
   await expect(page).toHaveURL(new RegExp(`/projects/${pid}/segments/[0-9a-f-]{36}$`));
   const id = new URL(page.url()).pathname.split('/').pop()!;
 

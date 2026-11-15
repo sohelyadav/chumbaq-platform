@@ -683,7 +683,7 @@ export interface AudiencePeople {
 }
 
 /**
- * The catalogue's people: alice (IN, plan pro, score 99, three purchases of 50, 150
+ * A fixed cast for audience counts: alice (IN, plan pro, score 99, three purchases of 50, 150
  * and 250 in the last week, a signup), bob (US, plan free, score "100", one purchase
  * 40 days ago, a signup), an anonymous device with no country, and a do-not-track
  * person in IN with two purchases.
