@@ -862,3 +862,136 @@ export function adminPlanCard(page: Page, code: string): Locator {
 export function adminToast(page: Page, title: string): Locator {
   return page.getByText(title, { exact: true }).first();
 }
+
+// ------------------------------------------------------------------ P1: usage, billing off, suspension, details
+
+/** A UTC day as `YYYY-MM-DD`, `offsetDays` from today. */
+export function utcDay(offsetDays = 0): string {
+  const date = new Date();
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCDate(date.getUTCDate() + offsetDays);
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Makes the usage roll-up's state say it has counted through yesterday (UTC), with
+ * active devices counted from a month that covers it, so seeded `usage_daily` rows for
+ * yesterday are what the billing page reads. Only ever moves the counted range out
+ * (earlier start, later last closed day), which is what the worker's own ticks do.
+ * Answers the day counted through.
+ */
+export async function seedRollupThroughYesterday(): Promise<string> {
+  const yesterday = utcDay(-1);
+  await query(
+    `INSERT INTO usage_rollup_state (id, started_on, first_day, last_closed_day, devices_through)
+     VALUES (1, $1::date, $2::date, $3::date, now())
+     ON CONFLICT (id) DO UPDATE SET
+       started_on = LEAST(usage_rollup_state.started_on, EXCLUDED.started_on),
+       first_day = LEAST(usage_rollup_state.first_day, EXCLUDED.first_day),
+       last_closed_day = GREATEST(usage_rollup_state.last_closed_day, EXCLUDED.last_closed_day)`,
+    [utcDay(-60), utcDay(-90), yesterday],
+  );
+  const [state] = await query<{ last: string }>(`SELECT to_char(last_closed_day, 'YYYY-MM-DD') AS last FROM usage_rollup_state WHERE id = 1`);
+  if (state.last !== yesterday) throw new Error(`The roll-up has counted through ${state.last}, not yesterday (${yesterday})`);
+  return yesterday;
+}
+
+/** The roll-up's coverage as the API reads it (`readUsageCoverage`), or null before it first ran. */
+export async function rollupCoverage(): Promise<{ countedThrough: string | null; mauFrom: string } | null> {
+  const [state] = await query<{ started_on: string; first_day: string; last_closed_day: string }>(
+    `SELECT to_char(started_on, 'YYYY-MM-DD') AS started_on, to_char(first_day, 'YYYY-MM-DD') AS first_day,
+            to_char(last_closed_day, 'YYYY-MM-DD') AS last_closed_day
+       FROM usage_rollup_state WHERE id = 1`,
+  );
+  if (!state) return null;
+  return {
+    countedThrough: state.last_closed_day >= state.first_day ? state.last_closed_day : null,
+    mauFrom: `${state.started_on.slice(0, 7)}-01`,
+  };
+}
+
+/** A project's month-to-date active devices for one day, as the roll-up writes it. */
+export async function seedMau(projectId: string, ownerId: string, day: string, value: number): Promise<void> {
+  await query(
+    `INSERT INTO usage_daily (project_id, day, metric, owner_id, value) VALUES ($1, $2::date, 'mau_month_to_date', $3, $4)
+     ON CONFLICT (project_id, day, metric) DO UPDATE SET value = EXCLUDED.value, owner_id = EXCLUDED.owner_id`,
+    [projectId, day, ownerId, value],
+  );
+}
+
+/**
+ * Another customer API with BILLING_ENABLED=false, as `startBillingOffApi`, but on the
+ * first free port from the API port + 92 to + 96, so it can run beside the one that
+ * helper starts on + 97.
+ */
+export async function startBillingOffApiOnFreePort(): Promise<BillingOffApi> {
+  const { portInUse } = await import('../processes');
+  const ports = stackPorts();
+  let port = 0;
+  for (let candidate = ports.api + 92; candidate <= ports.api + 96; candidate++) {
+    if (!(await portInUse(candidate))) {
+      port = candidate;
+      break;
+    }
+  }
+  if (!port) throw new Error('No free port for a billing-off customer API');
+  const env = {
+    ...process.env,
+    ...appEnvironment(runSecrets(), ports),
+    BILLING_ENABLED: 'false',
+    API_PORT: String(port),
+  };
+  const started = run(`api-billing-off-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
+  try {
+    await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    throw error;
+  }
+  return { url: `http://localhost:${port}`, stop: () => stopAll([started]) };
+}
+
+/** Sends every API request this page makes to another API, as the dev server's proxy would. */
+export async function routeApiTo(page: Page, base: string): Promise<void> {
+  await page.route(
+    (url) => url.pathname.startsWith('/api/'),
+    async (route) => {
+      const url = new URL(route.request().url());
+      const response = await route.fetch({ url: `${base}${url.pathname}${url.search}` });
+      await route.fulfill({ response });
+    },
+  );
+}
+
+/** Staff suspend an account through the admin API (needs a staff sign-in within 15 minutes). */
+export function suspendTenant(staffToken: string, ip: string, tenantId: string): Promise<unknown> {
+  return adminApi('POST', `/api/admin/tenants/${tenantId}/suspend`, { reason: 'E2E: checking billing while suspended' }, staffToken, ip);
+}
+
+/** `member` joins `projectId` through an invitation from `owner`, the way the dashboard does it. */
+export async function joinProject(owner: Account, member: Account, projectId: string, ip: string, role = 'member'): Promise<void> {
+  const created = await api<{ inviteUrl: string }>(
+    'POST',
+    `/api/projects/${projectId}/invitations`,
+    { email: member.email, role },
+    { token: owner.accessToken, ip },
+  );
+  const token = /#token=([^&]+)$/.exec(created.inviteUrl)?.[1];
+  if (!token) throw new Error('The invitation link carries no token');
+  await api('POST', '/api/invitations/accept', { token }, { token: member.accessToken, ip });
+}
+
+/** The state card's usage bar: its inner, coloured part. */
+export function usageBar(page: Page): Locator {
+  return stateCard(page).locator('[role="presentation"] > div');
+}
+
+/** The billing details form (open while there are no details, or while editing). */
+export function detailsForm(page: Page): Locator {
+  return page.locator('form').filter({ has: page.getByRole('button', { name: /^(Save details|Saving\.\.\.)$/ }) });
+}
+
+/** The alert under the billing details form. */
+export function detailsAlert(page: Page): Locator {
+  return detailsForm(page).getByRole('alert');
+}
