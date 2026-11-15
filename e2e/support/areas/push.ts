@@ -1,4 +1,7 @@
-import { randomBytes, randomUUID } from 'crypto';
+import { execFile } from 'child_process';
+import { generateKeyPairSync, randomBytes, randomUUID } from 'crypto';
+import { readFileSync } from 'fs';
+import path from 'path';
 import { expect, type Browser, type Locator, type Page } from '@playwright/test';
 import { Client } from 'pg';
 import { adminApi, enrolAndSignInStaff } from '../admin';
@@ -6,7 +9,7 @@ import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, t
 import { seedFcmConfig, type FakeServiceAccount } from '../channels';
 import { newPersonContext } from '../fixtures';
 import { failStub, stubCalls } from '../provider-stub';
-import { assertE2eDatabase, stackEnv } from '../stack';
+import { appEnvironment, assertE2eDatabase, LOG_DIR, REPO_ROOT, runSecrets, stackEnv, stackPorts } from '../stack';
 
 /**
  * Helpers for the push specs (PUSH): projects with a seeded FCM connection, devices
@@ -788,4 +791,88 @@ export function timingLine(page: Page): Locator {
 /** The back arrow beside a campaign detail page's heading (a link with only an icon). */
 export function backArrow(page: Page): Locator {
   return page.getByRole('heading', { level: 1 }).locator('xpath=ancestor::div[contains(@class, "items-start")][1]').locator('a').first();
+}
+
+// ---- P1 chunk 4: push worker jobs on demand, channel credentials, worker log
+
+/**
+ * The push schedulers `runJobNow` does not list, run once the way their crons run them,
+ * through the shared `run-job.cjs` (a short-lived copy of the worker with no crons and no
+ * queue consumers; jobs it enqueues are run by the stack's worker).
+ */
+const PUSH_JOBS = {
+  /** Every minute: suspension retirements, recurring spawns, experiment and timezone splits, promotion. */
+  'push-schedule-tick': {
+    file: 'queue/scheduler/push-campaign-schedule.scheduler.js',
+    className: 'PushCampaignScheduleScheduler',
+    method: 'handleTick',
+  },
+  /** Every 5 minutes: queued or sending campaigns with no job and no progress for 15 minutes. */
+  'push-reconcile': {
+    file: 'queue/scheduler/push-campaign-reconciliation.scheduler.js',
+    className: 'PushCampaignReconciliationScheduler',
+    method: 'handleSweep',
+  },
+} as const;
+
+export type PushJob = keyof typeof PUSH_JOBS;
+
+/**
+ * Runs a push scheduler once and answers what it printed. The tick covers every project
+ * on the lane, so another test's campaign may log its own errors here: by default an
+ * error line is allowed, and callers assert on their own rows.
+ */
+export async function runPushJob(name: PushJob, options: { timeoutMs?: number } = {}): Promise<string> {
+  const job = PUSH_JOBS[name];
+  const env = { ...process.env, ...appEnvironment(runSecrets(), stackPorts()) };
+  return new Promise<string>((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [path.join(__dirname, '..', 'run-job.cjs'), job.file, job.className, job.method],
+      { cwd: path.join(REPO_ROOT, 'apps/api'), env, timeout: options.timeoutMs ?? 60_000, maxBuffer: 16 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        const all = `${stdout}${stderr}`;
+        if (error) reject(new Error(`Push job ${name} failed (${error.message.split('\n')[0]}):\n${all}`));
+        else resolve(all);
+      },
+    );
+  });
+}
+
+/** What the stack's worker has logged so far on this lane. */
+export function workerLog(): string {
+  try {
+    return readFileSync(path.join(LOG_DIR, 'worker.log'), 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+/** Mi Push credentials as the Settings form posts them (checked for shape only). */
+export function miPushCredentials(): string {
+  return JSON.stringify({ appSecret: `s3cret-${randomBytes(4).toString('hex')}`, packageName: 'com.e2e.app', region: 'global' });
+}
+
+/** APNs credentials with a freshly made P-256 key (the .p8 form Apple hands out). */
+export function apnsCredentials(): string {
+  const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  return JSON.stringify({
+    keyId: 'E2EKEY1234',
+    teamId: 'E2ETEAM123',
+    bundleId: 'com.e2e.app',
+    environment: 'sandbox',
+    privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+  });
+}
+
+/** The reachability figures for a project (Settings' Reachability card). */
+export async function reachability(as: Caller, projectId: string): Promise<Record<string, any>> {
+  return dataOf(await call('GET', `/api/push-notifications/reachability/${projectId}`, as));
+}
+
+/** The unregister route's path, with `token` left out when it is undefined. */
+export function unregisterPath(projectId: string, token?: string): string {
+  const query = new URLSearchParams({ projectId });
+  if (token !== undefined) query.set('token', token);
+  return `/api/push-tokens/unregister?${query}`;
 }
