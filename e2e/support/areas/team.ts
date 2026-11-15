@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import { Client } from 'pg';
-import type { Locator, Page } from '@playwright/test';
+import type { Browser, Locator, Page } from '@playwright/test';
+import { enrolAndSignInStaff } from '../admin';
 import { apiUrl, createAccount, createProject, newClientIp, uniqueEmail, type Account, type Project } from '../api';
 import { assertE2eDatabase, stackEnv } from '../stack';
 
@@ -362,4 +363,315 @@ export function pendingInviteRow(page: Page, email: string): Locator {
 export async function expectTeamActivitySentence(page: Page, projectId: string, sentence: string): Promise<void> {
   await page.goto(`/projects/${projectId}/activity?group=team`);
   await page.getByRole('cell', { name: sentence, exact: true }).first().waitFor();
+}
+
+// ---- Billing transfer, activity log, role matrix, view-as (chunk 3)
+
+export const BILLING_TARGET_NOT_OWNER = 'Billing ownership can only move to another owner of this project.';
+export const BILLING_OFFER_GONE = 'This billing transfer has expired or was cancelled.';
+export const BILLING_SUSPENDED = "Billing can't move while either account is suspended.";
+export const MEMBER_NOT_FOUND = 'Member not found';
+export const READ_ONLY = 'Impersonation sessions are read-only';
+export const STAFF_SENTENCE = 'Chumbaq support viewed this project (read-only)';
+export const INVALID_ACTIVITY_FILTER = 'Invalid activity filter.';
+export const ACTIVITY_CSV_HEADER =
+  'occurred_at,actor,action,target_type,target_id,target_label,ip_address,country,user_agent,details,id';
+
+/** The validation messages of a 400, as a list (Nest sends one string or an array). */
+export function messagesOf(result: CallResult): string[] {
+  const message = messageOf(result);
+  return Array.isArray(message) ? message.map(String) : message === undefined ? [] : [String(message)];
+}
+
+/** `call` with extra request headers (a User-Agent, say). */
+export async function callWithHeaders<T = any>(
+  method: string,
+  path: string,
+  as: Pick<Person, 'accessToken' | 'ip'>,
+  headers: Record<string, string>,
+  body?: unknown,
+): Promise<CallResult<T>> {
+  const response = await fetch(apiUrl(path), {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Chumbaq-Client': 'web',
+      'X-Forwarded-For': as.ip,
+      Authorization: `Bearer ${as.accessToken}`,
+      ...headers,
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await response.text();
+  let parsed: unknown = text;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    // Not JSON: keep the text.
+  }
+  return { status: response.status, body: parsed as T };
+}
+
+export interface RawResult {
+  status: number;
+  headers: Headers;
+  /** Decoded by hand, so a leading byte order mark stays. */
+  text: string;
+  message: unknown;
+}
+
+/** A GET answered as bytes (for the CSV export), with a bearer token or none. */
+export async function rawGet(path: string, token: string | null, ip: string): Promise<RawResult> {
+  const response = await fetch(apiUrl(path), {
+    headers: { 'X-Chumbaq-Client': 'web', 'X-Forwarded-For': ip, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  });
+  const text = Buffer.from(await response.arrayBuffer()).toString('utf8');
+  let message: unknown;
+  try {
+    message = (JSON.parse(text) as { message?: unknown }).message;
+  } catch {
+    message = undefined;
+  }
+  return { status: response.status, headers: response.headers, text, message };
+}
+
+export interface FullActivityEntry extends ActivityEntry {
+  id: string;
+  occurredAt: string;
+  actorKind: string;
+  group: string;
+  targetType: string | null;
+  ipAddress: string | null;
+  country: string | null;
+  userAgent: string | null;
+}
+
+export interface ActivityPage {
+  entries: FullActivityEntry[];
+  nextCursor: string | null;
+  actors: Array<{ userId: string; label: string }>;
+}
+
+/** `GET .../activity` with a query string (`group=team`, `cursor=...`), as `reader`. */
+export async function activityPage(projectId: string, reader: Pick<Person, 'accessToken' | 'ip'>, query = ''): Promise<ActivityPage> {
+  const result = await call('GET', `/api/projects/${projectId}/activity${query ? `?${query}` : ''}`, { as: reader });
+  if (result.status !== 200) throw new Error(`Activity answered ${result.status}: ${JSON.stringify(result.body)}`);
+  return result.body.data as ActivityPage;
+}
+
+export interface SeedActivity {
+  action: string;
+  actorUserId?: string | null;
+  actorKind?: string;
+  actorLabel: string;
+  targetType?: string | null;
+  targetId?: string | null;
+  targetLabel?: string | null;
+  details?: Record<string, unknown> | null;
+  /** How long before now it happened (`'2 hours'`); now when left out. */
+  ago?: string;
+}
+
+/** Writes activity rows directly (inserts are allowed by the append-only triggers). Answers their ids in order. */
+export async function insertActivity(projectId: string, rows: SeedActivity[]): Promise<string[]> {
+  return withDb(async (db) => {
+    const ids: string[] = [];
+    for (const row of rows) {
+      const { rows: inserted } = await db.query<{ id: string }>(
+        `INSERT INTO project_activity
+           (project_id, occurred_at, actor_kind, actor_user_id, actor_label, action, target_type, target_id, target_label, details)
+         VALUES ($1, clock_timestamp() - $2::interval, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id`,
+        [
+          projectId,
+          row.ago ?? '0 seconds',
+          row.actorKind ?? 'user',
+          row.actorUserId ?? null,
+          row.actorLabel,
+          row.action,
+          row.targetType ?? null,
+          row.targetId ?? null,
+          row.targetLabel ?? null,
+          row.details === undefined || row.details === null ? null : JSON.stringify(row.details),
+        ],
+      );
+      ids.push(inserted[0].id);
+    }
+    return ids;
+  });
+}
+
+/** The project's activity rows as stored, newest first. */
+export async function activityRows(projectId: string): Promise<
+  Array<{ action: string; actor_kind: string; actor_user_id: string | null; ip_address: string | null; user_agent: string | null; details: unknown }>
+> {
+  return withDb(async (db) => {
+    const { rows } = await db.query(
+      `SELECT action, actor_kind, actor_user_id, ip_address, user_agent, details
+         FROM project_activity WHERE project_id = $1 ORDER BY occurred_at DESC, id DESC`,
+      [projectId],
+    );
+    return rows;
+  });
+}
+
+/** Offers billing for the project to `to` as `from`; answers the call. */
+export function offerBilling(projectId: string, from: Pick<Person, 'accessToken' | 'ip'>, to: Pick<Person, 'userId'>): Promise<CallResult> {
+  return call('POST', `/api/projects/${projectId}/billing-transfer`, { as: from, body: { toUserId: to.userId } });
+}
+
+/** Moves the project's billing offer `interval` into the past (`'7 days 1 minute'`). */
+export async function ageBillingOffer(projectId: string, interval: string): Promise<void> {
+  await withDb((db) =>
+    db.query(`UPDATE projects SET pending_billing_offered_at = now() - $2::interval WHERE id = $1`, [projectId, interval]),
+  );
+}
+
+/** The project's stored billing owner and pending offer. */
+export async function billingState(projectId: string): Promise<{ ownerId: string; pendingTo: string | null }> {
+  return withDb(async (db) => {
+    const { rows } = await db.query<{ owner_id: string; pending_billing_owner_id: string | null }>(
+      'SELECT owner_id, pending_billing_owner_id FROM projects WHERE id = $1',
+      [projectId],
+    );
+    return { ownerId: rows[0].owner_id, pendingTo: rows[0].pending_billing_owner_id };
+  });
+}
+
+/** A staff override of the account's project limit (null clears it). */
+export async function setProjectLimit(person: Pick<Person, 'userId'>, limit: number | null): Promise<void> {
+  await withDb((db) => db.query('UPDATE users SET project_limit = $2 WHERE id = $1', [person.userId, limit]));
+}
+
+/** Renames an account directly (for names the sign-up form would not be the place to test). */
+export async function renameAccount(person: Person, name: string): Promise<Person> {
+  await withDb((db) => db.query('UPDATE users SET name = $2 WHERE id = $1', [person.userId, name]));
+  return { ...person, name };
+}
+
+/** The person's `GET /api/projects` meta (billed projects, seats). */
+export async function projectsMetaOf(person: Person): Promise<{ billedProjects: number; seats: { used: number; limit: number | null } }> {
+  const result = await call('GET', '/api/projects', { as: person });
+  if (result.status !== 200) throw new Error(`Projects answered ${result.status}: ${JSON.stringify(result.body)}`);
+  return result.body.meta;
+}
+
+/** Opens the project's Settings page and waits for its Leave project card. */
+export async function openSettings(page: Page, projectId: string): Promise<void> {
+  await page.goto(`/projects/${projectId}/settings`);
+  await cardTitled(page, 'Leave project').waitFor();
+}
+
+/** Opens the project's Activity page (with an optional query) and waits for its heading. */
+export async function openActivity(page: Page, projectId: string, query = ''): Promise<void> {
+  await page.goto(`/projects/${projectId}/activity${query ? `?${query}` : ''}`);
+  await page.getByRole('heading', { name: 'Activity', exact: true }).waitFor();
+}
+
+/** RFC 4180 rows (quoted cells, doubled quotes, CRLF), without a BOM. */
+export function parseCsv(text: string): string[][] {
+  const body = text.startsWith('﻿') ? text.slice(1) : text;
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (quoted) {
+      if (ch === '"' && body[i + 1] === '"') {
+        cell += '"';
+        i += 1;
+      } else if (ch === '"') {
+        quoted = false;
+      } else {
+        cell += ch;
+      }
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === ',') {
+      row.push(cell);
+      cell = '';
+    } else if (ch === '\r' && body[i + 1] === '\n') {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = '';
+      i += 1;
+    } else {
+      cell += ch;
+    }
+  }
+  if (cell !== '' || row.length > 0) {
+    row.push(cell);
+    rows.push(row);
+  }
+  return rows;
+}
+
+// View-as
+
+export interface StaffMember {
+  token: string;
+  ip: string;
+}
+
+/**
+ * A super admin with a fresh passkey sign-in to the admin app (the flag set directly,
+ * which is all the guards read; the CLI path is the admin specs'), signed in in a
+ * context of its own that is closed afterwards. The token is what view-as needs.
+ */
+export async function newStaffMember(browser: Browser): Promise<StaffMember> {
+  const staff = await newPerson('team-staff', 'Sam Staff');
+  await withDb((db) => db.query('UPDATE users SET is_super_admin = true WHERE id = $1', [staff.userId]));
+  const context = await browser.newContext({ ignoreHTTPSErrors: true, extraHTTPHeaders: { 'X-Forwarded-For': staff.ip } });
+  try {
+    const token = await enrolAndSignInStaff(await context.newPage(), staff);
+    return { token, ip: staff.ip };
+  } finally {
+    await context.close();
+  }
+}
+
+/** Starts view-as of `tenant` through the admin API; answers the one-time handoff link. */
+export async function viewAsLink(staff: StaffMember, tenant: Pick<Person, 'userId'>): Promise<string> {
+  const base = process.env.E2E_ADMIN_API_URL;
+  if (!base) throw new Error('E2E_ADMIN_API_URL is not set: run the specs through playwright.config.ts');
+  const response = await fetch(`${base}/api/admin/tenants/${tenant.userId}/impersonate`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Chumbaq-Client': 'admin',
+      'X-Forwarded-For': staff.ip,
+      Authorization: `Bearer ${staff.token}`,
+    },
+    body: JSON.stringify({ reason: 'E2E: checking the team pages' }),
+  });
+  const text = await response.text();
+  if (response.status !== 200) throw new Error(`impersonate answered ${response.status}: ${text.slice(0, 300)}`);
+  return (JSON.parse(text) as { data: { url: string } }).data.url;
+}
+
+/** Spends a handoff link on the customer API, as the /impersonate page does; answers the view-as token. */
+export async function viewAsToken(link: string): Promise<{ accessToken: string; ip: string }> {
+  const ip = newClientIp();
+  const code = new URL(link).hash.replace(/^#code=/, '');
+  const result = await call('POST', '/api/auth/impersonation/exchange', { ip, body: { code } });
+  if (result.status !== 200 && result.status !== 201) {
+    throw new Error(`exchange answered ${result.status}: ${JSON.stringify(result.body)}`);
+  }
+  return { accessToken: (result.body.data as { accessToken: string }).accessToken, ip };
+}
+
+/** Opens a handoff link in a browser of its own; answers the read-only tab, on /projects. */
+export async function openViewAsLink(browser: Browser, baseURL: string | undefined, link: string): Promise<Page> {
+  const context = await browser.newContext({
+    baseURL,
+    ignoreHTTPSErrors: true,
+    extraHTTPHeaders: { 'X-Forwarded-For': newClientIp() },
+  });
+  const page = await context.newPage();
+  await page.goto(link);
+  await page.waitForURL(/\/projects$/);
+  await page.getByRole('region', { name: 'Impersonation session' }).waitFor();
+  return page;
 }
