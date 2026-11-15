@@ -142,6 +142,7 @@ async function openVariantDialog(page: Page) {
 
 async function addVariantInPage(page: Page, linkId: string, fields: { name: string; url: string; weight: string }): Promise<number> {
   const dialog = await openVariantDialog(page);
+  await expect(dialog.getByText('Traffic Weight (%)', { exact: true })).toBeVisible();
   await dialog.getByPlaceholder('e.g., Variant B').fill(fields.name);
   await dialog.getByPlaceholder('https://example.com/page-b').fill(fields.url);
   await dialog.locator('input[type=number]').fill(fields.weight);
@@ -580,7 +581,7 @@ test('LINK-207 conversion validation', async ({ clientIp }) => {
   const shortCode = link.shortCode;
   const cases: [string, Record<string, unknown>, number, string[]][] = [
     ['no link', { eventType: 'signup' }, 400, ['Either shortCode or linkId must be provided']],
-    ['no event type', { shortCode }, 400, ['eventType should not be empty', 'eventType must be a string']],
+    ['no event type', { shortCode }, 400, ['eventType should not be empty', 'eventType must be a string', 'eventType must be shorter than or equal to 100 characters']],
     ['empty event type', { shortCode, eventType: '' }, 400, ['eventType should not be empty']],
     ['long event type', { shortCode, eventType: 'e'.repeat(101) }, 400, ['eventType must be shorter than or equal to 100 characters']],
     ['long external id', { shortCode, eventType: 'signup', externalUserId: 'u'.repeat(256) }, 400, ['externalUserId must be shorter than or equal to 255 characters']],
@@ -598,7 +599,7 @@ test('LINK-207 conversion validation', async ({ clientIp }) => {
   }
   expect(seen.map(([name, status]) => [name, status])).toEqual(cases.map(([name, , status]) => [name, status]));
   for (const [index, [name, , , expected]] of cases.entries()) {
-    expect(seen[index][2], name).toEqual(expect.arrayContaining(expected));
+    expect([...seen[index][2]].sort(), name).toEqual([...expected].sort());
   }
   expect(await sql('SELECT id FROM conversion_events WHERE link_id = $1', [link.id])).toEqual([]);
 
@@ -795,10 +796,14 @@ test('LINK-219 deleting or deactivating an email tracking link breaks the sent e
   const off = await openShortLink(codes[1], newClientIp());
   expect([off.status, off.body.message]).toEqual([404, 'Link is no longer active']);
 
-  const entries = await sql<{ action: string; target_id: string }>('SELECT action, target_id FROM project_activity WHERE project_id = $1 ORDER BY occurred_at', [project.id]);
+  const entries = await sql<{ action: string; target_id: string; target_label: string }>(
+    'SELECT action, target_id, target_label FROM project_activity WHERE project_id = $1 ORDER BY occurred_at',
+    [project.id],
+  );
+  expect([e1.title, e2.title]).toEqual(['Email link: https://shop.example.com/sale?utm_source=mail&x=1', 'Email link: http://example.org/a']);
   expect(entries).toEqual([
-    { action: 'content.deleted', target_id: e1.id },
-    { action: 'link.changed', target_id: e2.id },
+    { action: 'content.deleted', target_id: e1.id, target_label: e1.title },
+    { action: 'link.changed', target_id: e2.id, target_label: e2.title },
   ]);
 });
 
@@ -921,6 +926,8 @@ test('LINK-229 a bulk-imported invalid Android deep link breaks the Android redi
   expect(unwrapped.status).toBe(200);
   expect(scriptValue(unwrapped.body, 'deepLink')).toBe('not a url');
   await waitForClicks(link.id, 3);
+  // Exactly one Android click: the one from the unwrapped interstitial, none from the 500.
+  expect((await clicksOf(link.id)).map((row) => row.platform).sort()).toEqual(['android', 'ios', 'macos']);
 });
 
 test('LINK-229 an Android visitor of a bulk-imported link reaches the destination', async ({ clientIp }) => {
@@ -960,15 +967,27 @@ test('LINK-230 GET /api/links/:id embeds the whole project row', async ({ browse
   const { owner, project } = await ownerWithProject(clientIp);
   const member = await addProjectMember(owner, project.id, 'member', clientIp);
   const link = await seedLink(owner, project.id, clientIp, { longUrl: 'https://example.com/embed', title: 'Embedded' });
+  // A domain waiting for its DNS proof, and billing offered to a second owner.
+  const other = await createAccount(clientIp, 'other-owner', 'Other Owner');
+  await sql(`INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'owner')`, [project.id, other.userId]);
+  const token = randomBytes(16).toString('hex');
+  await sql(
+    `UPDATE projects SET domain = $2, domain_verification_token = $3, pending_billing_owner_id = $4, pending_billing_offered_at = now() WHERE id = $1`,
+    [project.id, uniqueHost('embed'), token, other.userId],
+  );
+  const exposed = { id: project.id, ownerId: owner.userId, domainVerificationToken: token, pendingBillingOwnerId: other.userId };
 
   const read = await api<{ project: Record<string, unknown> }>('GET', `/api/links/${link.id}`, undefined, { token: member.accessToken, ip: clientIp });
   expect(Object.keys(read.project).sort()).toEqual(PROJECT_KEYS);
-  expect(read.project).toMatchObject({ id: project.id, ownerId: owner.userId });
+  expect(read.project).toMatchObject(exposed);
+  expect(read.project.pendingBillingOfferedAt).not.toBeNull();
   const patched = await api<{ project: Record<string, unknown> }>('PATCH', `/api/links/${link.id}`, { title: 'x' }, { token: member.accessToken, ip: clientIp });
   expect(Object.keys(patched.project).sort()).toEqual(PROJECT_KEYS);
+  expect(patched.project).toMatchObject(exposed);
   const viewAs = await viewAsToken(browser, baseURL, owner);
   const seen = await api<{ project: Record<string, unknown> }>('GET', `/api/links/${link.id}`, undefined, { token: viewAs, ip: clientIp });
   expect(Object.keys(seen.project).sort()).toEqual(PROJECT_KEYS);
+  expect(seen.project).toMatchObject(exposed);
   for (const body of [read, patched, seen]) expect(Object.keys(body.project).filter((key) => /secret/i.test(key))).toEqual([]);
 });
 
@@ -993,7 +1012,8 @@ test('LINK-231 variant weights are relative, not percentages', async ({ page, cl
   expect(await addVariantInPage(page, link.id, { name: 'B', url: 'https://example.com/b', weight: '80' })).toBe(201);
   await expect(variantRow(page, 'A')).toContainText('80% traffic');
   await expect(variantRow(page, 'B')).toContainText('80% traffic');
-  await expect(page.getByText('Traffic Weight (%)')).toHaveCount(0);
+  // Nothing shows the 160 total or each variant's real share.
+  await expect(page.getByRole('tabpanel', { name: 'A/B Testing' })).not.toContainText(/\b160\b|\b50%/);
 
   const counts: Record<string, number> = {};
   for (let batch = 0; batch < 10; batch++) {
