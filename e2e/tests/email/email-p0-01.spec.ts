@@ -289,6 +289,9 @@ test('EMAIL-071 Replace URL after confirming', async ({ page }) => {
   const topic = 'arn:aws:sns:ap-south-1:123456789012:chumbaq-events';
   await sql(`UPDATE email_settings SET ses_topic_arn = $2 WHERE project_id = $1`, [p.project.id, topic]);
   const t1 = (await emailSettingsRow(p.project.id))!.webhook_token as string;
+  const event = { contentType: 'application/json', text: JSON.stringify({ event: 'delivered', email: 'nobody@example.test' }) };
+  // T1 is taken before the rotation, so its 404 afterwards is the rotation's doing.
+  expect((await publicRequest('POST', emailWebhookPath('brevo', t1), event)).status).toBe(200);
 
   await signIn(page, p.owner);
   await openEmail(page, p.project.id, 'Settings');
@@ -317,7 +320,6 @@ test('EMAIL-071 Replace URL after confirming', async ({ page }) => {
     await expect(webhook).toHaveText(publicApiUrl(`/api/email/webhooks/${provider}/${t2}`));
   }
 
-  const event = { contentType: 'application/json', text: JSON.stringify({ event: 'delivered', email: 'nobody@example.test' }) };
   expect((await publicRequest('POST', emailWebhookPath('brevo', t1), event)).status).toBe(404);
   const accepted = await publicRequest('POST', emailWebhookPath('brevo', t2), event);
   expect(accepted.status).toBe(200);
@@ -364,6 +366,18 @@ test('EMAIL-082 test send to a suppressed or opted-out address', async ({ page }
   }
   expect(await brevoCallsTo('blocked@example.test')).toHaveLength(0);
   expect(await brevoCallsTo('e3@example.test')).toHaveLength(0);
+
+  // The same send to an address with no refusal reaches the provider, so the empty
+  // lists above are the refusals and not a stub that records nothing.
+  const allowed = uniqueEmail('email-082-allowed');
+  const delivered = await call('POST', '/api/email/test-send', p.owner, {
+    projectId: p.project.id,
+    to: allowed,
+    subject: 'Test',
+    html: '<p>Test</p>',
+  });
+  expect(dataOf(delivered)).toMatchObject({ delivered: true });
+  expect(await brevoCallsTo(allowed)).toHaveLength(1);
 });
 
 // ------------------------------------------------------------ G. Composer ---
@@ -386,9 +400,12 @@ test('EMAIL-088 script in the HTML does not run in the dashboard', async ({ page
 
   const frame = page.locator('iframe[title="Email preview"]');
   await expect(frame).toHaveAttribute('sandbox', '');
-  await expect(page.frameLocator('iframe[title="Email preview"]').getByText('ok', { exact: true })).toBeVisible();
-  // Long enough for an onerror on a broken image to have fired.
-  await page.waitForTimeout(1_000);
+  const preview = page.frameLocator('iframe[title="Email preview"]');
+  await expect(preview.getByText('ok', { exact: true })).toBeVisible();
+  // The broken image has finished failing, so its onerror would have fired by now.
+  await expect
+    .poll(() => preview.locator('img').evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth === 0))
+    .toBe(true);
   expect(dialogs).toEqual([]);
   expect(await page.title()).toBe(title);
 });
@@ -621,7 +638,7 @@ test("EMAIL-127 another tenant's email campaign", async () => {
 });
 
 test('EMAIL-134 suspension stops an email campaign', async () => {
-  test.setTimeout(200_000);
+  test.setTimeout(300_000);
   const p = await emailProject('email-134', { provider: 'brevo', requireOptIn: false });
   const address = uniqueEmail('email-134');
   await identifyEmail(p, p.owner.ip, { email: address, firstName: 'Sus' });
@@ -643,12 +660,16 @@ test('EMAIL-134 suspension stops an email campaign', async () => {
   expect((await campaign(due.id)).errorMessage).toBe(MISSED_DURING_SUSPENSION);
   expect(await brevoCallsTo(address)).toHaveLength(0);
 
-  // Reactivated: neither resumes.
+  // Reactivated: neither resumes. A campaign that comes due afterwards is promoted by
+  // the same scheduler sweep and sent, so the sweep has run since the reactivation.
   await reactivateAccount(p.owner.userId);
-  await new Promise((resolve) => setTimeout(resolve, 5_000));
+  const after = await scheduleEmailCampaign(admin, p.project.id, 'Due after the reactivation');
+  await sql(`UPDATE push_notification_logs SET scheduled_at = now() - interval '1 minute' WHERE id = $1`, [after.id]);
+  await expect.poll(async () => (await campaign(after.id)).status, { timeout: 100_000, intervals: [2_000] }).toBe('sent');
   expect((await campaign(dataOf(queued).id)).status).toBe('failed');
   expect((await campaign(due.id)).status).toBe('cancelled');
-  expect(await brevoCallsTo(address)).toHaveLength(0);
+  const reached = await brevoCallsTo(address);
+  expect(reached.map((entry) => (entry.body as { subject: string }).subject)).toEqual(['Due after the reactivation']);
 });
 
 // ------------------------------------------------------------ J. Unsubscribe ---
