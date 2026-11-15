@@ -419,3 +419,57 @@ export async function slowDown(page: Page, urlPart: string, method: string, ms =
 export function shortDate(at: Date): string {
   return at.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
+
+// ---- Short links and clicks (for webhook delivery cases)
+
+export const DESKTOP_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+export async function seedShortLink(owner: Pick<Person, 'accessToken' | 'ip'>, projectId: string, label: string): Promise<{ id: string; shortCode: string }> {
+  const shortCode = `${label}-${randomBytes(3).toString('hex')}`.slice(0, 30);
+  return api<{ id: string; shortCode: string }>(
+    'POST',
+    `/api/projects/${projectId}/links`,
+    { longUrl: `https://example.com/${label}`, title: `Link ${label}`, shortCode },
+    { token: owner.accessToken, ip: owner.ip },
+  );
+}
+
+/** Opens a short link on the API's root redirect as a desktop browser would, without following it. */
+export async function openShortCode(code: string, ip: string): Promise<{ status: number; location: string | null; ms: number }> {
+  const started = Date.now();
+  const response = await fetch(apiUrl(`/${code}`), { redirect: 'manual', headers: { 'User-Agent': DESKTOP_UA, 'X-Forwarded-For': ip } });
+  await response.text();
+  return { status: response.status, location: response.headers.get('location'), ms: Date.now() - started };
+}
+
+/** Clicks are written after the redirect answers: waits until the link has `expected` of them. */
+export async function waitForClickRows(linkId: string, expected: number, timeoutMs = 20_000): Promise<number> {
+  const until = Date.now() + timeoutMs;
+  let seen = -1;
+  while (Date.now() < until) {
+    const [row] = await sql<{ n: string }>('SELECT count(*)::text AS n FROM click_events WHERE link_id = $1', [linkId]);
+    seen = Number(row.n);
+    if (seen >= expected) return seen;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return seen;
+}
+
+// ---- Mixpanel config rows
+
+export async function mixpanelConfigRows(projectId: string): Promise<Array<Record<string, any>>> {
+  return sql(`SELECT * FROM mixpanel_configs WHERE "projectId" = $1`, [projectId]);
+}
+
+// ---- Request recording
+
+/** Records the dashboard's API requests (method and path) whose path contains `part`. */
+export function recordApiRequests(page: Page, part: string): Array<{ method: string; path: string }> {
+  const seen: Array<{ method: string; path: string }> = [];
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.startsWith('/api/') && path.includes(part)) seen.push({ method: request.method(), path });
+  });
+  return seen;
+}
