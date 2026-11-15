@@ -20,6 +20,7 @@ import {
   openEmail,
   optInSwitch,
   PROJECT_NOT_FOUND,
+  projectActivity,
   providerTab,
   publicRequest,
   saveSender,
@@ -155,14 +156,23 @@ test('EMAIL-009 unknown, foreign or malformed project id', async ({ page }) => {
     expect(messageOf(refused), path).toBe(PROJECT_NOT_FOUND);
   }
 
-  const emailAnswers: Array<{ url: string; status: number }> = [];
-  page.on('response', (response) => {
-    if (response.url().includes('/api/email/')) emailAnswers.push({ url: response.url(), status: response.status() });
+  const emailRequests: string[] = [];
+  page.on('request', (request) => {
+    if (request.url().includes('/api/email/')) emailRequests.push(request.url());
   });
   await signIn(page, mine.owner);
+  // Positive control: the owner's own Email page asks for its settings and shows them.
+  await openEmail(page, mine.project.id, 'Settings');
+  await expect(page.getByLabel('From address')).toHaveValue(DEFAULT_EMAIL_SENDER.fromEmail);
+  expect(emailRequests.some((url) => url.endsWith(`/api/email/settings/${mine.project.id}`))).toBe(true);
+  emailRequests.length = 0;
+
   for (const id of [other.project.id, 'not-a-uuid']) {
     await page.goto(`/projects/${id}/email`);
-    await page.waitForLoadState('networkidle');
+    // The shell refuses the project and returns to the project list before the Email page mounts.
+    await expect(page, id).toHaveURL(/\/projects$/);
+    await expect(page.getByText(mine.project.name, { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Email', exact: true })).toHaveCount(0);
     const shown = await page.evaluate(() =>
       [
         document.body.innerText,
@@ -173,7 +183,8 @@ test('EMAIL-009 unknown, foreign or malformed project id', async ({ page }) => {
     expect(shown).not.toContain('Other Tenant News');
     expect(shown).not.toContain(otherSuppressed);
   }
-  expect(emailAnswers.filter((answer) => answer.status < 400)).toEqual([]);
+  // No request for the other project's (or the malformed id's) email data was made.
+  expect(emailRequests).toEqual([]);
 });
 
 // ------------------------------------------------------------ B. Campaign list ---
@@ -297,10 +308,13 @@ test('EMAIL-020 subject with HTML is shown as text in the list', async ({ page }
 
   await signIn(page, p.owner);
   await openEmail(page, p.project.id, 'Campaigns');
-  const row = campaignRow(page, subject);
-  await expect(row).toBeVisible();
-  await expect(row.getByRole('cell').first()).toHaveText(subject);
-  await expect(row.locator('img')).toHaveCount(0);
+  // Rows by position, not by subject: a subject rendered as HTML would no longer match a
+  // locator built from its text, and an image check under it would pass vacuously.
+  const list = card(page, 'Campaigns');
+  const rows = list.locator('tbody tr');
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first().getByRole('cell').first()).toHaveText(subject);
+  await expect(list.locator('img')).toHaveCount(0);
   expect(dialogs).toEqual([]);
 });
 
@@ -578,9 +592,10 @@ test('EMAIL-068 switching active provider keeps the other\'s credentials', async
   expect(changed.map((row) => row.details)).toEqual([{ channel: 'email', fields: ['provider'] }]);
 
   // Reconnecting the active provider with what it already holds logs nothing; a new key logs an upload.
+  const before = await projectActivity(p.project.id);
   const same = JSON.stringify({ apiKey: resend.credentials.apiKey, webhookSecret: resend.credentials.webhookSecret });
   dataOf(await call('POST', '/api/email/providers', p.owner, { projectId: p.project.id, provider: 'resend', credentials: same }));
-  expect(await activityRows(p.project.id, 'channel.credentials_uploaded')).toEqual([]);
+  expect(await projectActivity(p.project.id)).toEqual(before);
   const fresh = JSON.stringify({ apiKey: `${resend.credentials.apiKey}x`, webhookSecret: resend.credentials.webhookSecret });
   dataOf(await call('POST', '/api/email/providers', p.owner, { projectId: p.project.id, provider: 'resend', credentials: fresh }));
   const uploaded = await activityRows(p.project.id, 'channel.credentials_uploaded');
