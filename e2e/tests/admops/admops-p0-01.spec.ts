@@ -742,6 +742,7 @@ test('ADMOPS-121 a trap address may not belong to an account, in any case', asyn
   expect(response.status()).toBe(409);
   const toast = toastItem(page, 'That did not work');
   await expect(toast).toBeVisible();
+  await expect(toast).toHaveClass(/\bdestructive\b/);
   await expect(toast).toContainText('That address belongs to an account; a trap must be an address nobody uses');
   await expect(page.getByLabel('Label (where you put it)')).toHaveValue(label);
   await expect(page.getByLabel('Trap address (for an account trap)')).toHaveValue(existing.email.toUpperCase());
@@ -849,13 +850,19 @@ test('ADMOPS-130 a trap key gets the same refusal as any wrong key and raises an
 
 test('ADMOPS-132 a switched-off trap key raises nothing', async () => {
   const trap = await seedTrapKey(`E2E trap key 132 ${hex()}`, true);
-  const response = await customerRequest('POST', '/api/events/track', {
-    ip: newClientIp(),
-    body: { projectId: randomUUID(), eventName: 'e2e_event' },
-    headers: { 'X-Api-Key': trap.key },
-  });
+  const live = await seedTrapKey(`E2E trap key 132 live ${hex()}`);
+  const use = (key: string) =>
+    customerRequest('POST', '/api/events/track', {
+      ip: newClientIp(),
+      body: { projectId: randomUUID(), eventName: 'e2e_event' },
+      headers: { 'X-Api-Key': key },
+    });
+  const response = await use(trap.key);
   expect({ status: response.status, message: response.json?.message }).toEqual({ status: 401, message: INVALID_KEY });
-  await sleep(3000);
+  // A live trap used after it is alarmed, so the switched-off key's check has had its turn.
+  expect((await use(live.key)).status).toBe(401);
+  await eventually(() => alarms({ kind: 'tripwire.api_key', key: live.id }), (rows) => rows.length > 0);
+  await sleep(1000);
   expect(await alarms({ key: trap.id })).toEqual([]);
 });
 
