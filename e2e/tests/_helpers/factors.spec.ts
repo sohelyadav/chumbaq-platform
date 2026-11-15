@@ -252,7 +252,7 @@ test.describe('factor helpers', () => {
 
     await allowClipboard(page);
     await card.getByRole('button', { name: 'Copy' }).click();
-    await expect(page.getByText('Recovery codes copied')).toBeVisible();
+    await expect(page.getByText('Recovery codes copied', { exact: true })).toBeVisible();
     expect(await readClipboard(page)).toBe(shown.join('\n'));
 
     const file = await downloadFrom(page, card.getByRole('button', { name: 'Download' }));
