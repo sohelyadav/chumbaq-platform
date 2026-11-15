@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { existsSync, readFileSync, statSync } from 'fs';
 import path from 'path';
 import type { Browser, BrowserContext, Locator, Page, Response } from '@playwright/test';
@@ -430,4 +430,113 @@ export function apiLogSince(mark: number): string {
 /** The claims of a JWT, unverified. */
 export function jwtClaims(token: string): Record<string, unknown> {
   return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')) as Record<string, unknown>;
+}
+
+// ---- ACCT P1 chunk 1: team-managed accounts, staff links, passkey re-authentication
+
+/** Marks the account as made by a (retired) team, as older accounts still are. */
+export async function makeTeamManaged(userId: string): Promise<string> {
+  const [team] = await sql<{ id: string }>(`INSERT INTO teams (name, owner_id) VALUES ('E2E team', $1) RETURNING id`, [userId]);
+  await sql('UPDATE users SET managed_by_team_id = $2 WHERE id = $1', [userId, team.id]);
+  return team.id;
+}
+
+export async function managedByTeam(userId: string): Promise<string | null> {
+  const [row] = await sql<{ managed_by_team_id: string | null }>('SELECT managed_by_team_id FROM users WHERE id = $1', [userId]);
+  return row.managed_by_team_id;
+}
+
+/**
+ * A reset link support issued through the CLI, unused and still waiting out its delay,
+ * stored as the API stores one (only its SHA-256). Answers the row's id.
+ */
+export async function seedStaffResetLink(userId: string): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO account_tokens (user_id, purpose, token_hash, expires_at, staff_issued, usable_after)
+     VALUES ($1, 'reset_password', $2, now() + interval '48 hours', true, now() + interval '24 hours') RETURNING id`,
+    [userId, createHash('sha256').update(randomBytes(32).toString('base64url')).digest('hex')],
+  );
+  return row.id;
+}
+
+export async function accountTokenUsedAt(id: string): Promise<Date | null> {
+  const [row] = await sql<{ used_at: Date | null }>('SELECT used_at FROM account_tokens WHERE id = $1', [id]);
+  return row.used_at;
+}
+
+export function auditRowsFor(
+  targetId: string,
+  action: string,
+): Promise<Array<{ actor_id: string | null; actor_email: string; metadata: Record<string, unknown> | null }>> {
+  return sql('SELECT actor_id, actor_email, metadata FROM admin_audit_logs WHERE target_id = $1 AND action = $2 ORDER BY created_at', [
+    targetId,
+    action,
+  ]);
+}
+
+/**
+ * Re-authenticates a session with the tab's passkey through the API: the options from
+ * `reauth/passkey/options`, answered by the tab's virtual authenticator in the page's own
+ * origin, then `reauth/passkey/verify`. Answers the new access token (and leaves a proof).
+ */
+export async function reauthWithPasskey(page: Page, token: string, ip: string): Promise<string> {
+  const options = await ok<{ challenge: string; rpId?: string; userVerification?: string; allowCredentials?: Array<{ id: string }> }>(
+    'POST',
+    '/api/auth/reauth/passkey/options',
+    {},
+    { token, ip },
+  );
+  const response = await page.evaluate(
+    async ({ challenge, rpId, userVerification, allow }) => {
+      const fromB64url = (value: string) => {
+        const b64 = value.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((value.length + 3) % 4);
+        return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      };
+      const toB64url = (buffer: ArrayBuffer) =>
+        btoa(String.fromCharCode(...new Uint8Array(buffer))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      const credential = (await navigator.credentials.get({
+        publicKey: {
+          challenge: fromB64url(challenge),
+          rpId,
+          userVerification: userVerification as UserVerificationRequirement,
+          allowCredentials: allow.map((id) => ({ type: 'public-key' as const, id: fromB64url(id) })),
+          timeout: 30_000,
+        },
+      })) as PublicKeyCredential;
+      const assertion = credential.response as AuthenticatorAssertionResponse;
+      return {
+        id: credential.id,
+        rawId: toB64url(credential.rawId),
+        type: 'public-key' as const,
+        response: {
+          clientDataJSON: toB64url(assertion.clientDataJSON),
+          authenticatorData: toB64url(assertion.authenticatorData),
+          signature: toB64url(assertion.signature),
+          ...(assertion.userHandle ? { userHandle: toB64url(assertion.userHandle) } : {}),
+        },
+        clientExtensionResults: {},
+      };
+    },
+    {
+      challenge: options.challenge,
+      rpId: options.rpId,
+      userVerification: options.userVerification ?? 'preferred',
+      allow: (options.allowCredentials ?? []).map((c) => c.id),
+    },
+  );
+  return (await ok<{ accessToken: string }>('POST', '/api/auth/reauth/passkey/verify', { response }, { token, ip })).accessToken;
+}
+
+/** Records the MIME type of every Blob the page turns into an object URL (downloads made in the page). */
+export async function recordBlobTypes(page: Page): Promise<() => Promise<string[]>> {
+  await page.evaluate(() => {
+    const seen: string[] = [];
+    (window as unknown as { __e2eBlobTypes: string[] }).__e2eBlobTypes = seen;
+    const original = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = (object: Blob | MediaSource) => {
+      if (object instanceof Blob) seen.push(object.type);
+      return original(object);
+    };
+  });
+  return () => page.evaluate(() => (window as unknown as { __e2eBlobTypes: string[] }).__e2eBlobTypes);
 }
