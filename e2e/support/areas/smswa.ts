@@ -750,3 +750,211 @@ export async function credentialProviders(projectId: string): Promise<string[]> 
   const rows = await sql<{ provider: string }>(`SELECT provider FROM push_channel_credentials WHERE project_id = $1 ORDER BY created_at`, [projectId]);
   return rows.map((row) => row.provider);
 }
+
+// ---- P1: WhatsApp composer, webhooks, campaign detail, cross-cutting
+
+export type MockTemplate = {
+  id: string;
+  name: string;
+  language: string;
+  category: string | null;
+  status: string;
+  bodyText: string;
+  bodyParamCount: number;
+  paramNames: string[] | null;
+  header: { format: 'TEXT' | 'IMAGE' | 'VIDEO' | 'DOCUMENT' | 'LOCATION'; text: string | null; paramCount: number } | null;
+  buttons: Array<{ type: string; text: string; dynamic: boolean }>;
+};
+
+/** Templates in the shape the API's template list answers, for a provider that lists them. */
+export const MOCK_TEMPLATES: Record<'T1' | 'T2' | 'T3' | 'T4', MockTemplate> = {
+  T1: {
+    id: 'T1', name: 'T1', language: 'en', category: 'UTILITY', status: 'APPROVED',
+    bodyText: 'Hi {{1}}, your order {{2}} shipped', bodyParamCount: 2, paramNames: null, header: null, buttons: [],
+  },
+  T2: {
+    id: 'T2', name: 'T2', language: 'en', category: null, status: 'APPROVED',
+    bodyText: 'Our summer sale is on', bodyParamCount: 0, paramNames: null,
+    header: { format: 'IMAGE', text: null, paramCount: 0 },
+    buttons: [{ type: 'URL', text: 'Track', dynamic: true }],
+  },
+  T3: {
+    id: 'T3', name: 'T3', language: 'en', category: 'MARKETING', status: 'PENDING',
+    bodyText: 'Not yet approved', bodyParamCount: 0, paramNames: null, header: null, buttons: [],
+  },
+  T4: {
+    id: 'T4', name: 'T4', language: 'en', category: null, status: 'APPROVED',
+    bodyText: 'Hello {{name}}', bodyParamCount: 1, paramNames: ['name'],
+    header: { format: 'TEXT', text: 'Order {{1}}', paramCount: 1 }, buttons: [],
+  },
+};
+
+/**
+ * Answers the composer's template list (`GET /api/whatsapp/templates/<id>`) with
+ * `templates`, in the API's envelope; answers how many times it was asked.
+ */
+export async function mockTemplateList(page: Page, templates: MockTemplate[], canList = true): Promise<{ requests: () => number }> {
+  let requests = 0;
+  await page.route('**/api/whatsapp/templates/**', async (route) => {
+    requests += 1;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: { canList, templates } }) });
+  });
+  return { requests: () => requests };
+}
+
+/** The input under a label of the WhatsApp composer's template fields (those labels have no htmlFor). */
+export function labelledInput(scope: Page | Locator, label: string): Locator {
+  return scope.getByText(label, { exact: true }).locator('xpath=..').locator('input');
+}
+
+/** The red problem line of the WhatsApp composer's Message card. */
+export function waProblem(page: Page): Locator {
+  return card(page, 'Message').locator('p.text-destructive');
+}
+
+/** The message bubble of the WhatsApp composer's Preview card. */
+export function waBubble(page: Page): Locator {
+  return card(page, 'Preview').locator('div.whitespace-pre-wrap');
+}
+
+/** Opens the WhatsApp composer and waits for its settings to have loaded. */
+export async function openWaComposer(page: Page, projectId: string): Promise<void> {
+  const settings = page.waitForResponse((r) => r.url().includes(`/api/whatsapp/settings/${projectId}`) && r.request().method() === 'GET');
+  await page.goto(`/projects/${projectId}/whatsapp/new`);
+  await expect(page.getByRole('heading', { level: 1, name: 'New WhatsApp campaign', exact: true })).toBeVisible();
+  await settings;
+}
+
+/**
+ * Holds the page's requests matching `url` until `release` is called (for states shown
+ * while a request is in flight).
+ */
+export async function holdRequests(page: Page, url: string): Promise<{ release: () => void; held: () => number }> {
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => (open = resolve));
+  let held = 0;
+  await page.route(url, async (route) => {
+    held += 1;
+    await gate;
+    await route.continue();
+  });
+  return { release: () => open(), held: () => held };
+}
+
+/** A live segment of the people whose trait `field` equals `value`, through the API. */
+export async function traitFieldSegment(as: Caller, projectId: string, field: string, value: string): Promise<{ id: string; name: string }> {
+  const name = `smswa-${field}-${value}-${randomBytes(3).toString('hex')}`;
+  const created = dataOf(
+    await call('POST', `/api/projects/${projectId}/segments`, as, {
+      name,
+      definition: { type: 'group', operator: 'and', children: [{ type: 'attribute', field: `traits.${field}`, op: 'eq', value }] },
+      evaluationMode: 'live',
+    }),
+  );
+  return { id: created.id, name };
+}
+
+/** Merges `traits` into a device row's traits, as a later identify with them would. */
+export async function setTraits(identityId: string, traits: Record<string, unknown>): Promise<void> {
+  const rows = await sql(`UPDATE device_identities SET traits = coalesce(traits, '{}'::jsonb) || $2::jsonb WHERE id = $1 RETURNING id`, [identityId, JSON.stringify(traits)]);
+  if (rows.length !== 1) throw new Error(`No device row ${identityId}`);
+}
+
+/** The SDK's identify route, answering the status and body instead of throwing. */
+export async function identifyRaw(p: Pick<SmsProject, 'project' | 'sdkKey'>, ip: string, person: Record<string, unknown>): Promise<RawResponse> {
+  const response = await fetch(apiUrl('/api/identity/identify'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-API-Key': p.sdkKey, 'X-Forwarded-For': ip },
+    body: JSON.stringify({ projectId: p.project.id, deviceFingerprint: `smswa-${randomBytes(8).toString('hex')}`, platform: 'web', ...person }),
+  });
+  const text = await response.text();
+  let parsed: any = text;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    // Not JSON.
+  }
+  return { status: response.status, headers: response.headers, text, body: parsed };
+}
+
+/**
+ * A Twilio form post whose parameters may repeat (`Tag=b&Tag=a`), signed over
+ * `signParams` (the posted ones unless given) as Twilio signs repeated parameters.
+ */
+export async function postTwilioForm(
+  path: string,
+  params: Record<string, string | string[]>,
+  { authToken, signParams }: { authToken: string; signParams?: Record<string, string | string[]> },
+): Promise<RawResponse> {
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) for (const item of Array.isArray(value) ? value : [value]) form.append(key, item);
+  const response = await fetch(apiUrl(path), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Forwarded-For': newClientIp(),
+      'X-Twilio-Signature': twilioSignature(authToken, publicApiUrl(path), signParams ?? params),
+    },
+    body: form.toString(),
+  });
+  const text = await response.text();
+  let parsed: any = text;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    // TwiML or empty.
+  }
+  return { status: response.status, headers: response.headers, text, body: parsed };
+}
+
+/** One `push_notification_events` row, as a provider report leaves one. */
+export async function seedEventRow(projectId: string, campaignId: string, identityId: string, type: string, platform: string): Promise<void> {
+  await sql(
+    `INSERT INTO push_notification_events (project_id, campaign_id, device_identity_id, type, platform, occurred_at)
+     VALUES ($1, $2, $3, $4, $5, now())`,
+    [projectId, campaignId, identityId, type, platform],
+  );
+}
+
+export interface DetailRowSeed {
+  title: string;
+  status?: string;
+  body?: string | null;
+  totalTokens?: number;
+  successCount?: number;
+  failureCount?: number;
+  failureDetails?: Array<{ token: string; error: string }> | null;
+  whatsappContent?: Record<string, unknown> | null;
+}
+
+/** A finished campaign row of `channel` with the fields the detail page reads. */
+export async function seedDetailRow(projectId: string, channel: 'sms' | 'whatsapp', seed: DetailRowSeed): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO push_notification_logs
+       (project_id, title, body, channel, status, total_tokens, success_count, failure_count, processed_tokens,
+        failure_details, whatsapp_content, completed_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $6, $9::jsonb, $10::jsonb, now())
+     RETURNING id`,
+    [
+      projectId,
+      seed.title,
+      seed.body ?? null,
+      channel,
+      seed.status ?? 'sent',
+      seed.totalTokens ?? 1,
+      seed.successCount ?? 1,
+      seed.failureCount ?? 0,
+      seed.failureDetails ? JSON.stringify(seed.failureDetails) : null,
+      seed.whatsappContent ? JSON.stringify(seed.whatsappContent) : null,
+    ],
+  );
+  return row.id;
+}
+
+/** An engagement card of the campaign detail page by its label (`Delivered`, `Read`, ...). */
+export function engagementValue(page: Page, label: string): Locator {
+  return card(page, 'Engagement')
+    .locator('div.rounded-lg.border')
+    .filter({ has: page.locator('div.text-xs', { hasText: new RegExp(`^\\s*${label}\\s*$`) }) })
+    .locator('p.text-2xl');
+}
