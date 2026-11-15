@@ -521,3 +521,83 @@ export async function insertCampaignEvent(projectId: string, campaignId: string,
     [projectId, campaignId, deviceIdentityId, type, occurredAt],
   );
 }
+
+// ---- Privacy routes and campaign records (P1)
+
+/** The server privacy API (`/api/privacy/erasures`, `/exports`) with a key, keeping the status. */
+export function privacyApi(route: 'erasures' | 'exports', body: unknown, key: string | undefined, ip: string, token?: string): Promise<RawResponse> {
+  return raw('POST', `/api/privacy/${route}`, body, { ip, apiKey: key, token });
+}
+
+/** Every section of an export document as [name, total], for comparing with the log's counts. */
+export function sectionTotals(exported: { sections: Record<string, { total: number }> }): Record<string, number> {
+  return Object.fromEntries(Object.entries(exported.sections).map(([name, section]) => [name, section.total]));
+}
+
+/** The one-click unsubscribe (RFC 8058) a mail client posts to a signed link from an email. */
+export async function oneClickUnsubscribe(link: string, ip: string): Promise<number> {
+  const url = new URL(link);
+  const response = await fetch(apiUrl(`${url.pathname}${url.search}`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Forwarded-For': ip },
+    body: 'List-Unsubscribe=One-Click',
+  });
+  await response.text();
+  return response.status;
+}
+
+/** A push campaign row naming devices in its target and control lists, with per-token failures. */
+export async function insertCampaignWithLists(
+  projectId: string,
+  { targets, controls, failures }: { targets: string[]; controls: string[]; failures: Array<{ token: string; error: string }> },
+): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO push_notification_logs (project_id, title, channel, status, success_count, failure_count, target_device_ids, control_device_ids, failure_details)
+     VALUES ($1, 'E2E lists', 'push', 'sent', 5, $2, $3::jsonb, $4::jsonb, $5::jsonb) RETURNING id`,
+    [projectId, failures.length, JSON.stringify(targets), JSON.stringify(controls), JSON.stringify(failures)],
+  );
+  return row.id;
+}
+
+/** An in-app message and one impression of it per device. */
+export async function insertInAppImpressions(projectId: string, devices: Array<Record<string, any>>): Promise<string[]> {
+  const [message] = await sql<{ id: string }>(
+    `INSERT INTO in_app_messages (project_id, name, message_type, title) VALUES ($1, 'E2E message', 'modal', 'Hello') RETURNING id`,
+    [projectId],
+  );
+  const ids: string[] = [];
+  for (const device of devices) {
+    const [row] = await sql<{ id: string }>(
+      `INSERT INTO in_app_message_impressions (message_id, project_id, device_identity_id, device_fingerprint, event_type)
+       VALUES ($1, $2, $3, $4, 'impression') RETURNING id`,
+      [message.id, projectId, device.id, device.deviceFingerprint],
+    );
+    ids.push(row.id);
+  }
+  return ids;
+}
+
+/** A journey and one active run per person key. */
+export async function insertJourneyRuns(projectId: string, personKeys: string[]): Promise<string[]> {
+  const [journey] = await sql<{ id: string }>(
+    `INSERT INTO journeys (project_id, name, trigger, steps) VALUES ($1, 'E2E journey', '{}'::jsonb, '[]'::jsonb) RETURNING id`,
+    [projectId],
+  );
+  const ids: string[] = [];
+  for (const key of personKeys) {
+    const [row] = await sql<{ id: string }>(
+      `INSERT INTO journey_runs (project_id, journey_id, person_key) VALUES ($1, $2, $3) RETURNING id`,
+      [projectId, journey.id, key],
+    );
+    ids.push(row.id);
+  }
+  return ids;
+}
+
+/** A month a device was active, as the usage roll-up records it. */
+export async function insertActiveDevice(projectId: string, deviceIdentityId: string, month = '2026-11-01', firstDay = '2026-11-02'): Promise<void> {
+  await sql(
+    `INSERT INTO monthly_active_devices (project_id, month, device_identity_id, first_day) VALUES ($1, $2::date, $3, $4::date)`,
+    [projectId, month, deviceIdentityId, firstDay],
+  );
+}
