@@ -585,3 +585,118 @@ export async function assertionInPage(
 
 /** What a passkey's userHandle is for an account: its id as UTF-8, base64url. */
 export const userHandleOf = (userId: string) => Buffer.from(userId, 'utf8').toString('base64url');
+
+// ---- Staff-issued reset links, stale sign-ins and view-as in the browser (chunk 3)
+
+/**
+ * A reset link support issued through the CLI, live and still waiting out its delay,
+ * as `admin:password-reset-link` leaves one (`staff_issued`, usable in a day). Seed it
+ * after the browser signs in: a complete sign-in voids every such link.
+ */
+export function seedStaffLink(userId: string): Promise<string> {
+  return seedAccountToken(userId, { staffIssued: true, usableIn: '24 hours', expiresIn: '48 hours' });
+}
+
+/**
+ * Moves every one of the account's sign-ins 20 minutes back, past the 15 minutes a recent
+ * sign-in lasts. The next access token (a refresh: a page load) carries the old time.
+ */
+export async function makeSignInStale(userId: string): Promise<void> {
+  await sql(`UPDATE auth_sessions SET authenticated_at = now() - interval '20 minutes' WHERE user_id = $1`, [userId]);
+}
+
+/** The staff-link banner (an alert) on dashboard pages. */
+export function staffLinkBanner(page: Page): Locator {
+  return page.getByRole('alert').filter({ hasText: 'Support issued a link to reset your password.' });
+}
+
+/** A toast in the customer app's notifications region, by its title. */
+export function toastTitled(page: Page, title: string): Locator {
+  return page
+    .getByRole('region', { name: /^Notifications/ })
+    .getByRole('listitem')
+    .filter({ has: page.getByText(title, { exact: true }) });
+}
+
+/** The re-authentication dialog. */
+export function reauthDialog(page: Page): Locator {
+  return page.getByRole('dialog', { name: 'Confirm it is you' });
+}
+
+/**
+ * A new password sign-in through the API whose session is then made stale, and the
+ * access token a refresh issues for it (carrying the old sign-in time). Answers the
+ * token and the session id.
+ */
+export async function staleSession(account: Pick<Account, 'email' | 'password' | 'userId'>, ip: string): Promise<{ accessToken: string; sessionId: string }> {
+  const login = await passwordStep(account, ip);
+  const refreshToken = refreshTokenIn(login.setCookie);
+  if (login.status !== 200 || !refreshToken) throw new Error(`Sign-in answered ${login.status}: ${login.text.slice(0, 300)}`);
+  const sessionId = String(jwtClaimsOf(login.body.tokens!.accessToken).sid);
+  await sql(`UPDATE auth_sessions SET authenticated_at = now() - interval '20 minutes' WHERE id = $1`, [sessionId]);
+  const refreshed = await refreshWith(refreshToken, ip);
+  if (refreshed.status !== 200) throw new Error(`Refresh answered ${refreshed.status}: ${refreshed.text.slice(0, 300)}`);
+  return { accessToken: refreshed.body.accessToken, sessionId };
+}
+
+/** A JWT's claims, unverified. */
+export function jwtClaimsOf(token: string): Record<string, unknown> {
+  return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')) as Record<string, unknown>;
+}
+
+/**
+ * A view-as session for the tenant in this browser tab, as the admin app's "Open
+ * view-as" link starts one: a new super admin signs in to the admin app in a second tab
+ * of the same browser, starts view-as, and this tab opens the handoff link, landing on
+ * /projects. Answers the staff member's access token.
+ */
+export async function viewAsInBrowser(page: Page, tenantId: string, ip: string): Promise<string> {
+  const staff = await createAccount(ip, 'staff', 'Sam Staff');
+  await makeSuperAdmin(staff.userId);
+  const staffPage = await page.context().newPage();
+  const staffToken = await enrolAndSignInStaff(staffPage, staff);
+  await staffPage.close();
+  const handoff = await adminApi<{ url: string }>(
+    'POST',
+    `/api/admin/tenants/${tenantId}/impersonate`,
+    { reason: 'E2E: checking the cancel page in view-as' },
+    staffToken,
+    ip,
+  );
+  await page.goto(handoff.url);
+  await page.waitForURL(/\/projects$/);
+  return staffToken;
+}
+
+/** How many of the account's recovery codes are unused. */
+export async function unusedRecoveryCodes(userId: string): Promise<number> {
+  const [row] = await sql<{ n: string }>('SELECT count(*) AS n FROM recovery_codes WHERE user_id = $1 AND used_at IS NULL', [userId]);
+  return Number(row.n);
+}
+
+export interface PasskeyRow {
+  id: string;
+  counter: string;
+  last_used_at: Date | null;
+}
+
+/** The account's customer passkey rows, oldest first. */
+export function customerPasskeyRows(userId: string): Promise<PasskeyRow[]> {
+  return sql<PasskeyRow>(
+    `SELECT id, counter::text AS counter, last_used_at FROM webauthn_credentials WHERE user_id = $1 AND scope = 'customer' ORDER BY created_at`,
+    [userId],
+  );
+}
+
+/**
+ * Rewrites the JSON answer of every request to `path` (its `data`), keeping everything
+ * else, for a client that changes what the API asked for.
+ */
+export async function rewriteResponses(page: Page, path: string, change: (data: any) => void): Promise<void> {
+  await page.route(`**${path}`, async (route) => {
+    const response = await route.fetch();
+    const json = await response.json();
+    if (json && typeof json === 'object' && json.data) change(json.data);
+    await route.fulfill({ response, json });
+  });
+}
