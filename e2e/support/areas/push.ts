@@ -5,7 +5,7 @@ import { adminApi, enrolAndSignInStaff } from '../admin';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
 import { seedFcmConfig, type FakeServiceAccount } from '../channels';
 import { newPersonContext } from '../fixtures';
-import { stubCalls } from '../provider-stub';
+import { failStub, stubCalls } from '../provider-stub';
 import { assertE2eDatabase, stackEnv } from '../stack';
 
 /**
@@ -211,6 +211,8 @@ export interface DeviceOptions {
   tokens?: number;
   pushOptIn?: boolean;
   distinctId?: string;
+  /** IANA zone the SDK reports (timezone waves). */
+  timezone?: string;
 }
 
 /** A fresh FCM-looking registration token. */
@@ -230,6 +232,7 @@ export async function addDevice(p: Pick<PushProject, 'project' | 'sdkKey'>, ip: 
       platform: 'android',
       ...(options.pushOptIn === undefined ? {} : { pushOptIn: options.pushOptIn }),
       ...(options.distinctId ? { distinctId: options.distinctId } : {}),
+      ...(options.timezone ? { timezone: options.timezone } : {}),
     },
     { apiKey: p.sdkKey, ip },
   );
@@ -511,4 +514,101 @@ export function toastBehindDialog(page: Page, title: string): Locator {
   return page
     .locator('[role="region"][aria-label^="Notifications"] li')
     .filter({ has: page.locator('div.text-sm.font-semibold', { hasText: new RegExp(`^${escaped}$`) }) });
+}
+
+// ---- P1: list rows, engagement, reachability, held requests, stubbed failures
+
+/**
+ * A `push_notification_logs` row with any columns (snake_case names), defaults filled
+ * as the worker leaves a finished push campaign. Answers its id.
+ */
+export async function seedLogRow(projectId: string, columns: Record<string, unknown> = {}): Promise<string> {
+  const row: Record<string, unknown> = {
+    project_id: projectId,
+    title: 'Seeded campaign',
+    status: 'sent',
+    total_tokens: 1,
+    success_count: 1,
+    processed_tokens: 1,
+    ...columns,
+  };
+  if (!('completed_at' in row) && !['scheduled', 'queued', 'sending'].includes(String(row.status))) row.completed_at = new Date();
+  const names = Object.keys(row);
+  const values = names.map((name) => {
+    const value = row[name];
+    return value !== null && typeof value === 'object' && !(value instanceof Date) ? JSON.stringify(value) : value;
+  });
+  const [inserted] = await sql<{ id: string }>(
+    `INSERT INTO push_notification_logs (${names.join(', ')}) VALUES (${names.map((_, i) => `$${i + 1}`).join(', ')}) RETURNING id`,
+    values,
+  );
+  return inserted.id;
+}
+
+/** An engagement report through the SDK's event route, as the app sends it. */
+export async function reportEvent(
+  p: Pick<PushProject, 'project' | 'sdkKey'>,
+  campaignId: string,
+  device: Pick<Device, 'fingerprint'>,
+  type: 'delivered' | 'impression' | 'click' | 'dismissed',
+  ip = newClientIp(),
+): Promise<void> {
+  await api(
+    'POST',
+    '/api/push-notifications/events',
+    { projectId: p.project.id, campaignId, deviceFingerprint: device.fingerprint, type, platform: 'android' },
+    { apiKey: p.sdkKey, ip },
+  );
+}
+
+/** Marks a token deactivated, with a reason, `daysAgo` days back (reachability figures). */
+export async function deactivateToken(token: string, reason: 'provider_rejected' | 'app_requested', daysAgo: number): Promise<void> {
+  const rows = await sql(
+    `UPDATE push_tokens SET is_active = false, deactivation_reason = $2, deactivated_at = now() - make_interval(days => $3) WHERE token = $1 RETURNING id`,
+    [token, reason, daysAgo],
+  );
+  if (rows.length !== 1) throw new Error(`No push_tokens row for ${token}`);
+}
+
+/**
+ * Holds every request whose URL `matches` until `release()`, so a busy state
+ * ("Saving…", "Validating…") can be seen. The requests then reach the API unchanged.
+ */
+export async function holdRequests(page: Page, matches: (url: string) => boolean): Promise<{ release: () => void }> {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  await page.route(
+    (url) => matches(url.toString()),
+    async (route) => {
+      await gate;
+      await route.continue();
+    },
+  );
+  return { release: () => release() };
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** date-fns `MMM d, HH:mm` (`MMM d, yyyy HH:mm` with `year`) in UTC, for pages run with timezoneId UTC. */
+export function formatUtc(value: Date | string, year = false): string {
+  const d = new Date(value);
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()},${year ? ` ${d.getUTCFullYear()}` : ''} ${hh}:${mm}`;
+}
+
+/**
+ * Makes Google's token exchange (the stub) refuse this service account, and only it:
+ * the claim set of its JWT assertion starts with the account's own `iss`, so the
+ * base64url of that prefix (cut to whole 3-byte groups) is in no other test's request.
+ */
+export async function refuseTokenExchange(account: Pick<FakeServiceAccount, 'client_email'>, status = 400): Promise<void> {
+  const prefix = Buffer.from(`{"iss":${JSON.stringify(account.client_email)}`);
+  const match = prefix.subarray(0, prefix.length - (prefix.length % 3)).toString('base64url');
+  await failStub('google-oauth', { status, match });
+}
+
+/** The wall-clock `HH:MM` of an instant in `timezone`. */
+export function localClock(instant: Date | string, timezone: string): string {
+  return new Intl.DateTimeFormat('en-GB', { timeZone: timezone, hour12: false, hour: '2-digit', minute: '2-digit' }).format(new Date(instant));
 }
