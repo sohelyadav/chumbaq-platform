@@ -1,7 +1,8 @@
 import { createHash, createHmac, randomBytes, randomInt, randomUUID } from 'crypto';
 import { connect } from 'net';
 import { Client } from 'pg';
-import type { Browser, Locator, Page, Route } from '@playwright/test';
+import { expect, type Browser, type Locator, type Page, type Route } from '@playwright/test';
+import { answerStub, failStub } from '../provider-stub';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
 import { adminApi, enrolAndSignInStaff, grantSuperAdmin } from '../admin';
 import { assertE2eDatabase, stackEnv } from '../stack';
@@ -487,4 +488,160 @@ export function recordApiRequests(page: Page, part: string): Array<{ method: str
     if (path.startsWith('/api/') && path.includes(part)) seen.push({ method: request.method(), path });
   });
   return seen;
+}
+
+// ---- Mixpanel: the provider stub, per test
+
+/**
+ * A Mixpanel project id of the test's own (eight digits, as the other INTEG specs use),
+ * so what the stub is told to answer for it reaches no other test.
+ */
+export function ownMixpanelProjectId(): string {
+  return String(randomInt(10_000_000, 99_999_999));
+}
+
+/** The cohorts Mixpanel lists for `mixpanelProjectId`, in its own `cohorts/list` shape. */
+export async function stubMixpanelCohortList(mixpanelProjectId: string, cohorts: Array<{ id: number; name: string; count: number }>): Promise<void> {
+  await answerStub('mixpanel', {
+    method: 'GET',
+    path: `/api/2.0/cohorts/list?project_id=${mixpanelProjectId}`,
+    body: cohorts.map((c) => ({
+      id: c.id,
+      name: c.name,
+      count: c.count,
+      description: '',
+      created: '2026-01-01 00:00:00',
+      project_id: Number(mixpanelProjectId),
+      is_visible: 1,
+    })),
+  });
+}
+
+export interface StubProfile {
+  distinctId: string;
+  properties?: Record<string, unknown>;
+}
+
+/**
+ * The profiles Mixpanel's `engage` answers for `mixpanelProjectId` (one page). The
+ * stub's answers are keyed by path only and `engage` carries the project in its form
+ * body, so this uses the stub's matched answer (`fail` with a 200 and a body), scoped
+ * to that project's form field.
+ */
+export async function stubMixpanelMembers(mixpanelProjectId: string, profiles: StubProfile[]): Promise<void> {
+  await failStub('mixpanel', {
+    status: 200,
+    match: `project_id=${mixpanelProjectId}&page=`,
+    body: {
+      page: 0,
+      page_size: 1000,
+      session_id: `e2e-${mixpanelProjectId}`,
+      status: 'ok',
+      total: profiles.length,
+      results: profiles.map((p) => ({ $distinct_id: p.distinctId, $properties: p.properties ?? {} })),
+    },
+  });
+}
+
+/** Mixpanel answers 401 to every request made for `mixpanelProjectId` from now on. */
+export async function refuseMixpanelCredentials(mixpanelProjectId: string): Promise<void> {
+  await failStub('mixpanel', { status: 401, match: `project_id=${mixpanelProjectId}` });
+}
+
+export interface MemberSeed {
+  /** Null for an unresolved member. */
+  deviceIdentityId: string | null;
+  distinctId?: string;
+  resolvedBy?: 'external_user_id' | 'distinct_id' | 'email' | null;
+  addedAt?: Date;
+  profile?: Record<string, unknown>;
+}
+
+export interface CohortSeed {
+  name: string;
+  mixpanelCohortId?: number;
+  status?: 'pending' | 'syncing' | 'synced' | 'error';
+  /** Defaults to what the members add up to. */
+  counts?: { mixpanel: number; resolved: number; unresolved: number };
+  lastSyncedAt?: Date | null;
+  errorMessage?: string | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+  members?: MemberSeed[];
+}
+
+/** An imported cohort in any state a sync can leave it, with its members. */
+export async function seedCohortWith(projectId: string, seed: CohortSeed): Promise<SeededCohort> {
+  const mixpanelCohortId = seed.mixpanelCohortId ?? randomInt(100_000, 2_000_000_000);
+  const members = seed.members ?? [];
+  const resolved = members.filter((m) => m.deviceIdentityId).length;
+  const counts = seed.counts ?? { mixpanel: members.length, resolved, unresolved: members.length - resolved };
+  return withDb(async (db) => {
+    const {
+      rows: [cohort],
+    } = await db.query(
+      `INSERT INTO mixpanel_cohorts ("projectId", "mixpanelCohortId", name, "mixpanelUserCount", "resolvedCount", "unresolvedCount", status, "lastSyncedAt", "errorMessage", "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, now()), COALESCE($11, now())) RETURNING id`,
+      [
+        projectId,
+        mixpanelCohortId,
+        seed.name,
+        counts.mixpanel,
+        counts.resolved,
+        counts.unresolved,
+        seed.status ?? 'synced',
+        seed.lastSyncedAt === undefined ? new Date() : seed.lastSyncedAt,
+        seed.errorMessage ?? null,
+        seed.createdAt ?? null,
+        seed.updatedAt ?? null,
+      ],
+    );
+    for (const member of members) {
+      await db.query(
+        `INSERT INTO mixpanel_cohort_members ("cohortId", "projectId", "mixpanelDistinctId", "deviceIdentityId", "resolvedBy", "isResolved", "mixpanelProfile", "addedAt")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()))`,
+        [
+          cohort.id,
+          projectId,
+          member.distinctId ?? `mp-${randomUUID()}`,
+          member.deviceIdentityId,
+          member.deviceIdentityId ? (member.resolvedBy === undefined ? 'distinct_id' : member.resolvedBy) : null,
+          member.deviceIdentityId !== null,
+          JSON.stringify(member.profile ?? { $name: 'E2E profile' }),
+          member.addedAt ?? null,
+        ],
+      );
+    }
+    return { id: cohort.id as string, name: seed.name, mixpanelCohortId };
+  });
+}
+
+/** A person named by an external id through identify, with the project's `userHash`. */
+export async function identifyPerson(
+  p: SdkProject,
+  externalUserId: string,
+  body: Record<string, unknown> = {},
+): Promise<{ id: string; fingerprint: string }> {
+  const secret = await identitySecretOf(p.owner, p.project.id);
+  return identifyDevice(p, { externalUserId, userHash: userHash(secret, externalUserId), ...body });
+}
+
+/**
+ * A view-as write refused as read-only, with its own toast: earlier read-only toasts are
+ * waited out first (they go after 4 s), so the one seen afterwards is this write's.
+ */
+export async function refusedAsReadOnly(page: Page, urlPart: string, method: string, action: () => Promise<void>): Promise<void> {
+  const readOnly = toast(page, 'Read-only session').filter({ hasText: READ_ONLY });
+  await expect(readOnly).toHaveCount(0, { timeout: 10_000 });
+  const refused = page.waitForResponse((r) => new URL(r.url()).pathname.endsWith(urlPart) && r.request().method() === method);
+  await action();
+  const response = await refused;
+  expect(response.status(), `${method} ${urlPart}`).toBe(403);
+  expect((await response.json()).message, `${method} ${urlPart}`).toBe(READ_ONLY);
+  await expect(readOnly).toHaveCount(1);
+}
+
+/** A stat card's figure on the cohort page ("Mixpanel Count", "Resolved", ...). */
+export function cohortStat(page: Page, label: string): Locator {
+  return page.locator('p').filter({ hasText: new RegExp(`^${label}$`) }).locator('xpath=preceding-sibling::p[1]');
 }
