@@ -100,10 +100,11 @@ test('PPL-023 SDK-set avatar URL is never loaded', async ({ page, clientIp }) =>
   await row.getByRole('link').click();
   await expect(page).toHaveURL(new RegExp(`/projects/${p.project.id}/users/${person.id}$`));
   await expect(page.getByRole('heading', { name: 'User Profile' })).toBeVisible();
+  await expect(page.locator('aside').getByText('A', { exact: true })).toBeVisible();
   await expect(page.locator('img[src*="attacker.example"]')).toHaveCount(0);
   await page.waitForLoadState('networkidle');
 
-  expect(hosts).not.toContain('attacker.example');
+  expect(hosts.filter((host) => host.endsWith('attacker.example'))).toEqual([]);
 });
 
 test('PPL-024 HTML in SDK-set values renders as text in the list', async ({ page, clientIp }) => {
@@ -187,8 +188,11 @@ test('PPL-038 Person of another project is not readable', async ({ page, clientI
   const p = await peopleProject(clientIp);
   const q = await peopleProject(clientIp, 'ppl-outsider');
   const qPerson = await identify(q, clientIp, { deviceFingerprint: fingerprint('fp-q1'), firstName: 'Quentin' });
-  await trackEvent(q, clientIp, { eventName: 'q_only_event', deviceFingerprint: qPerson.deviceFingerprint });
+  expect((await trackEvent(q, clientIp, { eventName: 'q_only_event', deviceFingerprint: qPerson.deviceFingerprint })).status).toBe(201);
   const auth = { ip: clientIp, token: p.owner.accessToken };
+  // Q's own owner reads the event, so an empty answer below is a refusal, not an empty person.
+  const own = await raw('GET', `/api/projects/${q.project.id}/users/${qPerson.id}/events`, undefined, { ip: clientIp, token: q.owner.accessToken });
+  expect(own.body.data.total).toBe(1);
 
   await signIn(page, p.owner);
   await page.goto(`/projects/${p.project.id}/users/${qPerson.id}`);
@@ -206,6 +210,7 @@ test('PPL-038 Person of another project is not readable', async ({ page, clientI
   const events = await raw('GET', `/api/projects/${p.project.id}/users/${qPerson.id}/events`, undefined, auth);
   expect(events.status).toBe(200);
   expect(events.body.data).toEqual({ data: [], total: 0 });
+  expect(JSON.stringify(events.body)).not.toContain('q_only_event');
 });
 
 test('PPL-055 HTML in traits, event names and properties renders as text', async ({ page, clientIp }) => {
@@ -252,6 +257,7 @@ test('PPL-063 Profile in view-as hides privacy actions', async ({ page, browser,
   test.slow(); // The super admin grant runs the CLI through ts-node.
   const p = await peopleProject(clientIp);
   const asha = await seedAsha(p, clientIp);
+  expect((await trackEvent(p, clientIp, { deviceFingerprint: asha.ios.deviceFingerprint, eventName: 'viewed_pricing' })).status).toBe(201);
   const handoff = await viewAsHandoff(browser, baseURL, p.owner);
 
   await openViewAs(page, handoff);
@@ -264,6 +270,7 @@ test('PPL-063 Profile in view-as hides privacy actions', async ({ page, browser,
   expect(history.status()).toBe(200);
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('asha@example.com');
   await expect(page.getByRole('heading', { name: 'Events', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /viewed_pricing/ })).toBeVisible();
   await expect(page.getByText('No campaigns have reached this person yet')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Export data' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Delete person' })).toHaveCount(0);
@@ -444,13 +451,24 @@ test('PPL-081 Device handover to a different signed-in user', async ({ clientIp 
     traits: { plan: 'pro' },
     emailOptIn: true,
     smsOptIn: true,
+    whatsappOptIn: true,
+    gdprConsent: true,
     pushOptIn: true,
   });
   await api('POST', '/api/identity/revenue', { projectId: p.project.id, deviceFingerprint: fp, amount: 10, currency: 'INR' }, { apiKey: p.sdkKey, ip: clientIp });
   await sql(`UPDATE device_identities SET email_confirmed_at = now(), email_confirm_sent_at = now() WHERE id = $1`, [before.id]);
   expect((await trackEvent(p, clientIp, { deviceFingerprint: fp, eventName: 'before_handover' })).status).toBe(201);
   const seeded = await deviceRow(before.id);
-  expect(seeded).toMatchObject({ email: 'a@e2e.example.test', phone_e164: '+919800000002', email_opt_in: true, sms_opt_in: true });
+  expect(seeded).toMatchObject({
+    email: 'a@e2e.example.test',
+    phone_e164: '+919800000002',
+    email_opt_in: true,
+    sms_opt_in: true,
+    whatsapp_opt_in: true,
+    gdpr_consent: true,
+    push_opt_in: true,
+    currency: 'INR',
+  });
   expect(Number(seeded!.total_revenue)).toBe(10);
 
   await identify(p, clientIp, { deviceFingerprint: fp, externalUserId: userB, firstName: 'B' });
@@ -480,7 +498,9 @@ test('PPL-081 Device handover to a different signed-in user', async ({ clientIp 
   const handover = (await consentEvents(before.id)).filter((e) => e.source === 'device_handover');
   expect(handover.map((e) => [e.channel, e.granted]).sort()).toEqual([
     ['email', false],
+    ['gdpr', false],
     ['sms', false],
+    ['whatsapp', false],
   ]);
   const events = await sql(`SELECT device_identity_id FROM user_events WHERE project_id = $1 AND event_name = 'before_handover'`, [p.project.id]);
   expect(events).toEqual([{ device_identity_id: before.id }]);
@@ -577,10 +597,10 @@ test('PPL-089 Identify restores an erased address\'s suppression', async ({ clie
   const q = await peopleProject(clientIp, 'ppl-other', p.owner);
   const address = `asha-${randomBytes(4).toString('hex')}@example.com`;
   const asha = await identify(p, clientIp, { deviceFingerprint: fingerprint('fp-asha'), email: address, firstName: 'Asha' });
-  await sql(
-    `INSERT INTO channel_suppressions (project_id, channel, address, reason, source) VALUES ($1, 'email', $2, 'unsubscribed', 'link')`,
-    [p.project.id, address],
-  );
+  await api('POST', '/api/email/suppressions', { projectId: p.project.id, address, reason: 'unsubscribed' }, { token: p.owner.accessToken, ip: clientIp });
+  expect(await sql(`SELECT reason FROM channel_suppressions WHERE project_id = $1 AND address = $2`, [p.project.id, address])).toEqual([
+    { reason: 'unsubscribed' },
+  ]);
 
   const erased = await raw('DELETE', `/api/projects/${p.project.id}/users/${asha.id}`, undefined, { ip: clientIp, token: p.owner.accessToken });
   expect(erased.status).toBe(200);
@@ -625,9 +645,19 @@ test('PPL-099 Owner, admin and member can change consent', async ({ page, client
 
   for (const actor of [p.owner, admin, member]) {
     const person = await identify(p, clientIp, { deviceFingerprint: fingerprint('fp-consent'), emailOptIn: true });
+    await sql(
+      `UPDATE device_identities SET last_seen_at = now() - interval '2 days', consent_updated_at = now() - interval '2 days' WHERE id = $1`,
+      [person.id],
+    );
     const before = await deviceRow(person.id);
-    await sql(`UPDATE device_identities SET last_seen_at = now() - interval '2 days' WHERE id = $1`, [person.id]);
-    const lastSeen = (await deviceRow(person.id))!.last_seen_at.getTime();
+    const lastSeen = before!.last_seen_at.getTime();
+
+    if (actor === p.owner) {
+      await signIn(page, p.owner);
+      await page.goto(`/projects/${p.project.id}/users/${person.id}`);
+      await expect(page.getByText('Email Opt-in', { exact: true }).locator('..')).toHaveText(/Email Opt-in\s*true/);
+    }
+    const changedAfter = Date.now() - 60_000;
 
     const answer = await raw('PATCH', `/api/identity/projects/${p.project.id}/users/${person.id}/consent`, { emailOptIn: false }, { ip: clientIp, token: actor.accessToken });
     expect(answer.status, actor.email).toBe(200);
@@ -635,7 +665,7 @@ test('PPL-099 Owner, admin and member can change consent', async ({ page, client
 
     const row = await deviceRow(person.id);
     expect(row!.email_opt_in).toBe(false);
-    expect(row!.consent_updated_at.getTime()).toBeGreaterThan(before!.consent_updated_at.getTime() - 1);
+    expect(row!.consent_updated_at.getTime()).toBeGreaterThan(changedAfter);
     expect(row!.last_seen_at.getTime()).toBe(lastSeen);
     expect((await consentEvents(person.id)).filter((e) => e.source === 'dashboard')).toEqual([
       { channel: 'email', granted: false, source: 'dashboard' },
@@ -648,12 +678,11 @@ test('PPL-099 Owner, admin and member can change consent', async ({ page, client
       target_type: 'person',
       target_id: person.id,
       target_label: null,
-      details: { consents: { emailOptIn: false } },
     });
+    expect(logged[0].details).toEqual({ consents: { emailOptIn: false } });
 
     if (actor === p.owner) {
-      await signIn(page, p.owner);
-      await page.goto(`/projects/${p.project.id}/users/${person.id}`);
+      await page.reload();
       await expect(page.getByRole('heading', { name: 'Profile Properties' })).toBeVisible();
       await expect(page.getByText('Platform', { exact: true })).toBeVisible();
       await expect(page.getByText('Email Opt-in', { exact: true })).toHaveCount(0);
@@ -661,8 +690,7 @@ test('PPL-099 Owner, admin and member can change consent', async ({ page, client
   }
 });
 
-test('PPL-102 Consent edit on unknown or other-project person', { annotation: { type: 'issue', description: 'PPL-102' } }, async ({ clientIp }) => {
-  test.fail();
+test('PPL-102 Consent edit on unknown or other-project person', async ({ clientIp }) => {
   const p = await peopleProject(clientIp);
   const q = await peopleProject(clientIp, 'ppl-outsider');
   const qPerson = await identify(q, clientIp, { deviceFingerprint: fingerprint('fp-q'), emailOptIn: true });
@@ -678,9 +706,14 @@ test('PPL-102 Consent edit on unknown or other-project person', { annotation: { 
   expect(foreign.body.message).toBe('Person not found');
   expect((await deviceRow(qPerson.id))!.email_opt_in).toBe(true);
   expect(await consentEvents(qPerson.id)).toEqual([{ channel: 'email', granted: true, source: 'sdk' }]);
+});
 
-  const malformed = await patch('abc');
+test('PPL-102 Consent edit with a malformed person id', { annotation: { type: 'issue', description: 'PPL-102' } }, async ({ clientIp }) => {
+  test.fail();
+  const p = await peopleProject(clientIp);
+  const malformed = await raw('PATCH', `/api/identity/projects/${p.project.id}/users/abc/consent`, { emailOptIn: false }, { ip: clientIp, token: p.owner.accessToken });
   expect(malformed.status).toBe(404);
+  expect(malformed.body.message).toBe('Person not found');
 });
 
 test('PPL-103 Consent edit refused in view-as and to outsiders', async ({ browser, baseURL, clientIp }) => {
@@ -758,7 +791,8 @@ test('PPL-109 Create an objection', async ({ clientIp }) => {
   // Behaviour from either device is dropped from now on.
   await identify(p, clientIp, { deviceFingerprint: asha.web.deviceFingerprint, externalUserId: asha.externalUserId, utmSource: 'later' });
   expect(await deviceRow(asha.web.id)).toMatchObject({ total_sessions: 1, latest_utm_source: null });
-  await raw('POST', '/api/identity/revenue', { projectId: p.project.id, deviceFingerprint: asha.ios.deviceFingerprint, amount: 5 }, { ip: clientIp, apiKey: p.sdkKey });
+  const revenue = await raw('POST', '/api/identity/revenue', { projectId: p.project.id, deviceFingerprint: asha.ios.deviceFingerprint, amount: 5 }, { ip: clientIp, apiKey: p.sdkKey });
+  expect(revenue.status).toBe(201);
   expect(Number((await deviceRow(asha.ios.id))!.total_revenue)).toBe(0);
   const event = await trackEvent(p, clientIp, { deviceFingerprint: asha.ios.deviceFingerprint, eventName: 'after_objection' });
   expect(event.status).toBe(201);
