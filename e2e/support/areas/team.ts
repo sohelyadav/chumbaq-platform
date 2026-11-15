@@ -746,3 +746,88 @@ export async function activityCount(projectId: string): Promise<number> {
     return Number(rows[0].n);
   });
 }
+
+// ---- P1: activity log page and CSV, role matrix, view-as and team additions
+
+export const TOO_MANY_TO_EXPORT = 'Too many entries to download. Choose a shorter date range.';
+export const LAST_OWNER = 'A project needs at least one owner.';
+
+/** Activity rows at fixed instants (`'2026-11-10T23:59:59.999999Z'`), written directly. Answers their ids in order. */
+export async function insertActivityAt(projectId: string, rows: Array<SeedActivity & { at: string }>): Promise<string[]> {
+  return withDb(async (db) => {
+    const ids: string[] = [];
+    for (const row of rows) {
+      const { rows: inserted } = await db.query<{ id: string }>(
+        `INSERT INTO project_activity
+           (project_id, occurred_at, actor_kind, actor_user_id, actor_label, action, target_type, target_id, target_label, details)
+         VALUES ($1, $2::timestamptz, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id`,
+        [
+          projectId,
+          row.at,
+          row.actorKind ?? 'user',
+          row.actorUserId ?? null,
+          row.actorLabel,
+          row.action,
+          row.targetType ?? null,
+          row.targetId ?? null,
+          row.targetLabel ?? null,
+          row.details === undefined || row.details === null ? null : JSON.stringify(row.details),
+        ],
+      );
+      ids.push(inserted[0].id);
+    }
+    return ids;
+  });
+}
+
+/**
+ * `count` `member.left` rows by `actor` in one statement, one second apart going back
+ * from `newest` (an instant, `now()` when left out). With `twinAt`, the row at that
+ * position (1-based) gets the same time as the one before it.
+ */
+export async function bulkActivity(
+  projectId: string,
+  actor: Pick<Person, 'userId' | 'name' | 'email'>,
+  count: number,
+  { newest, twinAt }: { newest?: string; twinAt?: number } = {},
+): Promise<void> {
+  await withDb((db) =>
+    db.query(
+      `INSERT INTO project_activity (project_id, occurred_at, actor_kind, actor_user_id, actor_label, action, target_type, target_id, target_label)
+       SELECT $1, COALESCE($5::timestamptz, now()) - make_interval(secs => (CASE WHEN g = $6 THEN g - 1 ELSE g END)),
+              'user', $2::uuid, $3, 'member.left', 'member', $7, $3
+         FROM generate_series(1, $4::int) AS g`,
+      [projectId, actor.userId, personLabel(actor), count, newest ?? null, twinAt ?? 0, actor.userId],
+    ),
+  );
+}
+
+/** How many `activity.exported` rows the project has. */
+export async function exportedCount(projectId: string): Promise<number> {
+  return withDb(async (db) => {
+    const { rows } = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM project_activity WHERE project_id = $1 AND action = 'activity.exported'`,
+      [projectId],
+    );
+    return Number(rows[0].n);
+  });
+}
+
+/** Changes an account's stored name (support's way; customers cannot rename themselves). */
+export async function setAccountName(person: Pick<Person, 'userId'>, name: string): Promise<void> {
+  await withDb((db) => db.query('UPDATE users SET name = $2 WHERE id = $1', [person.userId, name]));
+}
+
+/** A webhook made through the API, to a public IPv4 literal (no DNS; nothing listens there). */
+export async function createLiteralWebhook(person: Pick<Person, 'accessToken' | 'ip'>, projectId: string): Promise<{ id: string; url: string }> {
+  const url = `https://1.1.1.1/chumbaq-e2e/team-${randomBytes(4).toString('hex')}`;
+  const result = await call('POST', `/api/projects/${projectId}/webhooks`, { as: person, body: { url, events: ['click'] } });
+  if (result.status !== 201) throw new Error(`Webhook create answered ${result.status}: ${JSON.stringify(result.body)}`);
+  return { id: (result.body.data as { id: string }).id, url };
+}
+
+/** The UTC day `days` from today, `YYYY-MM-DD`. */
+export function utcDay(days = 0): string {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
