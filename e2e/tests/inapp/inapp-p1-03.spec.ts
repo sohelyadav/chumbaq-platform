@@ -271,8 +271,18 @@ test('INAPP-164 segment message with a deleted or foreign segment is withheld', 
     { externalUserId, distinctId: externalUserId, userHash: userHash(secret, externalUserId), traits: { plan: 'pro' } },
     'fp-d4',
   );
+  // The same person in the other project matches its segment, so the foreign message is
+  // withheld because the segment is not this project's, not because nobody matches it.
+  const otherSecret = await identitySecret(other);
+  const otherDevice = await identifyDevice(
+    other,
+    { externalUserId, distinctId: externalUserId, userHash: userHash(otherSecret, externalUserId), traits: { plan: 'pro' } },
+    'fp-d4-other',
+  );
   const segmentId = await traitSegment(p.owner, p.project.id, 'plan', 'pro');
   const foreignSegmentId = await traitSegment(other.owner, other.project.id, 'plan', 'pro');
+  const ownOfOther = await messageIn(other.owner, other.project.id, 'active', { userType: 'segment', segmentId: foreignSegmentId });
+  expect(await deliveredIds(other, otherDevice.fingerprint)).toEqual([ownOfOther.id]);
   const deleted = await messageIn(p.owner, p.project.id, 'active', { name: 'Own segment', userType: 'segment', segmentId, priority: 5 });
   const foreign = await messageIn(p.owner, p.project.id, 'active', {
     name: 'Foreign segment',
@@ -325,8 +335,6 @@ test('INAPP-166 minimum interval between shows', async () => {
 });
 
 test('INAPP-167 total impressions cap', async () => {
-  test.info().annotations.push({ type: 'issue', description: 'INAPP-167' });
-  test.fail();
   const p = await inAppProject('inapp-167');
   const message = await messageIn(p.owner, p.project.id, 'active', { name: 'Two in all', maxImpressionsTotal: 2 });
   const [d1, d2, d5] = [fingerprint('fp-d1'), fingerprint('fp-d2'), fingerprint('fp-d5')];
@@ -339,6 +347,9 @@ test('INAPP-167 total impressions cap', async () => {
   await recordEvents(p, message.id, d2, 'impression', 1);
   await waitForCounters(message.id, 2, 0);
   expect(await deliveredIds(p, d1)).toEqual([]);
+  // Only the device never shown it is expected to fail; the checks above must hold.
+  test.fail(true, 'INAPP-167');
+  test.info().annotations.push({ type: 'issue', description: 'INAPP-167' });
   expect(await deliveredIds(p, d5)).toEqual([]);
 });
 
@@ -540,8 +551,6 @@ test('INAPP-185 each list shows only its own layout', async ({ page }) => {
 });
 
 test('INAPP-186 row content', async ({ page }) => {
-  test.info().annotations.push({ type: 'issue', description: 'INAPP-186' });
-  test.fail();
   const p = await inAppProject('inapp-186');
   const { widget, items } = await widgetWith(p, 'Home hero', 'carousel', 3, { description: 'Top of home', status: 'active' });
   dataOf(await sdkRequest('GET', `/api/in-app-banners/serve/${widget.id}`, { apiKey: p.sdkKey }));
@@ -560,8 +569,11 @@ test('INAPP-186 row content', async ({ page }) => {
   const updated = (await widgetRow(widget.id))!.updated_at as Date;
   const localDate = await page.evaluate((at) => new Date(at).toLocaleDateString(), updated.toISOString());
   await expect(cells.nth(3)).toHaveText(localDate);
+  // Only the totals below are expected to fail; the row content above must hold.
+  test.fail(true, 'INAPP-186');
+  test.info().annotations.push({ type: 'issue', description: 'INAPP-186' });
   // One serve and one click: 3 impressions (one per live slide) and 1 click.
-  await expect(cells.nth(4)).toHaveText('3');
+  await expect(cells.nth(4)).toHaveText('3', { timeout: 5000 });
   await expect(cells.nth(5)).toHaveText('1');
 });
 
