@@ -1141,10 +1141,10 @@ test('ADMAUTH-180 proof expired between passkey options and registration', async
     if (route.request().method() !== 'POST') return route.fallback();
     bodies.push(route.request().postData() ?? '');
     if (bodies.length === 1) {
-      // A person takes a moment to touch the key; the virtual authenticator answers at
-      // once. Without the pause the dialog would close and reopen within its closing
-      // animation.
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      // The virtual authenticator answers at once, where a person takes a moment to
+      // touch the key: let the first dialog finish closing before the refusal opens it
+      // again.
+      await page.getByRole('dialog').waitFor({ state: 'detached' });
       // The old key back in the authenticator, for the second confirmation.
       await aside.restore();
       expect(await redisDel(challengeKey(PROOF, signedIn.session.id))).toBe(1);
@@ -1283,9 +1283,13 @@ test('ADMAUTH-183 re-authentication with the app shares the second-factor failur
   await dialog.getByRole('button', { name: 'Confirm' }).click();
   await expect(dialog.getByRole('alert')).toHaveText(CODE_REFUSED);
   await dialog.getByLabel('Code from your authenticator app').fill(await freshTotpCode(enrolment));
+  const limitedStep = enrolment.lastStep;
   await dialog.getByRole('button', { name: 'Confirm' }).click();
   await expect(dialog.getByRole('alert')).toHaveText(TOO_MANY);
   expect(answers.map((r) => r.status())).toEqual([403, 429]);
+  // Refused before the code was looked at: its step was never spent.
+  const [{ last_used_step }] = await sql<{ last_used_step: string }>(`SELECT last_used_step FROM totp_secrets WHERE user_id = $1`, [staff.userId]);
+  expect(Number(last_used_step)).toBeLessThan(limitedStep);
   expect(await authEvents({ email: staff.email }, since, 'login.limited')).toHaveLength(1);
   expect(refreshes).toEqual([]);
   await expect(page).toHaveURL(adminUrl('/account'));
