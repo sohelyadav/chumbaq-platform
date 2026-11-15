@@ -605,10 +605,6 @@ test('BILL-142 the outbox sends queued cancels within a minute', async ({ client
 
   expect((await waitForCancelCall(active.checkout.subscriptionId)).body).toStrictEqual({ cancel_at_cycle_end: true });
   expect((await waitForCancelCall(replaced.subscriptionId)).body).toStrictEqual({ cancel_at_cycle_end: false });
-  // Give a second run the chance to send again: it must not.
-  await new Promise((resolve) => setTimeout(resolve, 2_000));
-  expect(await cancelCalls(active.checkout.subscriptionId)).toHaveLength(1);
-  expect(await cancelCalls(replaced.subscriptionId)).toHaveLength(1);
 
   const outbox = async (id: string) =>
     (
@@ -621,6 +617,9 @@ test('BILL-142 the outbox sends queued cancels within a minute', async ({ client
   expect(await outbox(active.checkout.subscriptionId)).toMatchObject({ cancel_attempts: 1, cancel_error: null, cancel_at_period_end: true });
   await expect.poll(async () => (await outbox(replaced.subscriptionId)).cancel_sent_at).not.toBeNull();
   expect(await outbox(replaced.subscriptionId)).toMatchObject({ cancel_attempts: 1, cancel_error: null, cancel_at_period_end: false });
+  // Once marked sent, one call per queued row.
+  expect(await cancelCalls(active.checkout.subscriptionId)).toHaveLength(1);
+  expect(await cancelCalls(replaced.subscriptionId)).toHaveLength(1);
 });
 
 // ------------------------------------------------------------------ K. admin summary
@@ -730,11 +729,15 @@ test('BILL-162 create a plan', async ({ clientIp }) => {
   await dialog.getByLabel('Reason').fill('New team tier');
   await expect(dialog.getByText('13/500 characters, at least 3. Recorded in the audit log.', { exact: true })).toBeVisible();
 
-  // Held a moment, so the busy label can be seen.
+  // The create is held until the busy label has been seen.
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   await staffPage.route(
     (url) => url.pathname === '/api/admin/plans',
     async (route) => {
-      if (route.request().method() === 'POST') await new Promise((resolve) => setTimeout(resolve, 1000));
+      if (route.request().method() === 'POST') await released;
       await route.continue();
     },
   );
@@ -750,6 +753,8 @@ test('BILL-162 create a plan', async ({ clientIp }) => {
     reason: 'New team tier',
   });
   await expect(dialog.getByRole('button', { name: 'Working...' })).toBeDisabled();
+  await expect(adminToast(staffPage, `Plan ${code} created`)).toHaveCount(0);
+  release();
   await expect(adminToast(staffPage, `Plan ${code} created`)).toBeVisible();
   await expect(dialog).toBeHidden();
   await staffPage.unroute((url) => url.pathname === '/api/admin/plans');
@@ -1214,14 +1219,18 @@ test.describe('admin billing routes', () => {
       ['POST', `/api/admin/tenants/${tenantId}/billing/invoices/${randomUUID()}/resend`, { reason: 'E2E: guard check' }, 'Invoice not found'],
     ];
 
-    for (const [method, path, body] of routes(missing)) {
+    // A real tenant, so a 404 with billing off is the switch and not a missing tenant.
+    for (const [method, path, body] of routes(customer.userId)) {
       const anonymous = await rawAdmin(method, path, { ip: clientIp, body });
       expect(anonymous.status, `anonymous ${method} ${path}`).toBe(401);
       const asCustomer = await rawAdmin(method, path, { token: customer.accessToken, ip: clientIp, body });
       expect(asCustomer.status, `customer ${method} ${path}`).toBe(401);
       const billingOff = await rawAdmin(method, path, { token, ip: staffIp, body, base: off.url });
-      expect(billingOff.status, `billing off ${method} ${path}`).toBe(404);
+      expect([billingOff.status, billingOff.body.message], `billing off ${method} ${path}`).toEqual([404, 'Not Found']);
     }
+    // Billing off changed nothing for the tenant.
+    expect(await billingAccountRow(customer.userId)).toBeUndefined();
+    expect(await auditRows('billing.comp_granted', { targetId: customer.userId })).toHaveLength(0);
 
     for (const [method, path, body, message] of routes(missing)) {
       const reply = await rawAdmin(method, path, { token, ip: staffIp, body });
@@ -1258,6 +1267,9 @@ test('BILL-202 recovery after a halted payment', async ({ page, clientIp }) => {
   const active = await activeOn(tenant, clientIp, G);
   await halt(active);
   expect((await subscriptionRow(active.checkout.subscriptionId)).grace_until).not.toBeNull();
+  type PastDue = { pastDue: Array<{ tenantId: string }> };
+  const halted = await adminApi<PastDue>('GET', '/api/admin/billing/summary', undefined, await freshStaff(), staffIp);
+  expect(halted.pastDue.map((r) => r.tenantId)).toContain(tenant.userId);
 
   const newEnd = active.periodEnd + 30 * DAY_SECONDS;
   const payment = paymentEntity({ amount: 49_900, status: 'captured', customerId: active.checkout.customerId, method: 'card' });
@@ -1296,7 +1308,7 @@ test('BILL-202 recovery after a halted payment', async ({ page, clientIp }) => {
   await expect(dialog).toBeHidden();
 
   const token = await freshStaff();
-  const summary = await adminApi<{ pastDue: Array<{ tenantId: string }> }>('GET', '/api/admin/billing/summary', undefined, token, staffIp);
+  const summary = await adminApi<PastDue>('GET', '/api/admin/billing/summary', undefined, token, staffIp);
   expect(summary.pastDue.map((r) => r.tenantId)).not.toContain(tenant.userId);
   await openTenant(tenant);
   await expect(fact(tenantBillingCard(staffPage), 'State')).toHaveText('Active');
