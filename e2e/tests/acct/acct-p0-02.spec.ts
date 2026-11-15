@@ -141,7 +141,14 @@ test('ACCT-085 a registration response made for another challenge or origin is r
   expect(forged.message).toBe('Could not verify that passkey.');
   expect(forged.text).not.toContain('elsewhere');
   expect(await passkeyRows(account.userId)).toEqual([]);
-  await expect.poll(() => (apiLogSince(mark).match(/Passkey registration refused/g) ?? []).length).toBeGreaterThanOrEqual(2);
+  // Each refusal's own reason is in the server log, tied to this test by the challenge and origin it names.
+  const refusals = () => apiLogSince(mark).split('\n').filter((line) => line.includes('Passkey registration refused'));
+  await expect
+    .poll(() => refusals().some((line) => line.includes('registration response challenge') && line.includes(newer.body.challenge)))
+    .toBe(true);
+  await expect
+    .poll(() => refusals().some((line) => line.includes('registration response origin') && line.includes('https://elsewhere.example.test')))
+    .toBe(true);
 
   // Control: the same edit with this app's origin is accepted, so the origin is what refused it.
   token = await reauthWithPassword(token, PASSWORD, clientIp);
@@ -476,7 +483,7 @@ test('ACCT-118 the activity never exposes reasons or addresses of the account', 
   expect(activity.text).not.toContain(account.userId);
 });
 
-test('ACCT-120 the activity is per account', async ({ clientIp }) => {
+test('ACCT-120 the activity is per account', async ({ page, clientIp }) => {
   const a = await createAccount(clientIp, 'acct120a');
   const ipB = newClientIp();
   const b = await createAccount(ipB, 'acct120b');
@@ -498,6 +505,15 @@ test('ACCT-120 the activity is per account', async ({ clientIp }) => {
   const failed = listed.body.activity.filter((entry) => entry.type === 'login.failed');
   expect(failed).toHaveLength(1);
   expect(failed[0].ipAddress).toBe(strangerIp);
+
+  // A's settings page names the stranger's attempt, and nothing of B's.
+  await signIn(page, a);
+  await page.goto('/settings');
+  const activity = settingsCard(page, 'Recent security activity');
+  const attempt = activity.getByRole('listitem').filter({ hasText: 'Sign-in attempt failed' });
+  await expect(attempt).toHaveCount(1);
+  await expect(attempt).toContainText(strangerIp);
+  await expect(activity.getByRole('listitem').filter({ hasText: ipB })).toHaveCount(0);
 });
 
 // ---- K. Factor reset banner
