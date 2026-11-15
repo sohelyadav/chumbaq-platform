@@ -842,7 +842,7 @@ export async function setPickerTime(page: Page, trigger: Locator, time: string):
   await expect(page.locator('[data-slot="popover-content"]')).toHaveCount(0);
 }
 
-/** Serves a widget `serves` times and clicks `clickOn` items, then waits for the item counters. */
+/** Serves a widget `serves` times and records each click in `clicks` (wait with waitForItemCounters). */
 export async function widgetTraffic(
   p: InAppProject,
   categoryId: string,

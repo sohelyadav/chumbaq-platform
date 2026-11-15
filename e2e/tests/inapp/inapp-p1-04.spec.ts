@@ -482,7 +482,7 @@ test('INAPP-218 story colours are not validated', async ({ page }) => {
   const refused = await call('PATCH', `/api/banner-categories/${category.id}`, p.owner, { backgroundColor: background });
   expect(refused.status).toBe(400);
   expect(messageOf(refused)).toContain(BACKGROUND_REFUSED);
-  // ...and the SDK receives the unchecked values.
+  // ...and serve hands both to the SDK as stored.
   await setWidgetStatus(p.owner, category.id, 'active');
   const served = dataOf(await serveWidget(category.id, p.sdkKey));
   expect(served.banners[0].metadata).toMatchObject({ backgroundColor: background, textColor: textColour });
