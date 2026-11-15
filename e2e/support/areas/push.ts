@@ -745,3 +745,47 @@ export async function captureRefusedSend(page: Page, buttonName: string): Promis
   await page.unroute(pattern);
   return captured!;
 }
+
+// ---- P1: bulk devices and events (experiment results), campaign headers
+
+/** `count` device rows written straight to the table (no tokens), answering their ids. */
+export async function insertDeviceRows(projectId: string, count: number): Promise<string[]> {
+  const prefix = `bulk-${randomBytes(4).toString('hex')}`;
+  const rows = await sql<{ id: string }>(
+    `INSERT INTO device_identities (project_id, device_fingerprint, platform, first_seen_at, last_seen_at)
+     SELECT $1, $2 || '-' || g, 'android', now(), now() FROM generate_series(1, $3::int) g
+     RETURNING id`,
+    [projectId, prefix, count],
+  );
+  return rows.map((row) => row.id);
+}
+
+/** One event of `type` per device for a campaign, stored as the SDK's event route stores it. */
+export async function insertEvents(
+  projectId: string,
+  campaignId: string,
+  deviceIds: string[],
+  type: 'delivered' | 'impression' | 'click' | 'dismissed',
+): Promise<void> {
+  if (deviceIds.length === 0) return;
+  await sql(
+    `INSERT INTO push_notification_events (project_id, campaign_id, device_identity_id, type, platform, occurred_at)
+     SELECT $1, $2, d, $4, 'android', now() FROM unnest($3::uuid[]) d`,
+    [projectId, campaignId, deviceIds, type],
+  );
+}
+
+/** The status and other badges beside a campaign detail page's heading. */
+export function headingBadges(page: Page): Locator {
+  return page.getByRole('heading', { level: 1 }).locator('..').locator('[data-slot="badge"]');
+}
+
+/** The line under a campaign detail page's heading (`Sent …` or `Scheduled for …`). */
+export function timingLine(page: Page): Locator {
+  return page.getByRole('heading', { level: 1 }).locator('xpath=../following-sibling::p[1]');
+}
+
+/** The back arrow beside a campaign detail page's heading (a link with only an icon). */
+export function backArrow(page: Page): Locator {
+  return page.getByRole('heading', { level: 1 }).locator('xpath=ancestor::div[contains(@class, "items-start")][1]').locator('a').first();
+}
