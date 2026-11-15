@@ -348,7 +348,8 @@ test('BILL-151 revenue: the last 30 days and by month', async ({ clientIp }) => 
     const before = await read();
     await seedPayment(tenant.userId, { amount: 49_900, status: 'captured' });
     await seedPayment(tenant.userId, { amount: 49_900, status: 'captured', paidAgoSeconds: 40 * DAY_SECONDS });
-    await seedPayment(tenant.userId, { amount: 49_900, status: 'refunded', refunded: 10_000 });
+    // A partial refund leaves the payment captured, as the ledger stores one.
+    await seedPayment(tenant.userId, { amount: 49_900, status: 'captured', refunded: 10_000 });
     await seedPayment(tenant.userId, { amount: 49_900, status: 'failed', method: 'card', failureReason: 'payment_failed' });
     const after = await read();
     // Another spec's payment landing between the two reads would move the totals too.
@@ -390,8 +391,10 @@ test('BILL-151 revenue: the last 30 days and by month', async ({ clientIp }) => 
 
 test('BILL-152 the recent payments and failures tables', async ({ clientIp }) => {
   const tenant = await createAccount(clientIp, 'bill-152', 'Cara Customer');
-  const captured = await seedPayment(tenant.userId, { amount: 49_900, status: 'captured', method: 'upi', paidAgoSeconds: 3 });
-  const refunded = await seedPayment(tenant.userId, { amount: 49_900, status: 'refunded', refunded: 10_000, method: null, paidAgoSeconds: 2 });
+  const captured = await seedPayment(tenant.userId, { amount: 49_900, status: 'captured', method: 'upi', paidAgoSeconds: 4 });
+  // A partial refund stays captured; only a full one is stored as refunded.
+  const partly = await seedPayment(tenant.userId, { amount: 49_900, status: 'captured', refunded: 10_000, method: null, paidAgoSeconds: 3 });
+  const refunded = await seedPayment(tenant.userId, { amount: 49_900, status: 'refunded', refunded: 49_900, method: 'card', paidAgoSeconds: 2 });
   const failed = await seedPayment(tenant.userId, {
     amount: 49_900,
     status: 'failed',
@@ -412,11 +415,12 @@ test('BILL-152 the recent payments and failures tables', async ({ clientIp }) =>
   await expect(recent.getByRole('columnheader')).toHaveText(['When', 'Tenant', 'Amount', 'Refunded', /^Kept/, 'Status', 'Method']);
   expect(await recent.getByRole('row').count()).toBeLessThanOrEqual(21);
   const rows = recent.getByRole('row').filter({ hasText: tenant.email });
-  await expect(rows).toHaveCount(3);
+  await expect(rows).toHaveCount(4);
   // Newest first.
-  const [f, r, c] = [rows.nth(0), rows.nth(1), rows.nth(2)];
+  const [f, r, p, c] = [rows.nth(0), rows.nth(1), rows.nth(2), rows.nth(3)];
   await expect(f.getByRole('cell')).toHaveText([gbDateTime(paidAt(failed.id)), tenant.email, '₹499.00', '-', '₹0.00', /^failed/, 'card']);
-  await expect(r.getByRole('cell')).toHaveText([gbDateTime(paidAt(refunded.id)), tenant.email, '₹499.00', '₹100.00', '₹399.00', 'refunded', '-']);
+  await expect(r.getByRole('cell')).toHaveText([gbDateTime(paidAt(refunded.id)), tenant.email, '₹499.00', '₹499.00', '₹0.00', 'refunded', 'card']);
+  await expect(p.getByRole('cell')).toHaveText([gbDateTime(paidAt(partly.id)), tenant.email, '₹499.00', '₹100.00', '₹399.00', 'captured', '-']);
   await expect(c.getByRole('cell')).toHaveText([gbDateTime(paidAt(captured.id)), tenant.email, '₹499.00', '-', '₹499.00', 'captured', 'upi']);
   const failedBadge = f.locator('[data-slot="badge"]');
   await expect(failedBadge).toHaveText('failed');
@@ -1276,7 +1280,7 @@ test('BILL-189 the card\'s tables render provider data safely', async ({ clientI
   const replaced = await seedSubscriptionRow(tenant.userId, price, G.code, { status: 'cancelled', supersededBy: rows.active.id });
   await seedPayment(tenant.userId, { amount: 11_100, status: 'captured', subscriptionId: replaced.id, method: 'card' });
   await seedPayment(tenant.userId, { amount: 22_200, status: 'failed', failureReason: 'Bank said <b>no</b>', method: 'upi' });
-  await seedPayment(tenant.userId, { amount: 33_300, status: 'refunded', refunded: 10_000, method: 'upi' });
+  await seedPayment(tenant.userId, { amount: 33_300, status: 'captured', refunded: 10_000, method: 'upi' });
   await seedInvoice(tenant.userId, { number: 'INV-OK', shortUrl: 'https://rzp.io/i/e2eok' });
   await seedInvoice(tenant.userId, { number: 'INV-JS', shortUrl: 'javascript:alert(1)' });
   await seedInvoice(tenant.userId, { number: 'INV-NULL', shortUrl: null });
