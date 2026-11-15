@@ -6,7 +6,7 @@ import { expect, type Page } from '@playwright/test';
 import { Client } from 'pg';
 import { api, apiUrl, createAccount, type Account } from '../api';
 import { adminUrl, enrolAndSignInStaff } from '../admin';
-import { assertE2eDatabase, REPO_ROOT, stackEnv } from '../stack';
+import { assertE2eDatabase, REPO_ROOT, runSecrets, stackEnv } from '../stack';
 
 /**
  * Helpers for the admin tenant specs (ADMTEN): staff set-up, raw admin API requests,
@@ -574,6 +574,8 @@ export interface PendingResetSeed {
   noticeSent?: boolean;
   verificationMethod?: string | null;
   verificationNotes?: string | null;
+  /** The second justification kept when the password had been reset recently. */
+  passwordResetOverride?: string | null;
 }
 
 /**
@@ -584,8 +586,8 @@ export async function seedPendingFactorReset(seed: PendingResetSeed): Promise<st
   const [row] = await sql<{ id: string }>(
     `INSERT INTO factor_resets
        (user_id, status, requested_by_id, requested_by_email, reason, execute_after, notice_sent_at,
-        verification_method, verification_notes)
-     VALUES ($1, 'pending', $2, $3, $4, now() + interval '72 hours', CASE WHEN $5 THEN now() ELSE NULL END, $6, $7)
+        verification_method, verification_notes, password_reset_override)
+     VALUES ($1, 'pending', $2, $3, $4, now() + interval '72 hours', CASE WHEN $5 THEN now() ELSE NULL END, $6, $7, $8)
      RETURNING id`,
     [
       seed.userId,
@@ -595,6 +597,7 @@ export async function seedPendingFactorReset(seed: PendingResetSeed): Promise<st
       seed.noticeSent ?? true,
       seed.verificationMethod === undefined ? 'video_call' : seed.verificationMethod,
       seed.verificationNotes === undefined ? 'E2E: saw the owner on a video call' : seed.verificationNotes,
+      seed.passwordResetOverride ?? null,
     ],
   );
   return row.id;
@@ -1009,4 +1012,46 @@ export async function insertJourneyRun(
 export async function runDueAt(runId: string): Promise<Date | null> {
   const [row] = await sql<{ next_due_at: Date | null }>(`SELECT next_due_at FROM journey_runs WHERE id = $1`, [runId]);
   return row.next_due_at;
+}
+
+// ---- View-as session and factor reset card (P1 chunk 3)
+
+/**
+ * An HS256 token signed with the run's JWT secret (the customer API's access token key),
+ * for copies of a view-as token with one claim changed.
+ */
+export function signCustomerJwt(claims: Record<string, unknown>): string {
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const unsigned = `${part({ alg: 'HS256', typ: 'JWT' })}.${part(claims)}`;
+  const signature = createHmac('sha256', runSecrets().jwtSecret).update(unsigned).digest('base64url');
+  return `${unsigned}.${signature}`;
+}
+
+/** Writes `value` as the tab's stored view-as record, from a static file of the dashboard (no app code runs there). */
+export async function writeStoredViewAs(page: Page, value: string): Promise<void> {
+  await page.goto('/logo.svg');
+  await page.evaluate((raw) => sessionStorage.setItem('chumbaq_impersonation', raw), value);
+}
+
+/** The Authorization header of every customer API request the context sends from now on. */
+export function recordAuthorizations(page: Page): string[] {
+  const seen: string[] = [];
+  page.context().on('request', (request) => {
+    if (new URL(request.url()).pathname.startsWith('/api/')) {
+      const header = request.headers()['authorization'];
+      if (header) seen.push(header);
+    }
+  });
+  return seen;
+}
+
+/** The tenant page's "Second factors" card. */
+export function secondFactorsCard(page: Page) {
+  return page.locator('[data-slot="card"]').filter({ has: page.locator('[data-slot="card-title"]', { hasText: 'Second factors' }) });
+}
+
+/** Audit rows written from one client address (each test has its own). */
+export async function auditCountFromIp(ip: string): Promise<number> {
+  const [{ n }] = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM admin_audit_logs WHERE ip_address = $1`, [ip]);
+  return n;
 }
