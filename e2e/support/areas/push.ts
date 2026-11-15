@@ -385,3 +385,130 @@ export async function openViewAs(page: Page, url: string): Promise<void> {
   await page.goto(url);
   await page.getByRole('region', { name: 'Impersonation session' }).waitFor();
 }
+
+// ---- SDK routes (X-API-Key) and seeded rows for the detail, template and token cases
+
+/** An SDK request with an API key (or none), answering the status and body. */
+export async function sdkCall(method: string, path: string, apiKey: string | null, body?: unknown, ip = newClientIp()): Promise<RawResponse> {
+  const response = await fetch(apiUrl(path), {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Forwarded-For': ip,
+      ...(apiKey ? { 'X-API-Key': apiKey } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await response.text();
+  let parsed: any = text;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    // Not JSON: keep the text.
+  }
+  return { status: response.status, text, body: parsed };
+}
+
+/** A server-only privacy key (needs the owner's recent sign-in, which a new account has). */
+export async function privacyKey(owner: Person, projectId: string): Promise<string> {
+  const created = await api<{ fullKey: string }>(
+    'POST',
+    `/api/projects/${projectId}/api-keys`,
+    { name: 'E2E privacy key', permissions: ['privacy'] },
+    { token: owner.accessToken, ip: owner.ip },
+  );
+  return created.fullKey;
+}
+
+export interface SeedCampaign {
+  title?: string;
+  body?: string | null;
+  status?: string;
+  scheduledAt?: Date | null;
+  errorMessage?: string | null;
+  failureDetails?: Array<{ token: string; error: string }> | null;
+  totalTokens?: number;
+  successCount?: number;
+  failureCount?: number;
+}
+
+/** A push campaign row in a chosen final state, as the worker leaves one. */
+export async function seedCampaign(projectId: string, c: SeedCampaign = {}): Promise<string> {
+  const status = c.status ?? 'sent';
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO push_notification_logs
+       (project_id, title, body, status, scheduled_at, error_message, failure_details,
+        total_tokens, success_count, failure_count, processed_tokens, completed_at)
+     VALUES ($1, $2, $3, $4::varchar, $5::timestamptz, $6, $7::jsonb, $8, $9, $10, $11, CASE WHEN $4::varchar IN ('scheduled', 'queued', 'sending') THEN NULL ELSE now() END)
+     RETURNING id`,
+    [
+      projectId,
+      c.title ?? 'Seeded campaign',
+      c.body ?? null,
+      status,
+      c.scheduledAt ?? null,
+      c.errorMessage ?? null,
+      c.failureDetails ? JSON.stringify(c.failureDetails) : null,
+      c.totalTokens ?? 1,
+      c.successCount ?? 0,
+      c.failureCount ?? 0,
+      status === 'scheduled' ? 0 : c.totalTokens ?? 1,
+    ],
+  );
+  return row.id;
+}
+
+export async function tokenRows(projectId: string): Promise<Array<Record<string, any>>> {
+  return sql(`SELECT * FROM push_tokens WHERE project_id = $1 ORDER BY created_at, id`, [projectId]);
+}
+
+export async function tokenRowsByValue(token: string): Promise<Array<Record<string, any>>> {
+  return sql(`SELECT * FROM push_tokens WHERE token = $1 ORDER BY created_at, id`, [token]);
+}
+
+export async function eventRows(campaignId: string): Promise<Array<Record<string, any>>> {
+  return sql(`SELECT * FROM push_notification_events WHERE campaign_id = $1 ORDER BY occurred_at, id`, [campaignId]);
+}
+
+export async function touchpointRows(projectId: string, deviceFingerprint: string): Promise<Array<Record<string, any>>> {
+  return sql(`SELECT * FROM touchpoints WHERE project_id = $1 AND device_fingerprint = $2`, [projectId, deviceFingerprint]);
+}
+
+export async function templateRow(id: string): Promise<Record<string, any> | undefined> {
+  const [row] = await sql(`SELECT * FROM push_templates WHERE id = $1`, [id]);
+  return row;
+}
+
+export async function templateRows(projectId: string): Promise<Array<Record<string, any>>> {
+  return sql(`SELECT * FROM push_templates WHERE project_id = $1 ORDER BY name`, [projectId]);
+}
+
+/** A template through the dashboard route. */
+export async function createTemplate(as: Caller, projectId: string, body: Record<string, unknown>): Promise<{ id: string; name: string }> {
+  return dataOf(await call('POST', `/api/projects/${projectId}/push-templates`, as, { title: 'Template title', ...body }));
+}
+
+/** The composer's reach for the whole project (`totalTokens`). */
+export async function projectReach(as: Caller, projectId: string): Promise<number> {
+  return dataOf<{ totalTokens: number }>(await call('POST', '/api/push-notifications/audience-preview', as, { projectId })).totalTokens;
+}
+
+/** One figure tile of the campaign detail's Engagement or Delivery card (its value line). */
+export function figureTile(page: Page, cardTitle: string, label: string): Locator {
+  return card(page, cardTitle)
+    .locator('div.rounded-lg.border')
+    .filter({ has: page.getByText(label, { exact: true }) })
+    .locator('p')
+    .first();
+}
+
+/**
+ * A toast by its exact title, found by CSS rather than by role: while a dialog is open
+ * Radix hides the rest of the page from the accessibility tree, the toast viewport too.
+ */
+export function toastBehindDialog(page: Page, title: string): Locator {
+  const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return page
+    .locator('[role="region"][aria-label^="Notifications"] li')
+    .filter({ has: page.locator('div.text-sm.font-semibold', { hasText: new RegExp(`^${escaped}$`) }) });
+}
