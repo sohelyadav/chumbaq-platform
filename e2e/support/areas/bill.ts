@@ -516,6 +516,8 @@ export const newEventId = () => `evt_e2e${randomBytes(6).toString('hex')}`;
 export interface SentEvent extends Raw {
   eventId: string;
   rawBody: string;
+  /** How long the webhook took to answer (set by `sendEvent`: the post alone, not the mock's update). */
+  tookMs?: number;
 }
 
 /**
@@ -545,8 +547,9 @@ export async function sendEvent(
     created_at: options.createdAt ?? nowSeconds(),
   });
   const eventId = newEventId();
+  const startedAt = Date.now();
   const reply = await postWebhook(rawBody, { eventId });
-  return { ...reply, eventId, rawBody };
+  return { ...reply, eventId, rawBody, tookMs: Date.now() - startedAt };
 }
 
 /** A Razorpay payment entity in the documented shape, with the fields a person's payment carries. */

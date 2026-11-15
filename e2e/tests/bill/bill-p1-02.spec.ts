@@ -23,6 +23,7 @@ import {
   endCompOf,
   flushCancel,
   halt,
+  mockCalls,
   mockCallsFor,
   mockSubscription,
   nowSeconds,
@@ -196,10 +197,12 @@ test('BILL-072 "Still processing" after two minutes without a webhook', async ({
   await expect(status(page, 'Still processing. This page will update when Razorpay confirms.')).toBeVisible();
   await expect(page.getByText('Processing payment...')).toHaveCount(0);
 
-  // Polling has stopped: nothing in well over two 3-second intervals.
-  const polls = watch(page, '/api/billing');
-  await page.waitForTimeout(7_000);
-  expect(polls).toHaveLength(0);
+  // Polling has stopped: ten more seconds on the page's clock (three 3-second intervals) ask nothing.
+  const polled = page
+    .waitForResponse((r) => isPath('/api/billing', 'GET')(r), { timeout: 2_000 })
+    .then(() => true, () => false);
+  await page.clock.runFor(10_000);
+  expect(await polled).toBe(false);
   expect((await overview(tenant, clientIp)).state).toBe('checkout');
 });
 
@@ -856,6 +859,8 @@ test.describe('billing off', () => {
     // An account's own limit still applies.
     await setProjectLimit(token, staffIp, tenant.userId, 3);
     expect(await projectLimit(off.url)).toBe(3);
+    // With billing on, the comped plan's 20 still wins over the lower override.
+    expect(await projectLimit()).toBe(20);
   });
 });
 
@@ -1196,9 +1201,9 @@ test('BILL-138 the halted webhook sets the grace period and hands off a notice',
   const active = await activeOn(tenant, clientIp, G);
   const startedAt = Date.now();
   const sent = await sendEvent('subscription.halted', active.checkout.subscriptionId, { status: 'halted' });
-  const took = Date.now() - startedAt;
   expect(sent.body).toStrictEqual(RECEIVED);
-  expect(took).toBeLessThan(2_000);
+  // Answered without waiting for the notice.
+  expect(sent.tookMs).toBeLessThan(1_000);
 
   const row = await subscriptionRow(active.checkout.subscriptionId);
   expect(row.status).toBe('halted');
@@ -1238,8 +1243,11 @@ test('BILL-143 an outbox failure is kept, retried and shown to staff', async ({ 
   // Retried a minute after the first failure.
   const wait1 = first.cancel_retry_at!.getTime() - first.updated_at.getTime();
   expect(Math.abs(wait1 - 60_000)).toBeLessThan(10_000);
-  // The mock was asked to cancel, then asked whether it had already ended.
+  // The mock was asked to cancel, then asked whether it had already ended (it answers 400 to both).
   expect(await cancelCalls(seeded.providerId)).toHaveLength(1);
+  expect(
+    (await mockCalls()).filter((c) => c.method === 'GET' && c.path === `/v1/subscriptions/${seeded.providerId}`),
+  ).toHaveLength(1);
 
   // Due again: the next failure waits twice as long, and the cancel is still not given up.
   await query(`UPDATE billing_subscriptions SET cancel_retry_at = now() - interval '1 second' WHERE id = $1`, [seeded.id]);
