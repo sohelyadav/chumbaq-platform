@@ -466,7 +466,7 @@ test('PUSH-110 apply a preset to an empty form', async ({ page }) => {
 
 test('PUSH-112 replacing typed content asks first', async ({ page }) => {
   const p = await pushProject('push-112', { fcm: true });
-  const device = await addDevice(p, p.owner.ip, { distinctId: 'd112' });
+  await addDevice(p, p.owner.ip, { distinctId: 'd112' });
 
   await signIn(page, p.owner);
   await composer(page, p, 1);
@@ -511,7 +511,9 @@ test('PUSH-112 replacing typed content asks first', async ({ page }) => {
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(titleInput(page)).toHaveValue('We miss you, {{firstName|there}}');
   await expect(tile(page, 'Win-back')).toHaveAttribute('aria-pressed', 'true');
-  expect(device.id).toBeTruthy();
+  // The schedule picked before it is kept.
+  await stepButton(page, 'Delivery').click();
+  await expect(sendAtTrigger(page)).toHaveText(/ 10:30$/);
 });
 
 test('PUSH-114 saved templates in the gallery', async ({ page }) => {
@@ -600,6 +602,7 @@ test('PUSH-115 apply a saved template, detach, and use counting', async ({ page 
 
   await page.reload();
   await openPush(page, p.project.id, 'Templates');
+  await expect(page.getByRole('columnheader').nth(3)).toHaveText('Uses');
   const templateLine = page.getByRole('row', { name: /T3 order update/ });
   await expect(templateLine.getByRole('cell').nth(3)).toHaveText('2');
 
@@ -1146,6 +1149,7 @@ test('PUSH-154 send at in the future, in the past, or empty', async ({ page }) =
   await toMessage(page, 'Already past');
   await nextButton(page).click();
   await pickDateTime(page, sendAtTrigger(page), new Date(), TZ, '00:00');
+  await expect(sendAtTrigger(page)).toHaveText(/ 00:00$/);
   await expect(page.getByText('Leave empty to send as soon as you submit.', { exact: true })).toBeVisible();
   await nextButton(page).click();
   await expect(page.getByRole('button', { name: 'Schedule campaign', exact: true })).toHaveCount(0);
@@ -1155,10 +1159,9 @@ test('PUSH-154 send at in the future, in the past, or empty', async ({ page }) =
   expect(past.data.status).toBe('queued');
 
   expect((await campaignRow(held.data.id))?.status).toBe('scheduled');
-  const sentActivity = (await activityRows(p.project.id, 'campaign.sent')).map((row) => row.target_id ?? row.details?.campaignId);
-  const scheduledActivity = await activityRows(p.project.id, 'campaign.scheduled');
-  expect(sentActivity).toHaveLength(2);
-  expect(scheduledActivity).toHaveLength(1);
+  const targets = async (action: string) => (await activityRows(p.project.id, action)).map((row) => row.target_id).sort();
+  expect(await targets('campaign.sent')).toEqual([now.data.id, past.data.id].sort());
+  expect(await targets('campaign.scheduled')).toEqual([held.data.id]);
 });
 
 test('PUSH-155 deliver in each recipient’s local time', async ({ page }) => {

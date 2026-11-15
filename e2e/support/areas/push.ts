@@ -697,8 +697,13 @@ export async function pickDateTime(page: Page, trigger: Locator, day: Date, time
   await popover.waitFor();
   const { y, m, d } = zonedParts(day, timezone);
   const cell = popover.locator(`button[data-day="${m}/${d}/${y}"]`);
+  // Page towards the day: back when it is before the first day shown (a date in an
+  // earlier month the grid's outside days do not cover), forward otherwise.
+  const target = Date.UTC(y, m - 1, d);
   for (let i = 0; i < 24 && (await cell.count()) === 0; i++) {
-    await popover.getByRole('button', { name: /next month/i }).click();
+    const [fm, fd, fy] = String(await popover.locator('button[data-day]').first().getAttribute('data-day')).split('/').map(Number);
+    const back = target < Date.UTC(fy, fm - 1, fd);
+    await popover.getByRole('button', { name: back ? /previous month/i : /next month/i }).click();
   }
   await cell.first().click();
   if (time) await popover.locator('input[type="time"]').fill(time);
