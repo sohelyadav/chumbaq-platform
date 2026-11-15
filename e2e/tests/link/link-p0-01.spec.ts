@@ -245,6 +245,9 @@ async function expectReserved(owner: Account, projectId: string, words: string[]
 }
 
 test('LINK-035 reserved words cannot be short codes', async ({ clientIp }) => {
+  // The route reader behind the next test must see the routes it is meant to guard;
+  // checked here, in a test expected to pass, so a broken reader cannot hide in test.fail.
+  expect(singleSegmentGetRoutes(), 'single-segment GET routes read from the controllers').toEqual(expect.arrayContaining(['health', 'projects']));
   const { owner, project } = await ownerWithProject(clientIp);
   expect(await expectReserved(owner, project.id, RESERVED)).toEqual([]);
   expect(await countLinks(project.id)).toBe(0);
@@ -254,11 +257,16 @@ test('LINK-035 every single-segment GET route of the API is a reserved word', as
   test.info().annotations.push({ type: 'issue', description: 'LINK-035' });
   test.fail();
   const words = singleSegmentGetRoutes();
-  // The reader must see the routes it is meant to guard, or this proves nothing.
-  expect(words).toEqual(expect.arrayContaining(['health', 'projects']));
   const { owner, project } = await ownerWithProject(clientIp);
-  expect(await expectReserved(owner, project.id, words)).toEqual([]);
-  expect(await countLinks(project.id)).toBe(0);
+  try {
+    expect(await expectReserved(owner, project.id, words)).toEqual([]);
+    expect(await countLinks(project.id)).toBe(0);
+  } finally {
+    // Short codes are global: give back any word this test managed to take, so other
+    // specs on the same stack can still try it.
+    await sql('DELETE FROM links WHERE project_id = $1', [project.id]);
+    await sql('DELETE FROM released_short_codes WHERE project_id = $1', [project.id]);
+  }
 });
 
 test('LINK-044 deep link URLs with http(s) are saved', async ({ page, clientIp }) => {
@@ -404,7 +412,9 @@ test('LINK-062 a released code no longer redirects', async ({ clientIp }) => {
   const { owner, project } = await ownerWithProject(clientIp);
   const code = uniqueCode('old-promo');
   const link = await seedLink(owner, project.id, clientIp, { longUrl: 'https://example.com/promo', shortCode: code });
-  await rawApi('DELETE', `/api/links/${link.id}`, undefined, { token: owner.accessToken, ip: clientIp });
+  const control = await seedLink(owner, project.id, clientIp, { longUrl: 'https://example.com/live', shortCode: uniqueCode('still-live') });
+  const deleted = await rawApi('DELETE', `/api/links/${link.id}`, undefined, { token: owner.accessToken, ip: clientIp });
+  expect(deleted.status).toBe(200);
 
   const visitor = newClientIp();
   const redirect = await openShortLink(code, visitor);
@@ -415,9 +425,12 @@ test('LINK-062 a released code no longer redirects', async ({ clientIp }) => {
   expect(preview.status).toBe(404);
   expect(preview.body.message).toBe('Link not found');
 
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  const [clicks] = await sql<{ n: string }>('SELECT count(*)::text AS n FROM click_events WHERE ip_address = $1', [visitor]);
-  expect(clicks.n).toBe('0');
+  // Clicks are written after the redirect answers. A live link opened by the same
+  // visitor afterwards shows when the writes have landed: then its click is the only one.
+  expect((await openShortLink(control.shortCode, visitor)).status).toBe(302);
+  await waitForClicks(control.id, 1);
+  const clicks = await sql<{ link_id: string }>('SELECT link_id FROM click_events WHERE ip_address = $1', [visitor]);
+  expect(clicks).toEqual([{ link_id: control.id }]);
 });
 
 // ---- D. Bulk import
