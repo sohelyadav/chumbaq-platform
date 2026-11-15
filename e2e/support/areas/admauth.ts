@@ -1,5 +1,5 @@
 import { execFile } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, createHmac, hkdfSync, randomUUID } from 'crypto';
 import path from 'path';
 import { promisify } from 'util';
 import Redis from 'ioredis';
@@ -431,4 +431,198 @@ export async function forwardToAdminApi(page: Page, base: string, paths: string[
       await route.fulfill({ response });
     });
   }
+}
+
+// ---- Session lifecycle, factors and tokens (admauth-p0-02)
+
+export interface StaffSessionDetail {
+  id: string;
+  user_id: string;
+  amr: string[];
+  enrolment_only: boolean;
+  current_token_hash: string | null;
+  previous_token_hash: string | null;
+  rotated_at: Date | null;
+  revoked_at: Date | null;
+  revoked_reason: string | null;
+  authenticated_at: Date | null;
+  last_active_at: Date;
+  created_at: Date;
+}
+
+/** One staff session row, everything a lifecycle case reads. */
+export async function staffSession(id: string): Promise<StaffSessionDetail> {
+  const [row] = await sql<StaffSessionDetail>(
+    `SELECT id, user_id, amr, enrolment_only, current_token_hash, previous_token_hash, rotated_at,
+            revoked_at, revoked_reason, authenticated_at, last_active_at, created_at
+       FROM staff_sessions WHERE id = $1`,
+    [id],
+  );
+  if (!row) throw new Error(`No staff session ${id}`);
+  return row;
+}
+
+/** The sha256 the API stores for a refresh token. */
+export function tokenHash(refreshToken: string): string {
+  return createHash('sha256').update(refreshToken).digest('hex');
+}
+
+/** The value of a `name=value` cookie pair. */
+export function cookieValue(pair: string): string {
+  return pair.slice(pair.indexOf('=') + 1);
+}
+
+/**
+ * A staff-scope passkey row with placeholder key material: it can be listed, counted and
+ * removed, never used to sign in. Answers its id.
+ */
+export async function seedStaffPasskeyRow(userId: string, name: string): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, transports, device_type, backed_up, name, scope)
+     VALUES ($1, $2, $3, 0, '[]', 'singleDevice', false, $4, 'staff') RETURNING id`,
+    [userId, `e2e-placeholder-${randomUUID()}`, Buffer.from('not-a-key'), name],
+  );
+  return row.id;
+}
+
+/** `npm run admin:revoke -- <email>` against the lane's database. */
+export async function revokeStaffWithCli(email: string): Promise<void> {
+  await execFileAsync('npm', ['run', 'admin:revoke', '--', email], {
+    cwd: path.join(REPO_ROOT, 'apps/api'),
+    env: process.env,
+    timeout: 120_000,
+  });
+}
+
+/**
+ * Another admin API process on the lane's database and Redis with extra environment (as
+ * `startPasskeyRequiredAdminApi`, which sets one value of this kind), on a free port.
+ */
+export async function startAdminApiWith(extra: Record<string, string>, label: string): Promise<ExtraAdminApi> {
+  const ports = stackPorts();
+  let port = 0;
+  for (let candidate = ports.adminApi + 50; candidate < ports.adminApi + 70; candidate++) {
+    if (!(await portInUse(candidate))) {
+      port = candidate;
+      break;
+    }
+  }
+  if (!port) throw new Error(`No free port for the ${label} admin API`);
+  const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ADMIN_API_PORT: String(port), ...extra };
+  const started: Started = run(`admin-api-${label}-${port}`, 'node', ['dist/main-admin'], {
+    cwd: path.join(REPO_ROOT, 'apps/api'),
+    env,
+  });
+  const url = `http://127.0.0.1:${port}`;
+  try {
+    await waitForUrl(started, `${url}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    throw error;
+  }
+  return { url, stop: () => stopAll([started]) };
+}
+
+/** Sends every request of a page under an admin API path prefix to another admin API. */
+export async function forwardPrefixToAdminApi(page: Page, base: string, prefix: string): Promise<void> {
+  await page.route(
+    (url) => url.origin === new URL(adminUrl('/')).origin && url.pathname.startsWith(prefix),
+    async (route) => {
+      const target = new URL(route.request().url());
+      const response = await route.fetch({ url: `${base}${target.pathname}${target.search}` });
+      await route.fulfill({ response });
+    },
+  );
+}
+
+/**
+ * The tab's authenticator holds the account's keys, which registration lists in
+ * `excludeCredentials`, so it would refuse to make another. This holds them aside for
+ * the registration only: when a successful `POST /passkeys/options` answer reaches the
+ * page, every credential is saved and cleared, so the authenticator makes a fresh key;
+ * `restore()` puts the saved ones back beside it (usable when asked for by id, not for
+ * passkey-first sign-in, where the new key answers). Re-authentication before that (the
+ * options call refused with "Confirm it is you to continue.") still finds the old key.
+ */
+export async function setAsideKeysForRegistration(page: Page, authenticator: VirtualAuthenticator): Promise<{ restore(): Promise<void> }> {
+  const saved: any[] = [];
+  const pathname = '/api/staff/auth/passkeys/options';
+  await page.route(adminUrl(pathname), async (route) => {
+    const response = await route.fetch();
+    if (response.ok() && saved.length === 0) {
+      saved.push(...(await authenticator.cdp.send('WebAuthn.getCredentials', { authenticatorId: authenticator.authenticatorId })).credentials);
+      await authenticator.clearCredentials();
+    }
+    await route.fulfill({ response });
+  });
+  return {
+    restore: async () => {
+      await page.unroute(adminUrl(pathname));
+      // Back as non-discoverable: a discoverable one would clash with the new key, which
+      // has the same relying party and user handle. Asked for by id, it still answers.
+      for (const credential of saved.splice(0)) {
+        await authenticator.cdp.send('WebAuthn.addCredential', {
+          authenticatorId: authenticator.authenticatorId,
+          credential: { ...credential, isResidentCredential: false },
+        });
+      }
+    },
+  };
+}
+
+/** Copies every credential of one virtual authenticator into another (another tab, the same keys). */
+export async function copyCredentials(from: VirtualAuthenticator, to: VirtualAuthenticator): Promise<void> {
+  const { credentials } = await from.cdp.send('WebAuthn.getCredentials', { authenticatorId: from.authenticatorId });
+  for (const credential of credentials) {
+    await to.cdp.send('WebAuthn.addCredential', { authenticatorId: to.authenticatorId, credential });
+  }
+}
+
+/**
+ * "Sign in with a passkey" on the admin app's /sign-in (the page must be there), waiting
+ * for Overview. Answers the session the API made.
+ */
+export async function signInStaffInPage(page: Page): Promise<{ accessToken: string; session: { id: string; expiresAt: string; idleTimeoutSeconds: number } }> {
+  const [verified] = await Promise.all([
+    page.waitForResponse((response) => new URL(response.url()).pathname === '/api/staff/auth/passkey/verify'),
+    page.getByRole('button', { name: 'Sign in with a passkey' }).click(),
+  ]);
+  if (!verified.ok()) throw new Error(`Staff passkey sign-in answered ${verified.status()}`);
+  await page.waitForURL(adminUrl('/'));
+  return ((await verified.json()) as { data: any }).data;
+}
+
+/** A passkey re-authentication through the API for a session; answers the new access token. */
+export async function reauthWithPasskey(page: Page, accessToken: string, ip = newClientIp(), base?: string): Promise<string> {
+  const options = await staffApi('POST', '/api/staff/auth/reauth/passkey/options', {}, { token: accessToken, ip, base });
+  if (options.status !== 200) throw new Error(`reauth options answered ${options.status}: ${JSON.stringify(options.body)}`);
+  const response = await browserAssertion(page, options.data.options);
+  const verified = await staffApi('POST', '/api/staff/auth/reauth/passkey/verify', { response }, { token: accessToken, ip, base });
+  if (verified.status !== 200) throw new Error(`reauth verify answered ${verified.status}: ${JSON.stringify(verified.body)}`);
+  return verified.data.accessToken;
+}
+
+// ---- Staff access tokens made by hand
+
+const b64url = (value: Buffer | string) => Buffer.from(value).toString('base64url');
+
+/** An HS256 JWT over any claims with any key. */
+export function signHs256(claims: Record<string, unknown>, key: Buffer | string): string {
+  const head = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const body = b64url(JSON.stringify(claims));
+  const signature = createHmac('sha256', key).update(`${head}.${body}`).digest('base64url');
+  return `${head}.${body}.${signature}`;
+}
+
+/** The claims of a JWT, unverified. */
+export function jwtClaims(token: string): Record<string, any> {
+  return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+}
+
+/**
+ * The admin API's staff signing key for this run: HKDF-SHA256 of the run's JWT secret
+ * with the salt and info `staffAccessKey` in staff-tokens.service.ts uses.
+ */
+export function runStaffKey(): Buffer {
+  return Buffer.from(hkdfSync('sha256', runSecrets().jwtSecret, 'chumbaq-staff-session', 'staff-access-token-v1', 32));
 }
