@@ -199,6 +199,22 @@ test('SEG-063 a saved audience loads into the editor as saved', async ({ page, c
   const response = await counted;
   expect(response.request().postDataJSON().definition).toEqual(definition);
   await expect(countCaption(page)).toHaveText('people match');
+
+  // Saved again untouched, the editor writes back exactly the stored definition, so
+  // the fixture is one the editor itself produces.
+  const [patch] = await Promise.all([
+    page.waitForRequest((r) => r.method() === 'PATCH' && new URL(r.url()).pathname === `/api/projects/${pid}/segments/${mixed.id}`),
+    page.getByRole('button', { name: 'Save', exact: true }).click(),
+  ]);
+  expect(patch.postDataJSON()).toEqual({
+    name: 'Mixed',
+    description: 'desc',
+    definition,
+    evaluationMode: 'materialized',
+    refreshIntervalMinutes: 15,
+    status: 'draft',
+  });
+  await expect(toastTitled(page, 'Audience saved')).toBeVisible();
 });
 
 test('SEG-064 editing and saving an audience', async ({ page, clientIp }) => {
@@ -232,7 +248,11 @@ test('SEG-064 editing and saving an audience', async ({ page, clientIp }) => {
   await expect(toastTitled(page, 'Audience saved')).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/projects/${pid}/segments/${vip.id}$`));
   await expect(page.getByRole('heading', { level: 1, name: 'VIP buyers', exact: true })).toBeVisible();
-  expect(await segmentRow(vip.id)).toMatchObject({ name: 'VIP buyers', description: null });
+  expect(await segmentRow(vip.id)).toMatchObject({
+    name: 'VIP buyers',
+    description: null,
+    definition: { type: 'group', operator: 'and', children: [{ type: 'behaviour', eventName: 'purchase', occurrence: 'at_least', count: 1, withinDays: 60 }] },
+  });
 
   await openAudiences(page, pid);
   await expect(rowNamed(page, 'VIP buyers')).toHaveCount(1);
@@ -838,7 +858,8 @@ test('SEG-119 create page defaults', async ({ page, clientIp }) => {
   await expect(journeyActionBar(page)).toHaveText('Name this journey.');
   await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Save draft' })).toBeDisabled();
-  await page.waitForTimeout(500);
+  // The audiences query starts in the same render as the journey query would; its
+  // options above read without "(loading…)", so a GET for "new" would already be here.
   expect(asNew).toEqual([]);
 });
 
@@ -1322,19 +1343,20 @@ test('SEG-144 a journey that is not found', async ({ page, clientIp }) => {
 
   await signIn(page, p.owner);
   const release = await holdRequests(page, 'GET', `/api/projects/${pid}/journeys/${missing}`);
+  const missingGets = recordRequests(page, 'GET', `/api/projects/${pid}/journeys/${missing}`);
   await page.goto(`/projects/${pid}/journeys/${missing}`);
   await expect(page.locator('[data-slot="skeleton"]').first()).toBeVisible();
   await expect(page.getByText('Journey not found. It may have been deleted.')).toHaveCount(0);
   release();
   for (const id of [missing, foreign.id, 'not-a-uuid']) {
-    const gets = recordRequests(page, 'GET', `/api/projects/${pid}/journeys/${id}`);
+    const gets = id === missing ? missingGets : recordRequests(page, 'GET', `/api/projects/${pid}/journeys/${id}`);
     if (id !== missing) await page.goto(`/projects/${pid}/journeys/${id}`);
     await expect(page.getByText('Journey not found. It may have been deleted.', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Back to journeys' })).toBeVisible();
     await expect(page.getByText('SEG-144 foreign journey')).toHaveCount(0);
-    // No retry.
-    await page.waitForTimeout(1500);
-    if (id !== missing) expect(gets).toHaveLength(1);
+    // No retry: a query that retries stays loading until its last attempt fails, so
+    // when the not-found page shows, every GET it would make has been made.
+    expect(gets, id).toHaveLength(1);
   }
   await page.getByRole('button', { name: 'Back to journeys' }).click();
   await expect(page).toHaveURL(new RegExp(`/projects/${pid}/journeys$`));
