@@ -1,0 +1,434 @@
+import { execFile } from 'child_process';
+import { createHash } from 'crypto';
+import path from 'path';
+import { promisify } from 'util';
+import Redis from 'ioredis';
+import { Client } from 'pg';
+import type { Page } from '@playwright/test';
+import { issueStaffEnrolmentAllowance } from '../../../apps/api/src/modules/auth/staff-enrolment-allowances';
+import { createAccount, newClientIp, type Account } from '../api';
+import { adminUrl } from '../admin';
+import { addAuthenticator, totpCode, totpStep, type TotpEnrolment, type VirtualAuthenticator } from '../factors';
+import { portInUse, run, stopAll, waitForUrl, type Started } from '../processes';
+import { appEnvironment, assertE2eDatabase, REPO_ROOT, runSecrets, stackEnv, stackPorts } from '../stack';
+
+/**
+ * Helpers for the ADMAUTH specs: staff sign-in on the admin app and its API.
+ *
+ * Staff are made with a direct `is_super_admin` update (the grant CLI is covered by the
+ * admin spec and takes seconds per run); everything about signing in goes through the
+ * real admin API or the admin app.
+ */
+
+const execFileAsync = promisify(execFile);
+
+// ---- Database and Redis
+
+export async function sql<T = Record<string, unknown>>(text: string, params: unknown[] = []): Promise<T[]> {
+  const env = stackEnv();
+  const client = new Client({
+    host: env.DATABASE_HOST,
+    port: Number(env.DATABASE_PORT || 5432),
+    user: env.DATABASE_USER,
+    password: env.DATABASE_PASSWORD,
+    database: assertE2eDatabase(env),
+  });
+  await client.connect();
+  try {
+    return (await client.query(text, params)).rows as T[];
+  } finally {
+    await client.end();
+  }
+}
+
+async function withRedis<T>(work: (redis: Redis) => Promise<T>): Promise<T> {
+  const env = stackEnv();
+  const redis = new Redis({
+    host: env.REDIS_HOST || '127.0.0.1',
+    port: Number(env.REDIS_PORT || 6379),
+    password: env.REDIS_PASSWORD || undefined,
+    db: Number(env.REDIS_DB),
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+  try {
+    return await work(redis);
+  } finally {
+    redis.disconnect();
+  }
+}
+
+/** The address's sign-in attempt counters (the API's `chumbaq:signin-attempts:<sha256>` hash). */
+export function signInAttempts(email: string): Promise<Record<string, string>> {
+  const key = `chumbaq:signin-attempts:${createHash('sha256').update(email.trim().toLowerCase()).digest('hex')}`;
+  return withRedis((redis) => redis.hgetall(key));
+}
+
+/** auth_events rows of one type for a user or address since `since`. */
+export async function authEvents(
+  where: { userId?: string; email?: string },
+  since: Date,
+  type?: string,
+): Promise<Array<{ type: string; reason: string | null; user_id: string | null; session_id: string | null }>> {
+  const params: unknown[] = [since];
+  const filters: string[] = ['created_at >= $1'];
+  if (where.userId) filters.push(`user_id = $${params.push(where.userId)}`);
+  if (where.email) filters.push(`lower(email) = lower($${params.push(where.email)})`);
+  if (type) filters.push(`type = $${params.push(type)}`);
+  return sql(`SELECT type, reason, user_id, session_id FROM auth_events WHERE ${filters.join(' AND ')} ORDER BY created_at`, params);
+}
+
+/** admin_audit_logs rows targeting a user since `since`, optionally of one action. */
+export async function auditRows(
+  userId: string,
+  since: Date,
+  action?: string,
+): Promise<Array<{ action: string; actor_email: string; metadata: Record<string, unknown> | null }>> {
+  const params: unknown[] = [userId, since];
+  const extra = action ? ` AND action = $${params.push(action)}` : '';
+  return sql(
+    `SELECT action, actor_email, metadata FROM admin_audit_logs WHERE target_id = $1 AND created_at >= $2${extra} ORDER BY created_at`,
+    params,
+  );
+}
+
+export interface StaffSessionRow {
+  id: string;
+  amr: string[];
+  enrolment_only: boolean;
+  current_token_hash: string | null;
+  revoked_at: Date | null;
+  last_active_at: Date;
+}
+
+export function staffSessions(userId: string): Promise<StaffSessionRow[]> {
+  return sql<StaffSessionRow>(
+    `SELECT id, amr, enrolment_only, current_token_hash, revoked_at, last_active_at FROM staff_sessions WHERE user_id = $1 ORDER BY created_at`,
+    [userId],
+  );
+}
+
+// ---- Staff members
+
+/** A new account made staff (`users.is_super_admin`), with no staff factor yet. */
+export async function makeStaff(ip: string, label = 'staff'): Promise<Account> {
+  const account = await createAccount(ip, label, 'Sam Staff');
+  await sql(`UPDATE users SET is_super_admin = true WHERE id = $1`, [account.userId]);
+  return account;
+}
+
+/**
+ * A customer-scope passkey row for the account. Only its existence matters to staff
+ * sign-in (a staff member holding any passkey needs an operator's code), so the key
+ * material is a placeholder that can never verify.
+ */
+export async function seedCustomerPasskeyRow(userId: string): Promise<void> {
+  await sql(
+    `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, transports, device_type, backed_up, name, scope)
+     VALUES ($1, $2, $3, 0, '[]', 'singleDevice', false, 'Customer key', 'customer')`,
+    [userId, `e2e-placeholder-${userId}`, Buffer.from('not-a-key')],
+  );
+}
+
+/** An operator's enrolment code, made by the API's own function (the CLI's, minus its audit row). */
+export async function issueEnrolmentCode(userId: string): Promise<{ id: string; code: string }> {
+  const env = stackEnv();
+  const client = new Client({
+    host: env.DATABASE_HOST,
+    port: Number(env.DATABASE_PORT || 5432),
+    user: env.DATABASE_USER,
+    password: env.DATABASE_PASSWORD,
+    database: assertE2eDatabase(env),
+  });
+  await client.connect();
+  try {
+    const queryable = { query: async (text: string, params?: unknown[]) => (await client.query(text, params)).rows };
+    const issued = await issueStaffEnrolmentAllowance(queryable, userId);
+    return { id: issued.id, code: issued.code };
+  } finally {
+    await client.end();
+  }
+}
+
+/** `npm run admin:staff-enrolment -- <email>` against the lane's database: answers the code it printed. */
+export async function enrolmentCodeFromCli(email: string): Promise<{ code: string; stdout: string }> {
+  const { stdout } = await execFileAsync('npm', ['run', 'admin:staff-enrolment', '--', email], {
+    cwd: path.join(REPO_ROOT, 'apps/api'),
+    env: process.env,
+    timeout: 120_000,
+  });
+  const lines = stdout.trim().split('\n').map((line) => line.trim()).filter(Boolean);
+  return { code: lines[lines.length - 1], stdout };
+}
+
+export function allowance(id: string): Promise<{ used_at: Date | null; used_ip: string | null; voided_at: Date | null; voided_reason: string | null }> {
+  return sql<{ used_at: Date | null; used_ip: string | null; voided_at: Date | null; voided_reason: string | null }>(
+    `SELECT used_at, used_ip, voided_at, voided_reason FROM staff_enrolment_allowances WHERE id = $1`,
+    [id],
+  ).then((rows) => rows[0]);
+}
+
+// ---- The admin API, directly
+
+export interface StaffResponse<T = any> {
+  status: number;
+  body: T;
+  /** The `data` of the envelope, or the body when there is none. */
+  data: T;
+  setCookies: string[];
+}
+
+export interface StaffApiOptions {
+  ip?: string;
+  token?: string;
+  cookie?: string;
+  /** Send X-Chumbaq-Client: admin (default true). */
+  client?: boolean;
+  /** Another admin API (default the lane's, E2E_ADMIN_API_URL). */
+  base?: string;
+  headers?: Record<string, string>;
+}
+
+export function adminApiBase(): string {
+  const base = process.env.E2E_ADMIN_API_URL;
+  if (!base) throw new Error('E2E_ADMIN_API_URL is not set: run the specs through playwright.config.ts');
+  return base;
+}
+
+/** Any request to an admin API (or, with `base`, any API), answering status, body and cookies. */
+export async function staffApi<T = any>(method: string, pathname: string, body?: unknown, options: StaffApiOptions = {}): Promise<StaffResponse<T>> {
+  const response = await fetch(`${options.base ?? adminApiBase()}${pathname}`, {
+    method,
+    redirect: 'manual',
+    headers: {
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.client === false ? {} : { 'X-Chumbaq-Client': 'admin' }),
+      'X-Forwarded-For': options.ip ?? newClientIp(),
+      ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+      ...(options.cookie ? { Cookie: options.cookie } : {}),
+      ...(options.headers ?? {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await response.text();
+  let parsed: any = text;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    // Not JSON (an HTML 404 page, say): keep the text.
+  }
+  const data = parsed && typeof parsed === 'object' && 'data' in parsed ? parsed.data : parsed;
+  return { status: response.status, body: parsed, data, setCookies: response.headers.getSetCookie() };
+}
+
+/** The `name=value` of the staff refresh cookie in a set of Set-Cookie headers. */
+export function staffCookiePair(setCookies: string[]): string {
+  const header = setCookies.find((value) => /^(__Host-)?chumbaq_staff_refresh=/.test(value));
+  if (!header) throw new Error(`No staff refresh cookie in ${JSON.stringify(setCookies)}`);
+  return header.split(';')[0];
+}
+
+// ---- WebAuthn in the page, for API-level cases
+
+interface AssertionOptions {
+  challenge: string;
+  rpId?: string;
+  allowCredentials?: Array<{ id: string; type?: string; transports?: string[] }>;
+  userVerification?: string;
+  timeout?: number;
+}
+
+/**
+ * An assertion (AuthenticationResponseJSON) from the tab's virtual authenticator for
+ * options the API gave, made by navigator.credentials.get in the page's own origin, as
+ * @simplewebauthn/browser would. `allowCredentials` can be overridden (an empty list lets
+ * the authenticator answer with whichever key it holds).
+ */
+export async function browserAssertion(page: Page, options: AssertionOptions): Promise<any> {
+  return page.evaluate(async (o) => {
+    const fromB64u = (value: string) => {
+      const b64 = value.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+      return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0)).buffer;
+    };
+    const toB64u = (buffer: ArrayBuffer) =>
+      btoa(String.fromCharCode(...new Uint8Array(buffer))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const credential = (await navigator.credentials.get({
+      publicKey: {
+        challenge: fromB64u(o.challenge),
+        rpId: o.rpId,
+        allowCredentials: (o.allowCredentials ?? []).map((c) => ({
+          type: 'public-key' as const,
+          id: fromB64u(c.id),
+          transports: c.transports as AuthenticatorTransport[] | undefined,
+        })),
+        userVerification: (o.userVerification ?? 'required') as UserVerificationRequirement,
+        timeout: o.timeout,
+      },
+    })) as PublicKeyCredential;
+    const response = credential.response as AuthenticatorAssertionResponse;
+    return {
+      id: credential.id,
+      rawId: toB64u(credential.rawId),
+      type: credential.type,
+      authenticatorAttachment: credential.authenticatorAttachment ?? undefined,
+      clientExtensionResults: credential.getClientExtensionResults(),
+      response: {
+        clientDataJSON: toB64u(response.clientDataJSON),
+        authenticatorData: toB64u(response.authenticatorData),
+        signature: toB64u(response.signature),
+        userHandle: response.userHandle ? toB64u(response.userHandle) : undefined,
+      },
+    };
+  }, options);
+}
+
+// ---- Enrolling and signing in
+
+/**
+ * A staff member's first passkey, through the admin app: the password opens an
+ * enrolment-only session (no staff factor and no passkey at all, with passkeys not
+ * required), the passkey is added on /enrol with a fresh virtual authenticator in the
+ * tab, and the page is left on /sign-in, signed out, with the key in the authenticator.
+ */
+export async function enrolStaffPasskey(page: Page, staff: Pick<Account, 'email' | 'password'>, name = 'E2E staff key'): Promise<VirtualAuthenticator> {
+  const authenticator = await addAuthenticator(page);
+  await page.goto(adminUrl('/sign-in'));
+  await page.getByLabel('Email').fill(staff.email);
+  await page.getByLabel('Password', { exact: true }).fill(staff.password);
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByLabel('Passkey name').fill(name);
+  await page.getByRole('button', { name: 'Add a passkey' }).click();
+  await page.getByText('Done. Sign in with your new passkey.').waitFor();
+  return authenticator;
+}
+
+export interface StaffSignedIn {
+  accessToken: string;
+  session: { id: string; enrolmentOnly: boolean; expiresAt: string };
+  cookie: string;
+}
+
+/**
+ * A full staff session through the admin API with the tab's key (passkey first, no
+ * email), the browser making the assertion. The page must be on the admin app (any
+ * page; it stays as it is). Answers the token and the refresh cookie's `name=value`.
+ */
+export async function staffPasskeySignIn(page: Page, ip = newClientIp(), base?: string): Promise<StaffSignedIn> {
+  const started = await staffApi('POST', '/api/staff/auth/passkey/options', {}, { ip, base });
+  if (started.status !== 200) throw new Error(`passkey/options answered ${started.status}`);
+  const response = await browserAssertion(page, started.data.options);
+  const verified = await staffApi('POST', '/api/staff/auth/passkey/verify', { ceremonyId: started.data.ceremonyId, response }, { ip, base });
+  if (verified.status !== 200) throw new Error(`passkey/verify answered ${verified.status}: ${JSON.stringify(verified.body)}`);
+  return { accessToken: verified.data.accessToken, session: verified.data.session, cookie: staffCookiePair(verified.setCookies) };
+}
+
+/** The password step through the API; throws unless it answers `second_factor`. */
+export async function staffHandle(staff: Pick<Account, 'email' | 'password'>, ip = newClientIp(), base?: string): Promise<{ handle: string; methods: string[] }> {
+  const login = await staffApi('POST', '/api/staff/auth/login', { email: staff.email, password: staff.password }, { ip, base });
+  if (login.status !== 200 || login.data.step !== 'second_factor') {
+    throw new Error(`login answered ${login.status}: ${JSON.stringify(login.body)}`);
+  }
+  return { handle: login.data.handle, methods: login.data.methods };
+}
+
+/**
+ * A code the API will take now that has not been used: like `nextTotpCode`, but waits
+ * for the next 30-second step when the current and next ones are both used.
+ */
+export async function freshTotpCode(enrolment: TotpEnrolment): Promise<string> {
+  while (enrolment.lastStep + 1 > totpStep() + 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  const step = Math.max(totpStep(), enrolment.lastStep + 1);
+  enrolment.lastStep = step;
+  return totpCode(enrolment.secret, 0, step * 30_000);
+}
+
+/**
+ * Turns on a staff authenticator app in a full session that has shown a passkey: a
+ * passkey re-authentication (the browser makes the assertion), then setup and confirm.
+ * The page must be on the admin app with the staff key in its authenticator.
+ */
+export async function enrolStaffTotpInFullSession(page: Page, accessToken: string, ip = newClientIp()): Promise<TotpEnrolment> {
+  const options = await staffApi('POST', '/api/staff/auth/reauth/passkey/options', {}, { token: accessToken, ip });
+  if (options.status !== 200) throw new Error(`reauth options answered ${options.status}`);
+  const response = await browserAssertion(page, options.data.options);
+  const reauth = await staffApi('POST', '/api/staff/auth/reauth/passkey/verify', { response }, { token: accessToken, ip });
+  if (reauth.status !== 200) throw new Error(`reauth verify answered ${reauth.status}: ${JSON.stringify(reauth.body)}`);
+  return confirmStaffTotp(reauth.data.accessToken, ip);
+}
+
+/** Setup and confirm with a token that may add a factor (an enrolment session, or one with a fresh proof). */
+export async function confirmStaffTotp(accessToken: string, ip = newClientIp()): Promise<TotpEnrolment> {
+  const setup = await staffApi('POST', '/api/staff/auth/totp/setup', {}, { token: accessToken, ip });
+  if (setup.status !== 200) throw new Error(`totp/setup answered ${setup.status}: ${JSON.stringify(setup.body)}`);
+  const enrolment: TotpEnrolment = { secret: setup.data.secret, uri: setup.data.uri, recoveryCodes: [], lastStep: -1 };
+  const confirmed = await staffApi('POST', '/api/staff/auth/totp/confirm', { code: await freshTotpCode(enrolment) }, { token: accessToken, ip });
+  if (confirmed.status !== 200) throw new Error(`totp/confirm answered ${confirmed.status}: ${JSON.stringify(confirmed.body)}`);
+  return enrolment;
+}
+
+/**
+ * A staff member with no passkey of any scope turns on an authenticator app as their
+ * only staff factor, from a password-only enrolment session (passkeys not required).
+ */
+export async function enrolStaffTotpOnly(staff: Pick<Account, 'email' | 'password'>): Promise<TotpEnrolment> {
+  const login = await staffApi('POST', '/api/staff/auth/login', { email: staff.email, password: staff.password });
+  if (login.status !== 200 || login.data.step !== 'enrol') throw new Error(`login answered ${login.status}: ${JSON.stringify(login.body)}`);
+  return confirmStaffTotp(login.data.accessToken);
+}
+
+// ---- A second admin API with passkeys required
+
+export interface ExtraAdminApi {
+  url: string;
+  stop(): Promise<void>;
+}
+
+/**
+ * Another admin API process on the lane's database and Redis, started with
+ * SUPER_ADMIN_PASSKEY_REQUIRED=true (as production always is), on a free port of its
+ * own. The lane's admin app still talks to the usual one; `forwardToAdminApi` sends
+ * chosen requests of a page here instead.
+ */
+export async function startPasskeyRequiredAdminApi(): Promise<ExtraAdminApi> {
+  const ports = stackPorts();
+  let port = 0;
+  for (let candidate = ports.adminApi + 40; candidate < ports.adminApi + 50; candidate++) {
+    if (!(await portInUse(candidate))) {
+      port = candidate;
+      break;
+    }
+  }
+  if (!port) throw new Error('No free port for the passkey-required admin API');
+  const env = {
+    ...process.env,
+    ...appEnvironment(runSecrets(), ports),
+    ADMIN_API_PORT: String(port),
+    SUPER_ADMIN_PASSKEY_REQUIRED: 'true',
+  };
+  const started: Started = run(`admin-api-passkey-required-${port}`, 'node', ['dist/main-admin'], {
+    cwd: path.join(REPO_ROOT, 'apps/api'),
+    env,
+  });
+  const url = `http://127.0.0.1:${port}`;
+  try {
+    await waitForUrl(started, `${url}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    throw error;
+  }
+  return { url, stop: () => stopAll([started]) };
+}
+
+/** Sends a page's requests for these admin API paths to another admin API, as the admin app's proxy would. */
+export async function forwardToAdminApi(page: Page, base: string, paths: string[]): Promise<void> {
+  for (const pathname of paths) {
+    await page.route(adminUrl(pathname), async (route) => {
+      const response = await route.fetch({ url: `${base}${pathname}` });
+      await route.fulfill({ response });
+    });
+  }
+}
