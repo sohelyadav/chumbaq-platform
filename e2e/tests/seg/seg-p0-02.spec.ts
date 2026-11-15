@@ -19,6 +19,7 @@ import {
   holdRequests,
   insertEvent,
   insertRun,
+  insertRuns,
   journeyActionBar,
   journeyDescription,
   journeyEventName,
@@ -321,7 +322,7 @@ test('SEG-142 an active journey is read-only until paused from the editor', asyn
 
   await signIn(page, p.owner);
   await openJourney(page, pid, journey.id, 'Welcome');
-  const card = page.locator('div.rounded-xl, div.border-destructive\\/40').filter({ hasText: 'This journey is active' }).first();
+  const card = page.locator('div.border-destructive\\/40').filter({ hasText: 'This journey is active' });
   await expect(page.getByText('This journey is active', { exact: true })).toBeVisible();
   await expect(card).toContainText(
     'People are part-way through the steps as they stand, so editing is closed while it runs. Pausing stops anyone new entering and lets everyone already inside finish — then the steps can change.',
@@ -471,7 +472,6 @@ test('SEG-155 status transitions and the enrolment watermark', async ({ clientIp
   expect((await status('paused')).watermark).toBe(t1);
   expect((await status('active')).watermark).toBe(t1);
   expect((await status('archived')).watermark).toBe(t1);
-  await new Promise((resolve) => setTimeout(resolve, 20));
   const second = await status('active');
   const t2 = second.watermark;
   expect(t2).toBeGreaterThan(t1);
@@ -651,6 +651,8 @@ test('SEG-164 view-as can read journeys', async ({ page, browser, baseURL, clien
   const draft = await createJourney(p.owner, pid, clientIp, { name: 'SEG-164 draft', description: 'Draft one' });
   const active = await createJourney(p.owner, pid, clientIp, { name: 'SEG-164 active' });
   await setJourneyStatus(p.owner, pid, clientIp, active.id, 'active');
+  await insertRuns(pid, active.id, 'active', 2);
+  await insertRuns(pid, active.id, 'exited', 1);
 
   const refused: string[] = [];
   page.on('response', (response) => {
@@ -663,7 +665,8 @@ test('SEG-164 view-as can read journeys', async ({ page, browser, baseURL, clien
   const draftRow = rowNamed(page, 'SEG-164 draft');
   await expect(draftRow).toContainText('Draft one');
   await expect(draftRow).toContainText('0 inside');
-  await expect(rowNamed(page, 'SEG-164 active')).toContainText('0 inside');
+  await expect(rowNamed(page, 'SEG-164 active')).toContainText('2 inside');
+  await expect(rowNamed(page, 'SEG-164 active')).toContainText('0 completed · 1 exited');
   await expect(rowNamed(page, 'SEG-164 active').getByText('Active', { exact: true })).toBeVisible();
 
   await draftRow.getByRole('link', { name: 'SEG-164 draft', exact: true }).click();
@@ -690,6 +693,16 @@ test('SEG-165 view-as cannot change journeys', async ({ page, browser, baseURL, 
   const activityBefore = await allActivity(pid);
   expect(activityBefore.map((row) => row.action)).toContain('staff.viewed_as');
   const journeysBefore = await sql(`SELECT id, name, status, steps, enrolled_through, updated_at FROM journeys WHERE project_id = $1 ORDER BY id`, [pid]);
+  // Each UI action's request answers 403 with the read-only message, and both toasts say so.
+  const refused = async (method: string, path: string, body: unknown, act: () => Promise<void>) => {
+    const [response] = await Promise.all([
+      page.waitForResponse((r) => r.request().method() === method && new URL(r.url()).pathname === `/api/projects/${pid}/journeys${path}`),
+      act(),
+    ]);
+    expect(response.status(), `${method} ${path}`).toBe(403);
+    expect((await response.json()).message).toBe(READ_ONLY);
+    if (body !== undefined) expect(response.request().postDataJSON()).toMatchObject(body as Record<string, unknown>);
+  };
   const expectRefusal = async (title: string) => {
     const toast = toastTitled(page, title).last();
     await expect(toast).toBeVisible();
@@ -700,27 +713,27 @@ test('SEG-165 view-as cannot change journeys', async ({ page, browser, baseURL, 
   await openJourneys(page, pid);
   const dialog = page.getByRole('dialog');
   await rowNamed(page, 'SEG-165 draft').getByRole('button', { name: 'Activate' }).click();
-  await dialog.getByRole('button', { name: 'Activate journey' }).click();
+  await refused('POST', `/${draft.id}/status`, { status: 'active' }, () => dialog.getByRole('button', { name: 'Activate journey' }).click());
   await expectRefusal('Could not activate journey');
   await dialog.getByRole('button', { name: 'Cancel' }).click();
 
   await rowNamed(page, 'SEG-165 active').getByRole('button', { name: 'Pause' }).click();
-  await dialog.getByRole('button', { name: 'Pause journey' }).click();
+  await refused('POST', `/${active.id}/status`, { status: 'paused' }, () => dialog.getByRole('button', { name: 'Pause journey' }).click());
   await expectRefusal('Could not pause journey');
   await dialog.getByRole('button', { name: 'Cancel' }).click();
 
   await rowNamed(page, 'SEG-165 draft').getByRole('button', { name: 'Delete' }).click();
-  await dialog.getByRole('button', { name: 'Delete journey' }).click();
+  await refused('DELETE', `/${draft.id}`, undefined, () => dialog.getByRole('button', { name: 'Delete journey' }).click());
   await expectRefusal('Could not delete journey');
   await dialog.getByRole('button', { name: 'Cancel' }).click();
 
   await openJourney(page, pid, draft.id, 'SEG-165 draft');
   await journeyName(page).fill('SEG-165 renamed');
-  await page.getByRole('button', { name: 'Save changes' }).click();
+  await refused('PATCH', `/${draft.id}`, { name: 'SEG-165 renamed' }, () => page.getByRole('button', { name: 'Save changes' }).click());
   await expectRefusal('Could not save journey');
 
   await openJourney(page, pid, active.id, 'SEG-165 active');
-  await page.getByRole('button', { name: 'Pause to edit' }).click();
+  await refused('POST', `/${active.id}/status`, { status: 'paused' }, () => page.getByRole('button', { name: 'Pause to edit' }).click());
   await expectRefusal('Could not pause journey');
   await expect(page.getByText('This journey is active', { exact: true })).toBeVisible();
 
@@ -763,13 +776,14 @@ test('SEG-166 an event trigger enrols only people who fire after activation', as
     name: 'Welcome',
     steps: [{ type: 'wait', durationSeconds: 3600 }, { type: 'exit' }],
   });
-  await trackEvent(p, clientIp, aliceDevice, 'signup');
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  const aliceAt = await trackEvent(p, clientIp, aliceDevice, 'signup');
 
   await setJourneyStatus(p.owner, pid, clientIp, welcome.id, 'active');
   const watermark = (await watermarkOf(welcome.id))!;
+  expect(aliceAt.getTime()).toBeLessThan(watermark.getTime());
   // Sent after activation, but stamped before it by the client.
-  await trackEvent(p, clientIp, carolDevice, 'signup', new Date(watermark.getTime() - 60_000));
+  const carolAt = await trackEvent(p, clientIp, carolDevice, 'signup', new Date(watermark.getTime() - 60_000));
+  expect(carolAt.getTime()).toBe(watermark.getTime() - 60_000);
   const bobAt = await trackEvent(p, clientIp, bobDevice, 'signup');
   expect(bobAt.getTime()).toBeGreaterThan(watermark.getTime());
 
@@ -872,11 +886,11 @@ test('SEG-175 resuming enrols the people who fired while it was paused', async (
     name: 'Welcome',
     steps: [{ type: 'wait', durationSeconds: 3600 }, { type: 'exit' }],
   });
-  await trackEvent(p, clientIp, carolDevice, 'signup');
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  const carolAt = await trackEvent(p, clientIp, carolDevice, 'signup');
   await setJourneyStatus(p.owner, pid, clientIp, journey.id, 'active');
   await setJourneyStatus(p.owner, pid, clientIp, journey.id, 'paused');
   const paused = (await watermarkOf(journey.id))!;
+  expect(carolAt.getTime()).toBeLessThan(paused.getTime());
   const bobAt = await trackEvent(p, clientIp, bobDevice, 'signup');
   expect(bobAt.getTime()).toBeGreaterThan(paused.getTime());
 
@@ -1038,6 +1052,9 @@ test('SEG-221 a segment journey activated before its audience’s first refresh 
   const knownCountry = await createSegment(p.owner, pid, clientIp, { name: 'Known country', definition: KNOWN_COUNTRY, evaluationMode: 'live', status: 'active' });
   const switched = await raw('PATCH', `/api/projects/${pid}/segments/${knownCountry.id}`, { evaluationMode: 'materialized' }, as(p, clientIp));
   expect(switched.status).toBe(200);
+  // Marked as queued for a refresh, so the five-minute scheduler leaves both alone
+  // until materialiseNow runs the first refresh after activation.
+  await sql(`UPDATE segments SET materializing_at = now() WHERE id = ANY($1::uuid[])`, [[buyers.id, knownCountry.id]]);
   const journeys = [];
   for (const segment of [buyers, knownCountry]) {
     journeys.push(
