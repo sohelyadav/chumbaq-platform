@@ -4,6 +4,7 @@ import { Client } from 'pg';
 import type { Locator, Page } from '@playwright/test';
 import { adminUrl, enrolAndSignInStaff } from '../admin';
 import { api, apiUrl, createAccount, newClientIp, type Account } from '../api';
+import { addAuthenticator, type VirtualAuthenticator } from '../factors';
 import { portInUse, run, stopAll, waitForUrl, type Started } from '../processes';
 import { appEnvironment, assertE2eDatabase, REPO_ROOT, runSecrets, stackEnv, stackPorts } from '../stack';
 
@@ -613,4 +614,168 @@ export function breadcrumbSection(page: Page): Locator {
 /** A card of the page, by its title. */
 export function cardTitled(page: Page, title: string): Locator {
   return page.locator('[data-slot="card"]').filter({ has: page.locator('[data-slot="card-title"]', { hasText: new RegExp(`^${title}$`) }) });
+}
+
+// ---- P1 helpers (incidents, alarms, traps, contact)
+
+/**
+ * Another admin API process with extra environment, on the first free port from 30 to
+ * 39 above the lane's admin API (a range no other ADMOPS or ADMAUTH helper searches).
+ */
+export async function startExtraAdminApi(extra: Record<string, string>, label: string): Promise<{ url: string; stop(): Promise<void> }> {
+  const ports = stackPorts();
+  const taken = new Set(Object.values(ports));
+  let port = 0;
+  for (let candidate = ports.adminApi + 30; candidate < ports.adminApi + 40; candidate++) {
+    if (!taken.has(candidate) && !(await portInUse(candidate))) {
+      port = candidate;
+      break;
+    }
+  }
+  if (!port) throw new Error(`No free port for the ${label} admin API`);
+  const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ADMIN_API_PORT: String(port), ...extra };
+  const started: Started = run(`admin-api-${label}-${port}`, 'node', ['dist/main-admin'], {
+    cwd: path.join(REPO_ROOT, 'apps/api'),
+    env,
+  });
+  const url = `http://127.0.0.1:${port}`;
+  try {
+    await waitForUrl(started, `${url}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    throw error;
+  }
+  return { url, stop: () => stopAll([started]) };
+}
+
+/**
+ * Another customer API process on the lane's database, Redis and secrets with extra
+ * environment (a config variant), on the first free port from the API port + 92 to + 96.
+ */
+export async function startCustomerApiWith(extra: Record<string, string>, label: string): Promise<{ url: string; stop(): Promise<void> }> {
+  const ports = stackPorts();
+  const taken = new Set(Object.values(ports));
+  let port = 0;
+  for (let candidate = ports.api + 92; candidate <= ports.api + 96; candidate++) {
+    if (!taken.has(candidate) && !(await portInUse(candidate))) {
+      port = candidate;
+      break;
+    }
+  }
+  if (!port) throw new Error(`No free port for the ${label} customer API`);
+  const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ...extra, API_PORT: String(port) };
+  const started: Started = run(`api-${label}-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
+  const url = `http://127.0.0.1:${port}`;
+  try {
+    await waitForUrl(started, `${url}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    throw error;
+  }
+  return { url, stop: () => stopAll([started]) };
+}
+
+/** The validation messages of an error body, as a list. */
+export function errorMessages(json: any): string[] {
+  const message = json?.message;
+  return Array.isArray(message) ? message : [message];
+}
+
+/** Uses an API key on an SDK route (or `path`), from `ip`; answers the raw response. */
+export function useApiKey(key: string, ip: string, path = '/api/events/track', body: unknown = { projectId: randomUUID(), eventName: 'e2e_event' }) {
+  return customerRequest('POST', path, { ip, body, headers: { 'X-Api-Key': key } });
+}
+
+/** A row of the Incidents table, by its title link. */
+export function incidentListRow(page: Page, title: string): Locator {
+  return page.getByRole('row').filter({ has: page.getByRole('link', { name: title, exact: true }) });
+}
+
+/** A row of the Recent alarms table, by text in it (its details line). */
+export function alarmListRow(page: Page, text: string): Locator {
+  return page.getByRole('row').filter({ hasText: text });
+}
+
+/** `yyyy-MM-ddTHH:mm` of `ms` in the page's own time zone, as the incident forms write it. */
+export function localInputValue(page: Page, ms: number): Promise<string> {
+  return page.evaluate((at) => {
+    const d = new Date(at);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }, ms);
+}
+
+/** Runs each statement in a transaction that is always rolled back; answers its error, or `ok`. */
+export function attemptRolledBack(statements: string[], params: unknown[] = []): Promise<string[]> {
+  return withDb(async (db) => {
+    const out: string[] = [];
+    for (const statement of statements) {
+      await db.query('BEGIN');
+      try {
+        await db.query(statement, statement.includes('$1') ? params : []);
+        out.push('ok');
+      } catch (error) {
+        out.push((error as Error).message);
+      } finally {
+        await db.query('ROLLBACK');
+      }
+    }
+    return out;
+  });
+}
+
+/** A staff member signed in with a passkey, keeping the tab's authenticator (to copy the key). */
+export interface StaffWithKey extends Staff {
+  authenticator: VirtualAuthenticator;
+}
+
+/** Clicks "Sign in with a passkey" on the admin sign-in page; answers the staff access token. */
+export async function staffPasskeySignIn(page: Page): Promise<string> {
+  const [verified] = await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith('/api/staff/auth/passkey/verify')),
+    page.getByRole('button', { name: 'Sign in with a passkey' }).click(),
+  ]);
+  if (!verified.ok()) throw new Error(`Staff passkey sign-in answered ${verified.status()}`);
+  return ((await verified.json()) as { data: { accessToken: string } }).data.accessToken;
+}
+
+/** As `signedInStaff`, through the same admin app screens, but the authenticator is kept. */
+export async function signedInStaffWithKey(page: Page, ip: string, name = 'Opal Ops'): Promise<StaffWithKey> {
+  const account = await makeSuperAdminAccount(ip, 'ops', name);
+  const authenticator = await addAuthenticator(page);
+  await page.goto(adminUrl('/sign-in'));
+  await page.getByLabel('Email').fill(account.email);
+  await page.getByLabel('Password', { exact: true }).fill(account.password);
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByLabel('Passkey name').fill('E2E virtual authenticator');
+  await page.getByRole('button', { name: 'Add a passkey' }).click();
+  await page.getByText('Done. Sign in with your new passkey.').waitFor();
+  const token = await staffPasskeySignIn(page);
+  return { account, token, authenticator };
+}
+
+/** Copies every credential (private key and sign count included) from one virtual authenticator to another. */
+export async function copyPasskeys(from: VirtualAuthenticator, to: VirtualAuthenticator): Promise<void> {
+  const { credentials } = await from.cdp.send('WebAuthn.getCredentials', { authenticatorId: from.authenticatorId });
+  for (const credential of credentials) {
+    await to.cdp.send('WebAuthn.addCredential', { authenticatorId: to.authenticatorId, credential });
+  }
+}
+
+/** Inserts an alarm row directly (inserts are allowed), e.g. one whose window has passed. */
+export async function seedAlarm(row: {
+  kind: string;
+  key: string;
+  details?: Record<string, unknown>;
+  ip?: string | null;
+  firstAt?: Date;
+  count?: number;
+}): Promise<string> {
+  const at = (row.firstAt ?? new Date()).toISOString();
+  const [inserted] = await sql<{ id: string }>(
+    `INSERT INTO security_alerts (kind, dedupe_key, details, ip_address, first_at, last_at, count)
+     VALUES ($1, $2, $3, $4, $5::timestamptz, $5::timestamptz, $6) RETURNING id`,
+    [row.kind, row.key, JSON.stringify(row.details ?? {}), row.ip ?? null, at, row.count ?? 1],
+  );
+  return inserted.id;
 }
