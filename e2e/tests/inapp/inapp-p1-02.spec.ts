@@ -237,11 +237,12 @@ test('INAPP-077 Custom Segment has no segment picker', async ({ page }) => {
 
   const id = await saveAndGetId(page, p.project.id);
   const stored = await getMessage(p, id);
-  expect(stored).toMatchObject({ userType: 'segment', segmentId: null });
+  // The editor's default trigger, the same as the all-users message below: only the audience differs.
+  expect(stored).toMatchObject({ userType: 'segment', segmentId: null, triggerType: 'on_app_open' });
 
   // Withheld from everyone once active; an all-users message in the same check is delivered.
   dataOf(await call('POST', `${MESSAGES(p.project.id)}/${id}/activate`, p.owner));
-  const everyone = await messageIn(p.owner, p.project.id, 'active', { name: 'For all' });
+  const everyone = await messageIn(p.owner, p.project.id, 'active', { name: 'For all', triggerType: 'on_app_open' });
   expect(await deliveredIds(p, device.fingerprint)).toEqual([everyone.id]);
 });
 
@@ -468,6 +469,7 @@ test('INAPP-086 edit page loads the saved values', async ({ page }) => {
 test('INAPP-087 update a campaign', async ({ page }) => {
   const p = await inAppProject('inapp-087');
   const message = await createInAppMessage(p.owner, p.project.id, { name: 'Draft to edit', title: 'Old title' });
+  const activityBefore = (await activityRows(p.project.id)).length;
   await signIn(page, p.owner);
   await openEditEditor(page, p.project.id, message.id);
   await expect(editorField(page, 'Title *')).toHaveValue('Old title');
@@ -481,6 +483,7 @@ test('INAPP-087 update a campaign', async ({ page }) => {
 
   expect(await getMessage(p, message.id)).toMatchObject({ title: 'New title', status: 'draft', name: 'Draft to edit' });
   expect(await messageActivity(p.project.id)).toEqual([]);
+  expect(await activityRows(p.project.id)).toHaveLength(activityBefore);
 });
 
 test('INAPP-088 editing an active campaign changes it live', async ({ page }) => {
@@ -738,6 +741,7 @@ test('INAPP-110 trigger dialog content', async ({ page }) => {
 test('INAPP-112 trigger with no devices', async ({ page }) => {
   const p = await inAppProject('inapp-112');
   const message = await messageIn(p.owner, p.project.id, 'active', { name: 'Nobody here', triggerType: 'immediate' });
+  const activityBefore = (await activityRows(p.project.id)).length;
   await signIn(page, p.owner);
   await openDetail(page, p.project.id, message.id, 'Nobody here');
   await page.getByRole('button', { name: 'Trigger Now', exact: true }).click();
@@ -752,6 +756,7 @@ test('INAPP-112 trigger with no devices', async ({ page }) => {
   await expect(dialog).toHaveCount(0);
   expect(await pendingRows(message.id)).toEqual([]);
   expect(await activityRows(p.project.id, 'in_app.triggered')).toEqual([]);
+  expect(await activityRows(p.project.id)).toHaveLength(activityBefore);
 });
 
 test('INAPP-115 trigger works on a draft message', async ({ page }) => {
