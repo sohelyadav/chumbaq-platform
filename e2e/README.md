@@ -10,8 +10,19 @@ servers, on a database of their own.
 npm run test:e2e                         # headless, every spec
 npm run test:e2e:ui                      # Playwright's UI mode
 npm run test:e2e -- tests/team.spec.ts   # one spec
+npm run test:e2e -- tests/link/          # one area (every spec in the folder)
+npm run test:e2e -- tests/link/ tests/ppl/   # several areas in one run
+npm run test:e2e -- tests/link/link-p0-02.spec.ts:120   # one test, by file and line
+npm run test:e2e -- -- tests/link --grep "LINK-161"     # by title: note the second --
 E2E_SKIP_BUILD=1 npm run test:e2e        # skip rebuilding the API (when only specs or the web app changed)
 ```
+
+The root script runs `npm run e2e --workspace=e2e`, so a single `--` hands file
+arguments through but npm keeps flags such as `--grep` (and reads `-g` as its own
+`--global`). Pass flags after a second `--`, use `file:line`, or run
+`npm run e2e --workspace=e2e -- <args>` directly. File arguments are regular expressions
+matched against the path, so end a folder with `/`: `tests/team` also picks up
+`tests/team.spec.ts`.
 
 The first time, install the browser: `npx playwright install chromium`.
 
@@ -40,6 +51,27 @@ E2E_LANE=0 npm run test:e2e                     # builds, then runs
 E2E_LANE=1 E2E_SKIP_BUILD=1 npm run test:e2e &  # meanwhile, elsewhere
 E2E_LANE=2 E2E_SKIP_BUILD=1 npm run test:e2e
 ```
+
+When several people or scripts share a machine, queue runs per lane instead of relying
+on the port check, for example with macOS `lockf`:
+
+```bash
+lockf -k /tmp/chumbaq-e2e-lane-1.lock env E2E_LANE=1 E2E_SKIP_BUILD=1 npm run test:e2e -- tests/link/
+```
+
+The whole suite is quickest split by area folder across the three lanes, each lane
+running its share with the default 3 workers. The split used for the full runs:
+
+| Lane | Areas |
+|---|---|
+| 0 | `auth`, `bill`, `proj`, `smswa`, `integ`, `_helpers` and the top-level specs |
+| 1 | `admauth`, `link`, `admten`, `email`, `admops`, `anly` |
+| 2 | `team`, `ppl`, `acct`, `push`, `seg`, `inapp` |
+
+On a recent laptop each lane takes 7 to 11 minutes, stack start included (lane 0 about
+9.5, lane 1 about 7, lane 2 about 10.5), so the whole suite of 890 tests finishes in
+about 11 minutes with the three lanes side by side, against roughly half an hour on one
+lane. Build once from lane 0 first, then start the three with `E2E_SKIP_BUILD=1`.
 
 Failures keep a trace and a screenshot under `e2e/.artefacts/test-results/` (open a
 trace with `npx playwright show-trace <path>`); the HTML report is in
@@ -105,6 +137,10 @@ limits on sign-up and sign-in treat every test as a separate client.
 
 ## The specs
 
+### Walkthrough specs
+
+One journey each, end to end, in `tests/` itself:
+
 | Spec | Covers |
 |---|---|
 | `auth.spec.ts` | Sign up (form, then the sign-up link), sign out, the dashboard refusing a signed-out visitor, the wrong-password message, signing in, a reload keeping the session, and a used sign-up link being refused. |
@@ -115,7 +151,87 @@ limits on sign-up and sign-in treat every test as a separate client.
 | `_helpers/stubs.spec.ts` | The provider stub and mailbox: a sign-up mails a working `/complete-signup` link (and a second sign-up an "already registered" one); a Twilio connect and SMS test send reach the stub, and an injected 401 comes back as a failed test send. |
 | `admin.spec.ts` | A super admin granted with `npm run admin:grant` enrols a passkey (Chromium's virtual authenticator) on `/enrol`, signs in with it, finds a tenant, starts view-as with a reason, follows the one-time link into the customer app, sees the read-only banner and the tenant's project, has a write refused, and exits back to the admin app. |
 
-Locators are the ones a person uses: roles, labels and visible text.
+
+### Area specs
+
+One folder per product area under `tests/<area>/`, split into files of 20 to 40 tests
+(`<area>-p0-01.spec.ts`, ...). Each test is one case and its title starts with the case
+id (`test('LINK-161 ...')`), so a failure names the case. They cover every P0 case of
+each area that the local stack can run.
+
+| Folder | Covers | Tests |
+|---|---|---:|
+| `auth` | Customer sign-up (two steps), sign-in and its failure limit, second factors at sign-in, passkeys and autofill, refresh tokens, sessions and their maximum length, password reset, verify email, staff-issued reset links and the cancel page, re-authentication | 81 |
+| `acct` | Account settings: profile, password change, authenticator app and recovery codes, passkeys, sessions and sign-in history, pending factor resets, view-as refusals | 43 |
+| `proj` | Project selector and create (project limit), dashboard, settings, domain proof, delete, read-only roles, suspension, view-as, cross-tenant refusals | 44 |
+| `link` | Link create, edit, delete and bulk import, reserved and released short codes, redirects by platform, interstitial, deep links and deferred match, A/B variants, click export, `.well-known` files, do-not-track on clicks | 70 |
+| `anly` | Project analytics, attribution models, touchpoints and events, roles and cross-project refusals, do-not-track and person objections in ingest | 28 |
+| `ppl` | People list and profile, identify with `userHash`, device handover, consent edits and history, do-not-track, person objections, erasure and export (dashboard and privacy keys) | 51 |
+| `seg` | Audience builder and segment API, materialised audiences, journeys (editor, activation, pause, enrolment from events and segments, waits), suspension | 48 |
+| `push` | FCM configuration, Mi Push, push campaigns (send, schedule, cancel, recurrence, A/B arms), templates, guardrails and frequency cap, token register and unregister, opt-out | 42 |
+| `email` | Email sender settings and provider connect, audience preview, test send, campaigns and their worker sends, double opt-in links, unsubscribe, Resend, Brevo and SES webhooks, suppressions | 45 |
+| `smswa` | SMS (Twilio) and WhatsApp (Meta, Twilio, Gupshup, Interakt) settings, campaigns, test sends, signed and unsigned webhooks, STOP and START, suppressions, erasure | 62 |
+| `inapp` | In-app message campaigns (editor, delivery rules, triggers, cohorts and segments, frequency cap) and widgets (categories, items, serve and click) | 47 |
+| `team` | Members and roles, invitations (create, resend, revoke, accept), seats, billing transfer, activity log and its export | 79 |
+| `integ` | API keys (including privacy keys), identity secret, outbound webhooks (create, rotate, address checks), Mixpanel cohorts | 37 |
+| `bill` | Customer billing page, plans, Checkout, subscription changes and cancel, the Razorpay webhook, invoices, staff plans and prices, comps, the cancel outbox, billing summary, billing off | 52 |
+| `admauth` | Admin app sign-in (passkey, password and second factor, enrolment codes), staff factors, staff sessions and refresh cookie, re-authentication, revocation | 58 |
+| `admten` | Admin overview, tenants list and export, tenant page, usage, project and seat limits, suspension, view-as handoff and exchange, factor resets | 44 |
+| `admops` | Audit log and its export, platform health, incidents, security alerts and the internal alert route, tripwires, security contact | 36 |
+
+Totals: 867 tests in the area folders, plus 7 walkthrough tests and 16 in `_helpers`
+(890 in all).
+
+**Conventions.** Every test makes its own accounts, projects and client address, so the
+files of a folder run side by side (several use `test.describe.configure({ mode:
+'parallel' })`). Rows the UI cannot make, or that would take minutes to reach (an aged
+sign-in, a back-dated click, a suspended account), are written with SQL through the
+lane's database; everything else goes through the real routes. A test that checks for
+the absence of something first shows a positive control (the same request with the
+right input does land), so it cannot pass because nothing happens at all.
+
+**Known defects.** A test marked `test.fail()` asserts the intended behaviour of a case
+whose current behaviour is wrong. It counts as passing while the defect is there and goes
+red when the defect is fixed, which is the signal to remove the marker. Each carries an
+`issue` annotation with its case id. A few cases instead assert today's behaviour as the
+case is written, with a comment saying so.
+
+**Slow tests.** Some cases wait for real timers: the in-memory route throttles (about
+61 s each, in `auth` and `admauth`), the worker's once-a-minute scheduler and outbox
+(`bill`, `push`, `seg`, `smswa`, `email`), and fresh authenticator-app steps (up to 30 s).
+They are marked `test.slow()` or set their own timeout.
+
+**Extra processes.** A few specs start a second API process on the lane's database for
+one config variant, on a port derived from the lane's ports, and stop it when the
+describe block ends: an admin API with `SUPER_ADMIN_PASSKEY_REQUIRED=true` or
+`SUPER_ADMIN_ALLOW_SYNCED_PASSKEYS` set (`admauth`), a customer and an admin API with
+`BILLING_ENABLED=false` (`bill`), and an admin API with `SECURITY_ALERT_TOKEN` set
+(`admops`). The page's requests are routed to it with `page.route`.
+
+### Area helpers
+
+`support/areas/<area>.ts` holds each area's helpers (one file per folder): raw requests
+that return status and body without throwing, SQL readers and seeds (`withDb` / `sql`),
+role and teammate setup, view-as handoffs (a super admin flagged in SQL, a passkey
+enrolled in a separate browser context, `impersonate`, then the exchange), aged sign-ins
+for the recent-sign-in rule, toast and card locators that still work while a modal hides
+the page from the accessibility tree, and request recorders and holds (`page.route`) for
+busy states and response bodies the page navigates away from. Prefer a helper from your
+own area's file; copy a small one rather than importing from another area.
+
+### Channel seeding and webhook signing
+
+`support/channels.ts` seeds provider connections the way a real connect stores them:
+`seedFcmConfig` (with `fakeServiceAccount`), `seedEmailCredentials` for SES, Resend or
+Brevo, `connectFakeSmsProvider` (Twilio) and `connectFakeWhatsAppProvider`, and gives each
+provider's webhook path. `support/signing.ts` signs what providers sign: `signSvix`
+(Resend), `twilioSignature` (over `publicApiUrl`), `hubSignature` (Meta),
+`interaktSignature`, `razorpaySignature`, and the API's own unsubscribe and confirmation
+links (`signUnsubscribeLink`, `signConfirmLink`). `tests/_helpers/channels-helpers.spec.ts`
+shows each in use.
+
+Locators are the ones a person uses: roles, labels and visible text, with `data-slot`
+card titles and CSS only where the page gives an element no role or name.
 
 ### Factor and browser helpers
 
@@ -140,27 +256,32 @@ the text with BOM and CR made visible), `decodeQr` / `decodeQrOnPage` (jsqr), `m
 
 ## Known gaps
 
+- **P1 and P2 cases are not automated yet.** The area folders hold the P0 cases only.
 - **Chromium only.** WebKit and Firefox are not run yet. WebKit needs its own answer for
-  the passkey spec (the virtual authenticator is a Chromium DevTools feature).
+  the passkey specs (the virtual authenticator is a Chromium DevTools feature), and the
+  phone cases use Chromium with an iPhone or Pixel profile, not Safari.
 - **Account email reaches a stub, not an inbox.** Mail is recorded by the provider stub
-  as Brevo's API received it; delivery, rendering in mail clients and Brevo's own
-  checks are not covered. The verify-email flow, password reset and security notices
-  have no specs yet.
-- **Channel providers are stubs.** Connects, test sends and deliveries can now reach the
-  provider stub, but only the stub's spec uses it so far: the campaigns spec still seeds
-  the connection directly in the database (`support/seed.ts`) with a fake key, and stops
-  at scheduling, with the opt-in requirement switched off (a required opt-in counts
-  only once the person confirms it from an email the provider sends). SES is not
-  stubbed. Push, SMS and WhatsApp campaigns, delivery, provider webhooks and journeys
-  are not covered.
+  as Brevo's API received it, and tests read it back (subjects, links, notices); delivery,
+  rendering in mail clients and Brevo's own checks are not covered. With account email
+  always on, the cases that need it off (refusals worded for a server without it) are
+  skipped.
+- **Amazon is not stubbed.** SES connects, SES events and SNS subscription confirmation
+  need real AWS; the SES webhook specs stop at the checks made before any certificate is
+  fetched.
+- **Real providers and devices.** Real FCM delivery to a device, real Twilio, Meta,
+  Gupshup, Interakt and Mixpanel accounts, and real phones and apps for deep links are
+  manual.
+- **Mixpanel credentials need a key the harness does not set.** Without
+  `MIXPANEL_ENCRYPTION_KEY` in the runner's environment the two cases that store real
+  Mixpanel credentials skip themselves; with it set they pass.
+- **Outbound webhooks and DNS.** Webhook deliveries need a public receiver, and domain
+  proof needs a real TXT record, so both are manual beyond the address checks and
+  refusals.
+- **Failure injection.** Redis or Postgres going away, a database failure inside a
+  webhook, and triggering the billing reconcile job on demand are not covered.
 - **Billing stops at the mock.** The real Razorpay Checkout (its script, frames and
-  content security policy) is replaced in the browser, and only the subscription
-  webhooks the spec needs are sent: no charges, invoices, payments, refunds, halts,
-  the worker's cancel outbox or reconcile job.
-- **Admin.** Staff sign-in with an operator's enrolment code (needed whenever
-  `SUPER_ADMIN_PASSKEY_REQUIRED` is on, as in production) and the second staff passkey
-  production asks for are not covered.
-- **No email entry in the project sidebar.** The campaigns spec opens the Email page by
-  its address because the project sidebar has no entry for it.
+  content security policy) is replaced in the browser.
+- **Deployment checks.** Production config refusals, nginx and the server scripts are
+  checked on a deployed stage, not here.
 - The specs run against the Vite dev servers (React StrictMode on), not a production
   build, so the production content security policies are not exercised.

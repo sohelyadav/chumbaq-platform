@@ -49,11 +49,17 @@ test('choose a paid plan, become active on the webhook, cancel, and keep the pla
   // Plans visible: Free is current, ours is on offer at its price.
   await expect(page.getByRole('heading', { name: 'Plans' })).toBeVisible();
   await expect(page.getByText('Current plan')).toBeVisible();
-  await expect(page.getByText(plan.name, { exact: true })).toBeVisible();
-  await expect(page.getByText('₹499.00').first()).toBeVisible();
+  // Other specs on the same stack add plans of their own, so work inside this plan's card.
+  const planCard = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Plans', exact: true }) })
+    .locator('[data-slot="card"]')
+    .filter({ has: page.locator('[data-slot="card-title"]').getByText(plan.name, { exact: true }) });
+  await expect(planCard).toHaveCount(1);
+  await expect(planCard.getByText('₹499.00').first()).toBeVisible();
 
   // Choose it: billing details first, then Checkout opens on the subscription the API made.
-  await page.getByRole('button', { name: 'Choose' }).click();
+  await planCard.getByRole('button', { name: 'Choose' }).click();
   await page.getByLabel('Legal name').fill('Bela Buyer Labs');
   await page.getByLabel('Address', { exact: true }).fill('1 Test Street');
   await page.getByLabel('City').fill('Bengaluru');
