@@ -1,12 +1,14 @@
 import { createHash, randomBytes } from 'crypto';
+import path from 'path';
 import type { Locator, Page } from '@playwright/test';
 import Redis from 'ioredis';
 import { Client } from 'pg';
-import { adminApi, enrolAndSignInStaff } from '../admin';
+import { adminApi, adminUrl, enrolAndSignInStaff } from '../admin';
 import { api, apiUrl, createAccount, newClientIp, uniqueEmail, type Account } from '../api';
 import { extractLink, waitForMail } from '../mailbox';
 import { nextTotpCode, recoveryCodeItems, settingsCard, totpCode, totpSetupKey, totpStep, type TotpEnrolment } from '../factors';
-import { assertE2eDatabase, assertE2eRedisDb, stackEnv } from '../stack';
+import { portInUse, run, stopAll, waitForUrl } from '../processes';
+import { appEnvironment, assertE2eDatabase, assertE2eRedisDb, REPO_ROOT, runSecrets, stackEnv, stackPorts } from '../stack';
 
 /**
  * Helpers for the AUTH specs: raw API calls that keep the status and headers, the
@@ -699,4 +701,240 @@ export async function rewriteResponses(page: Page, path: string, change: (data: 
     if (json && typeof json === 'object' && json.data) change(json.data);
     await route.fulfill({ response, json });
   });
+}
+
+// ---- Redis state of a sign-in (P1 chunk 1)
+
+async function withRedis<T>(work: (redis: Redis) => Promise<T>): Promise<T> {
+  const env = stackEnv();
+  const redis = new Redis({
+    host: env.REDIS_HOST || '127.0.0.1',
+    port: Number(env.REDIS_PORT || 6379),
+    password: env.REDIS_PASSWORD || undefined,
+    db: assertE2eRedisDb(env),
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+  });
+  await redis.connect();
+  try {
+    return await work(redis);
+  } finally {
+    redis.disconnect();
+  }
+}
+
+const sha256Hex = (value: string) => createHash('sha256').update(value).digest('hex');
+
+/** The address's sign-in attempt counters (`net:<ip>`, `total`, ...); empty when it has none. */
+export function signInAttemptCounts(email: string): Promise<Record<string, string>> {
+  return withRedis((redis) => redis.hgetall(`chumbaq:signin-attempts:${sha256Hex(email.trim().toLowerCase())}`));
+}
+
+/** Forgets a second-factor handle, as its five minutes running out would. */
+export async function expireHandle(handle: string): Promise<void> {
+  const removed = await withRedis((redis) => redis.del(`chumbaq:preauth:${sha256Hex(handle)}`));
+  if (removed !== 1) throw new Error('No stored handle to expire');
+}
+
+/** Forgets a WebAuthn ceremony's challenge (`passwordless` by flow id, ...), as its expiry would. */
+export async function expireChallenge(ceremony: string, id: string): Promise<void> {
+  const removed = await withRedis((redis) => redis.del(`chumbaq:webauthn:${ceremony}:${sha256Hex(id)}`));
+  if (removed !== 1) throw new Error(`No stored ${ceremony} challenge to expire`);
+}
+
+// ---- Staff side, for the audience of handles and factor resets
+
+/** A request to the admin API as the admin app sends it, never throwing. */
+export async function staffPost<T = any>(pathname: string, body: unknown, ip: string): Promise<RawResponse<T>> {
+  const base = process.env.E2E_ADMIN_API_URL;
+  if (!base) throw new Error('E2E_ADMIN_API_URL is not set: run the specs through playwright.config.ts');
+  const response = await fetch(`${base}${pathname}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Chumbaq-Client': 'admin', 'X-Forwarded-For': ip },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let parsed: any = undefined;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    parsed = text;
+  }
+  const ok = response.status >= 200 && response.status < 300;
+  return {
+    status: response.status,
+    body: ok && parsed && typeof parsed === 'object' && 'data' in parsed ? parsed.data : parsed,
+    text,
+    setCookie: response.headers.get('set-cookie'),
+  };
+}
+
+/**
+ * A staff passkey for a super admin, made in the admin app's enrolment with the tab's
+ * virtual authenticator (add one first). Leaves the tab on the admin sign-in page.
+ */
+export async function enrolStaffKeyInAdminApp(page: Page, staff: Pick<Account, 'email' | 'password'>): Promise<void> {
+  await page.goto(adminUrl('/sign-in'));
+  await page.getByLabel('Email').fill(staff.email);
+  await page.getByLabel('Password', { exact: true }).fill(staff.password);
+  await page.getByRole('button', { name: 'Continue' }).click();
+  await page.getByLabel('Passkey name').fill('E2E staff key');
+  await page.getByRole('button', { name: 'Add a passkey' }).click();
+  await page.getByText('Done. Sign in with your new passkey.').waitFor();
+}
+
+/**
+ * A pending factor reset as a staff request leaves it once its warning went out, 72
+ * hours ahead. Answers the row id.
+ */
+export async function seedPendingFactorReset(userId: string, requestedBy: Pick<Account, 'userId' | 'email'>): Promise<string> {
+  const [row] = await sql<{ id: string }>(
+    `INSERT INTO factor_resets
+       (user_id, status, requested_by_id, requested_by_email, reason, execute_after, notice_sent_at,
+        verification_method, verification_notes)
+     VALUES ($1, 'pending', $2, $3, 'E2E: owner lost their phone', now() + interval '72 hours', now(),
+             'video_call', 'E2E: saw the owner on a video call')
+     RETURNING id`,
+    [userId, requestedBy.userId, requestedBy.email],
+  );
+  return row.id;
+}
+
+export function factorResetRows(userId: string) {
+  return sql<{ id: string; status: string; cancelled_at: Date | null; cancelled_by: string | null }>(
+    'SELECT id, status, cancelled_at, cancelled_by FROM factor_resets WHERE user_id = $1 ORDER BY requested_at',
+    [userId],
+  );
+}
+
+/** The admin app's "Second factors" card on a tenant's page. */
+export function secondFactorsCard(page: Page): Locator {
+  return page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.locator('[data-slot="card-title"]', { hasText: 'Second factors' }) });
+}
+
+// ---- A customer API with tenants' passkeys off
+
+export interface ExtraApi {
+  url: string;
+  stop(): Promise<void>;
+}
+
+/**
+ * A second customer API on the lane's database, Redis and secrets, with
+ * PASSKEYS_FOR_TENANTS=false: an install where only staff hold passkeys. On a free port
+ * at the API port + 92..96 (the mock and stub take + 90 and + 91, billing's + 97, + 98).
+ */
+export async function startTenantPasskeysOffApi(): Promise<ExtraApi> {
+  const ports = stackPorts();
+  const taken = new Set(Object.values(ports));
+  let port = 0;
+  for (let candidate = ports.api + 92; candidate <= ports.api + 96; candidate++) {
+    if (!taken.has(candidate) && !(await portInUse(candidate))) {
+      port = candidate;
+      break;
+    }
+  }
+  if (!port) throw new Error('No free port for the extra customer API');
+  const env = {
+    ...process.env,
+    ...appEnvironment(runSecrets(), ports),
+    PASSKEYS_FOR_TENANTS: 'false',
+    API_PORT: String(port),
+  };
+  const started = run(`api-tenant-passkeys-off-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
+  try {
+    await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    throw error;
+  }
+  return { url: `http://localhost:${port}`, stop: () => stopAll([started]) };
+}
+
+/** Sends the page's requests under `prefix` (an API path) to another API, unchanged otherwise. */
+export async function forwardToApi(page: Page, base: string, prefix: string): Promise<void> {
+  await page.route(`**${prefix}**`, async (route) => {
+    const url = new URL(route.request().url());
+    const response = await route.fetch({ url: `${base}${url.pathname}${url.search}` });
+    await route.fulfill({ response });
+  });
+}
+
+// ---- Instrumented WebAuthn in the page
+
+export interface CredentialCall {
+  conditional: boolean;
+  /** Held back from the authenticator (`holdConditional`). */
+  held?: boolean;
+  settled: 'pending' | 'resolved' | 'rejected';
+  error?: string;
+  aborted: boolean;
+}
+
+/**
+ * Records every navigator.credentials.get in the page's documents from the next
+ * navigation (`window.__credentialGets`), passing each through untouched.
+ *
+ * With `holdConditional`, a conditional request (the email field's autofill) never
+ * reaches the authenticator and waits, as it does in a browser until someone picks a
+ * passkey from the list: Chromium's virtual authenticator answers or refuses one at once.
+ * It ends only when its signal aborts (an AbortError, as the browser gives), and while it
+ * waits another request is refused as the browser refuses it ("A request is already
+ * pending.").
+ */
+export async function recordCredentialGets(page: Page, { holdConditional = false } = {}): Promise<void> {
+  await page.addInitScript((hold: boolean) => {
+    const container = navigator.credentials;
+    if (!container) return;
+    const original = container.get.bind(container);
+    const calls: Array<Record<string, unknown>> = [];
+    (window as unknown as { __credentialGets: unknown }).__credentialGets = calls;
+    const settle = (call: Record<string, unknown>, promise: Promise<Credential | null>) =>
+      promise.then(
+        (value) => {
+          call.settled = 'resolved';
+          return value;
+        },
+        (error: unknown) => {
+          call.settled = 'rejected';
+          call.error = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+          throw error;
+        },
+      );
+    container.get = ((options?: CredentialRequestOptions) => {
+      const conditional = (options as { mediation?: string } | undefined)?.mediation === 'conditional';
+      const call: Record<string, unknown> = { conditional, settled: 'pending', aborted: false };
+      const waiting = calls.some((c) => c.held && c.settled === 'pending');
+      calls.push(call);
+      options?.signal?.addEventListener('abort', () => (call.aborted = true));
+      if (hold && waiting) {
+        return settle(call, Promise.reject(new DOMException('A request is already pending.', 'InvalidStateError')));
+      }
+      if (hold && conditional) {
+        call.held = true;
+        return settle(
+          call,
+          new Promise<Credential | null>((_resolve, reject) => {
+            const abort = () => reject(new DOMException('The operation was aborted.', 'AbortError'));
+            if (options?.signal?.aborted) abort();
+            options?.signal?.addEventListener('abort', abort);
+          }),
+        );
+      }
+      return settle(call, original(options));
+    }) as typeof container.get;
+  }, holdConditional);
+}
+
+export function credentialGets(page: Page): Promise<CredentialCall[]> {
+  return page.evaluate(() => ((window as unknown as { __credentialGets?: CredentialCall[] }).__credentialGets ?? []).map((c) => ({ ...c })));
+}
+
+/** An assertion with one byte of its signature changed, so it can never verify. */
+export function withBrokenSignature<T extends { response: { signature: string } }>(assertion: T): T {
+  const bytes = Buffer.from(assertion.response.signature, 'base64url');
+  bytes[bytes.length - 1] ^= 0xff;
+  return { ...assertion, response: { ...assertion.response, signature: bytes.toString('base64url') } };
 }
