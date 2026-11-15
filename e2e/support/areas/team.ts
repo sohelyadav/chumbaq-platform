@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { Client } from 'pg';
 import type { Locator, Page } from '@playwright/test';
 import { apiUrl, createAccount, createProject, newClientIp, uniqueEmail, type Account, type Project } from '../api';
@@ -238,4 +238,128 @@ export function cardTitled(page: Page, title: string): Locator {
 /** Date the way the members table shows it (date-fns `MMM d, yyyy`), in this machine's zone. */
 export function joinedLabel(at: Date): string {
   return at.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+// ---- Invitations (chunk 2)
+
+export const SEAT_LIMIT_MESSAGE = 'Your plan has no free seats. Upgrade to invite teammates.';
+export const INVITES_SUSPENDED = "This project's account is suspended.";
+export const ALREADY_MEMBER = 'They are already a member of this project.';
+
+/** The keys a pending invite has in `GET .../invitations`: no token, no link. */
+export const INVITATION_VIEW_KEYS = ['createdAt', 'email', 'expired', 'expiresAt', 'id', 'invitedBy', 'role'];
+
+/** sha256 hex, as the API stores invite tokens. */
+export function sha256Hex(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+/** 43 random base64url characters: shaped like an invite token, naming no invite. */
+export function unknownInviteToken(): string {
+  return randomBytes(32).toString('base64url');
+}
+
+/** `POST /api/invitations/preview` as `person` (optionally from another address, for the 10/min throttle). */
+export function previewInvite(person: Pick<Person, 'accessToken' | 'ip'>, token: string, ip?: string): Promise<CallResult> {
+  return call('POST', '/api/invitations/preview', { as: { accessToken: person.accessToken, ip: ip ?? person.ip }, body: { token } });
+}
+
+/** `POST /api/invitations/accept` as `person`. */
+export function acceptInvite(person: Pick<Person, 'accessToken' | 'ip'>, token: string, ip?: string): Promise<CallResult> {
+  return call('POST', '/api/invitations/accept', { as: { accessToken: person.accessToken, ip: ip ?? person.ip }, body: { token } });
+}
+
+/** An invitation's resend through the API by `person`; answers the new link and token. */
+export async function resendInvite(projectId: string, person: Person, invitationId: string): Promise<SentInvite> {
+  const result = await call('POST', `/api/projects/${projectId}/invitations/${invitationId}/resend`, { as: person });
+  if (result.status !== 201) throw new Error(`Resend answered ${result.status}: ${JSON.stringify(result.body)}`);
+  const created = result.body.data as { invitation: { id: string; email: string }; inviteUrl: string };
+  const token = new URL(created.inviteUrl).hash.slice('#token='.length);
+  return { id: created.invitation.id, email: created.invitation.email, token, inviteUrl: created.inviteUrl };
+}
+
+export interface InvitationRecord {
+  id: string;
+  email: string;
+  role: Role;
+  token_hash: string;
+  invited_by: string | null;
+  expires_at: Date;
+  accepted_at: Date | null;
+  accepted_by: string | null;
+  revoked_at: Date | null;
+}
+
+/** The invitation row as stored. */
+export async function invitationRecord(id: string): Promise<InvitationRecord> {
+  return withDb(async (db) => {
+    const { rows } = await db.query<InvitationRecord>(
+      `SELECT id, email, role, token_hash, invited_by, expires_at, accepted_at, accepted_by, revoked_at
+         FROM project_invitations WHERE id = $1`,
+      [id],
+    );
+    if (rows.length !== 1) throw new Error(`No invitation ${id}`);
+    return rows[0];
+  });
+}
+
+/** Every invitation row of a project, as text (each row's JSON), for looking for a value anywhere in it. */
+export async function invitationRowsAsText(projectId: string): Promise<string[]> {
+  return withDb(async (db) => {
+    const { rows } = await db.query<{ row: string }>(
+      `SELECT row_to_json(i)::text AS row FROM project_invitations i WHERE project_id = $1`,
+      [projectId],
+    );
+    return rows.map((r) => r.row);
+  });
+}
+
+/** Moves an invitation's expiry to `interval` from now (`'-1 minute'`, `'2 days'`). */
+export async function setInviteExpiry(id: string, interval: string): Promise<void> {
+  await withDb((db) => db.query(`UPDATE project_invitations SET expires_at = now() + $2::interval WHERE id = $1`, [id, interval]));
+}
+
+/** A staff override of the account's seat limit (null clears it). */
+export async function setSeatLimit(person: Pick<Person, 'userId'>, limit: number | null): Promise<void> {
+  await withDb((db) => db.query('UPDATE users SET seat_limit = $2 WHERE id = $1', [person.userId, limit]));
+}
+
+/** Suspends an account as staff would (and `reactivate` undoes it). */
+export async function suspendAccount(person: Pick<Person, 'userId'>): Promise<void> {
+  await withDb((db) =>
+    db.query(`UPDATE users SET suspended_at = now(), suspended_reason = 'e2e' WHERE id = $1`, [person.userId]),
+  );
+}
+
+export async function reactivateAccount(person: Pick<Person, 'userId'>): Promise<void> {
+  await withDb((db) =>
+    db.query(`UPDATE users SET suspended_at = NULL, suspended_reason = NULL WHERE id = $1`, [person.userId]),
+  );
+}
+
+/** Whether `person` has a member row in the project, and its role. */
+export async function memberRoleIn(projectId: string, person: Pick<Person, 'userId'>): Promise<Role | null> {
+  return withDb(async (db) => {
+    const { rows } = await db.query<{ role: Role }>(
+      'SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2',
+      [projectId, person.userId],
+    );
+    return rows[0]?.role ?? null;
+  });
+}
+
+/** A toast, found by its title, in the notifications region. */
+export function toastTitled(page: Page, title: string): Locator {
+  return page.getByRole('region', { name: /Notifications/ }).locator('li').filter({ hasText: title });
+}
+
+/** The Pending invites card's row for an address. */
+export function pendingInviteRow(page: Page, email: string): Locator {
+  return cardTitled(page, 'Pending invites').getByRole('row').filter({ hasText: email });
+}
+
+/** Opens the project's team activity and waits for a row with `sentence`. */
+export async function expectTeamActivitySentence(page: Page, projectId: string, sentence: string): Promise<void> {
+  await page.goto(`/projects/${projectId}/activity?group=team`);
+  await page.getByRole('cell', { name: sentence, exact: true }).first().waitFor();
 }
