@@ -67,6 +67,22 @@ export async function passwordSession(account: Pick<Account, 'email' | 'password
   return signedIn.tokens.accessToken;
 }
 
+/**
+ * A new session for an account with a second factor: the password, then one of its
+ * recovery codes (spent), through the API. Answers the session's access token.
+ */
+export async function recoveryCodeSession(account: Pick<Account, 'email' | 'password'>, code: string, ip: string): Promise<string> {
+  const first = await ok<{ requiresSecondFactor?: boolean; handle?: string }>(
+    'POST',
+    '/api/auth/login',
+    { email: account.email, password: account.password },
+    { ip },
+  );
+  if (!first.requiresSecondFactor || !first.handle) throw new Error(`login asked for no second factor: ${JSON.stringify(first)}`);
+  const signedIn = await ok<{ tokens: { accessToken: string } }>('POST', '/api/auth/login/recovery-code', { handle: first.handle, code }, { ip });
+  return signedIn.tokens.accessToken;
+}
+
 /** Re-authenticates a session with its password; answers the new access token (and leaves a proof). */
 export async function reauthWithPassword(token: string, password: string, ip: string): Promise<string> {
   return (await ok<{ accessToken: string }>('POST', '/api/auth/reauth', { password }, { token, ip })).accessToken;
