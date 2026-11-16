@@ -73,3 +73,19 @@ export async function identifyPeople(projectId: string, apiKey: string, ip: stri
     );
   }
 }
+
+/**
+ * A campaign's stored recipients (`campaign_recipients`), sorted: `target` for those it
+ * sends to, `control` for an experiment parent's held-back slice. A whole-project
+ * campaign has none. These rows replaced the campaign row's device id lists.
+ */
+export async function campaignRecipients(campaignId: string, role: 'target' | 'control' = 'target'): Promise<string[]> {
+  return withDatabase(async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT device_identity_id AS id FROM campaign_recipients
+        WHERE campaign_id = $1 AND role = $2 ORDER BY device_identity_id`,
+      [campaignId, role],
+    );
+    return rows.map((r) => r.id);
+  });
+}

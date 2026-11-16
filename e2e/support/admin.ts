@@ -12,16 +12,24 @@ export function adminUrl(pathname: string): string {
 }
 
 /**
- * Makes someone a super admin the only way there is: the CLI, from apps/api, against
- * the lane's database (the e2e one; the harness refused any other). globalSetup put the
- * lane's DATABASE_NAME in this process's environment, which wins over the .env.
+ * Makes someone a super admin the only way there is: the CLI (`admin:grant`), from
+ * apps/api, against the lane's database (the e2e one; the harness refused any other).
+ * globalSetup put the lane's DATABASE_NAME in this process's environment, which wins
+ * over the .env. It runs the built script, which globalSetup checked exists: under
+ * `ts-node` each call compiled the script afresh, about 8 s idle and past two minutes
+ * with three lanes running.
  */
 export async function grantSuperAdmin(email: string): Promise<void> {
-  await run('npm', ['run', 'admin:grant', '--', email], {
-    cwd: path.join(REPO_ROOT, 'apps/api'),
-    env: process.env,
-    timeout: 120_000,
-  });
+  try {
+    await run('node', ['dist/scripts/super-admin.js', 'grant', email], {
+      cwd: path.join(REPO_ROOT, 'apps/api'),
+      env: process.env,
+      timeout: 60_000,
+    });
+  } catch (error) {
+    const { stdout = '', stderr = '', killed } = error as { stdout?: string; stderr?: string; killed?: boolean };
+    throw new Error(`admin:grant failed${killed ? ' (timed out)' : ''}: ${`${stdout}\n${stderr}`.trim()}`);
+  }
 }
 
 /**
