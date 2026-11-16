@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { MixpanelApiService } from './mixpanel-api.service';
 import axios from 'axios';
+import { CohortSyncLimitError } from './cohort-sync-limits';
 
 jest.mock('axios');
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -180,6 +181,35 @@ describe('MixpanelApiService', () => {
 
       expect(result).toHaveLength(3);
       expect(mockPost).toHaveBeenCalledTimes(2);
+    });
+
+    it('refuses a cohort larger than the cap as soon as Mixpanel says how large, fetching no further page', async () => {
+      mockPost.mockResolvedValueOnce({
+        data: { status: 'ok', results: [{ $distinct_id: 'u1', $properties: {} }], total: 3, session_id: 's' },
+      });
+
+      await expect(service.getCohortMembers(config, 42, { maxMembers: 2, deadline: Date.now() + 60_000 })).rejects.toThrow(
+        CohortSyncLimitError,
+      );
+      expect(mockPost).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses a cohort whose pages run past the cap even when Mixpanel understates the total', async () => {
+      const page = (ids: string[]) => ({
+        data: { status: 'ok', results: ids.map((id) => ({ $distinct_id: id, $properties: {} })), total: 2, session_id: 's' },
+      });
+      mockPost.mockResolvedValueOnce(page(['u1'])).mockResolvedValueOnce(page(['u2', 'u3']));
+
+      await expect(service.getCohortMembers(config, 42, { maxMembers: 2, deadline: Date.now() + 60_000 })).rejects.toThrow(
+        CohortSyncLimitError,
+      );
+    });
+
+    it('fetches no page once the deadline has passed', async () => {
+      await expect(service.getCohortMembers(config, 42, { maxMembers: 10, deadline: Date.now() - 1 })).rejects.toThrow(
+        /longer than/,
+      );
+      expect(mockPost).not.toHaveBeenCalled();
     });
 
     it('stops pagination when results array is empty', async () => {

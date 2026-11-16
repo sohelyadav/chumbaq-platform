@@ -8,7 +8,11 @@ import { MixpanelCohortSyncService } from '../../modules/mixpanel-cohorts/mixpan
 import { ProjectSuspensionService } from '../../modules/projects/project-suspension.service';
 import { QUEUE_COHORT_SYNC, CohortSyncJobData } from '../queue.constants';
 
-@Processor(QUEUE_COHORT_SYNC, { concurrency: 1 })
+/**
+ * Two slots for every tenant's syncs. Each sync is bounded (cohort-sync-limits.ts) and
+ * the scheduler interleaves projects, so one tenant's cohorts cannot hold the lane for long.
+ */
+@Processor(QUEUE_COHORT_SYNC, { concurrency: 2 })
 export class CohortSyncProcessor extends WorkerHost {
   private readonly logger = new Logger(CohortSyncProcessor.name);
 
@@ -37,20 +41,16 @@ export class CohortSyncProcessor extends WorkerHost {
       return;
     }
 
-    // awaitSync: true makes the queue job actually wait for the sync rather
-    // than reporting success the instant it's kicked off (importCohort's
-    // default fire-and-forget behaviour, kept for the HTTP controller path).
-    await this.syncService.importCohort(cohort.projectId, cohort.mixpanelCohortId, {
-      awaitSync: true,
-    });
-
-    // importCohort awaits runSync but swallows its errors internally (it sets
-    // status='error' rather than rejecting), so re-read the row to see the
-    // real outcome and throw a retryable error on failure — otherwise BullMQ
-    // would never retry a genuine sync failure.
-    const synced = await this.cohortRepository.findOne({ where: { id: cohort.id } });
-    if (synced?.status === 'error') {
-      throw new Error(synced.errorMessage ?? `Sync failed for cohort ${cohort.id}`);
+    const outcome = await this.syncService.syncForJob(cohort.projectId, cohort.mixpanelCohortId);
+    if (outcome.kind === 'busy') {
+      this.logger.log(`Cohort ${cohort.id} is already syncing`);
+      return;
+    }
+    if (outcome.kind === 'failed') {
+      // A cohort past the member cap or the deadline would fail the same way again, and
+      // each try holds a slot every tenant shares; the next hourly tick tries it anyway.
+      if (!outcome.retryable) throw new UnrecoverableError(outcome.message);
+      throw new Error(outcome.message);
     }
 
     this.logger.log(`Re-synced cohort ${cohort.id} (${cohort.name})`);

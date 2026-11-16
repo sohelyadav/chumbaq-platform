@@ -185,6 +185,12 @@ export default function MixpanelCohortDetailPage() {
           </CardContent>
         </Card>
       </div>
+      <p className="text-sm text-muted-foreground">
+        A Mixpanel member is matched to a person when its distinct ID is the user ID your app
+        identifies them with, or when its email is an address that person confirmed from the link
+        we sent and nobody else in this project has. Anything else stays unresolved, so a member
+        can't be claimed by someone who just reports their ID or email from an app.
+      </p>
 
       <Card>
         <CardHeader>

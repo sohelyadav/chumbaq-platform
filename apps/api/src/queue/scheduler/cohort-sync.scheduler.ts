@@ -21,6 +21,13 @@ import { ProjectSuspensionService } from '../../modules/projects/project-suspens
  */
 const STALE_SYNCING_MS = 2 * 60 * 60 * 1000;
 
+/**
+ * Cohort syncs queued per project per hourly tick, stalest first. The rest stay due and
+ * go first next tick. With the per-sync deadline this bounds how much of the shared
+ * lane one tenant takes in an hour, whatever number of cohorts it imports.
+ */
+export const COHORT_SYNCS_PER_PROJECT_PER_TICK = 3;
+
 @Injectable()
 export class CohortSyncScheduler {
   private readonly logger = new Logger(CohortSyncScheduler.name);
@@ -48,8 +55,8 @@ export class CohortSyncScheduler {
    * job's hash alive — so with few enough cohorts every later tick was silently
    * discarded and the sync self-disabled after hour one. The status filter
    * below already excludes cohorts that are in flight, which is the job the
-   * jobId was doing badly; with `concurrency: 1` on the processor, a rare
-   * double-enqueue costs one redundant sync rather than a stampede.
+   * jobId was doing badly; a rare double-enqueue is refused by the sync's own
+   * claim (a cohort already syncing is not synced again).
    */
   async enqueueDueCohorts(): Promise<number> {
     const staleBefore = new Date(Date.now() - STALE_SYNCING_MS);
@@ -60,7 +67,7 @@ export class CohortSyncScheduler {
         // Stranded mid-sync: no worker owns it any more, so re-enqueue it.
         { status: 'syncing', updatedAt: LessThan(staleBefore) },
       ],
-      select: ['id', 'projectId'],
+      select: ['id', 'projectId', 'lastSyncedAt'],
     });
 
     // A sync calls Mixpanel with the tenant's own credentials, against their
@@ -78,12 +85,51 @@ export class CohortSyncScheduler {
         .map((job) => job?.data?.cohortId)
         .filter((id): id is string => typeof id === 'string'),
     );
-    const due = syncable.filter((cohort) => !queued.has(cohort.id));
+    // A project's jobs still waiting from earlier ticks count against its allowance, so a
+    // backed-up queue never holds more than the allowance of any one project's syncs.
+    const waiting = new Map<string, number>();
+    for (const cohort of syncable) {
+      if (queued.has(cohort.id)) waiting.set(cohort.projectId, (waiting.get(cohort.projectId) ?? 0) + 1);
+    }
+    const due = interleaveByProject(
+      syncable.filter((cohort) => !queued.has(cohort.id)),
+      (projectId) => COHORT_SYNCS_PER_PROJECT_PER_TICK - (waiting.get(projectId) ?? 0),
+    );
 
+    // Jobs run in the order added, so one project's cohorts never queue as a block.
     for (const cohort of due) {
       await this.cohortQueue.add(JOB_SYNC_COHORT, { cohortId: cohort.id });
     }
 
     return due.length;
   }
+}
+
+/**
+ * Each project's cohorts stalest first (never synced before any), at most
+ * `allowance(projectId)` of them, taken one per project in turn.
+ */
+export function interleaveByProject<T extends { projectId: string; lastSyncedAt?: Date | null }>(
+  cohorts: T[],
+  allowance: (projectId: string) => number,
+): T[] {
+  const byProject = new Map<string, T[]>();
+  for (const cohort of cohorts) {
+    const list = byProject.get(cohort.projectId) ?? [];
+    list.push(cohort);
+    byProject.set(cohort.projectId, list);
+  }
+  const lists = Array.from(byProject.entries()).map(([projectId, list]) =>
+    list
+      .sort((a, b) => (a.lastSyncedAt?.getTime() ?? -Infinity) - (b.lastSyncedAt?.getTime() ?? -Infinity))
+      .slice(0, Math.max(0, allowance(projectId))),
+  );
+  const out: T[] = [];
+  const rounds = Math.max(0, ...lists.map((list) => list.length));
+  for (let round = 0; round < rounds; round++) {
+    for (const list of lists) {
+      if (round < list.length) out.push(list[round]);
+    }
+  }
+  return out;
 }

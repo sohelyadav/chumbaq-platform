@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import { MixpanelConfigEntity } from './entities/mixpanel-config.entity';
+import { COHORT_MEMBER_CAP, COHORT_SYNC_DEADLINE_MS, cohortSyncTooSlow, cohortTooLarge } from './cohort-sync-limits';
 
 export interface MixpanelCohortInfo {
   id: number;
@@ -87,11 +88,17 @@ export class MixpanelApiService {
 
   /**
    * Fetch all members of a cohort, handling pagination automatically.
-   * Mixpanel returns up to 1000 per page; we loop until done.
+   * Mixpanel returns up to 1000 per page; we loop until done, or until the cohort turns
+   * out larger than `limits.maxMembers` (refused as soon as Mixpanel's total says so)
+   * or `limits.deadline` passes before the next page.
    */
   async getCohortMembers(
     config: { username: string; password: string; mixpanelProjectId: string },
     cohortId: number,
+    limits: { maxMembers: number; deadline: number } = {
+      maxMembers: COHORT_MEMBER_CAP,
+      deadline: Date.now() + COHORT_SYNC_DEADLINE_MS,
+    },
   ): Promise<MixpanelProfile[]> {
     const client = this.buildClient(config.username, config.password);
     const allResults: MixpanelProfile[] = [];
@@ -99,6 +106,7 @@ export class MixpanelApiService {
     let sessionId: string | null = null;
 
     while (true) {
+      if (Date.now() > limits.deadline) throw cohortSyncTooSlow();
       const params = new URLSearchParams();
       params.append('filter_by_cohort', JSON.stringify({ id: cohortId }));
       params.append(
@@ -122,13 +130,16 @@ export class MixpanelApiService {
       }
 
       const results: MixpanelProfile[] = body.results ?? [];
+      const total: number = body.total ?? results.length;
+      if (total > limits.maxMembers || allResults.length + results.length > limits.maxMembers) {
+        throw cohortTooLarge();
+      }
       allResults.push(...results);
 
       if (!sessionId) {
         sessionId = body.session_id;
       }
 
-      const total: number = body.total ?? results.length;
       this.logger.debug(
         `Fetched page ${page} for cohort ${cohortId}: ${results.length} records (${allResults.length}/${total} total)`,
       );

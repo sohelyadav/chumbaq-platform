@@ -6,6 +6,7 @@ import { MixpanelCohortsService } from './mixpanel-cohorts.service';
 import { MixpanelCohortEntity } from './entities/mixpanel-cohort.entity';
 import { MixpanelCohortMemberEntity } from './entities/mixpanel-cohort-member.entity';
 import { DeviceIdentityEntity } from '../identity/entities/device-identity.entity';
+import { cohortTooLarge } from './cohort-sync-limits';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -27,24 +28,6 @@ function makeCohortEntity(overrides: Partial<MixpanelCohortEntity> = {}): Mixpan
     updatedAt: new Date('2024-01-01'),
     ...overrides,
   } as MixpanelCohortEntity;
-}
-
-function makeMemberEntity(
-  overrides: Partial<MixpanelCohortMemberEntity> = {},
-): MixpanelCohortMemberEntity {
-  return {
-    id: 'member-uuid-1',
-    cohortId: 'cohort-uuid-1',
-    projectId: 'proj-1',
-    mixpanelDistinctId: 'user-distinct-1',
-    deviceIdentityId: null,
-    resolvedBy: null,
-    isResolved: false,
-    mixpanelProfile: {},
-    addedAt: new Date('2024-01-01'),
-    cohort: undefined as any,
-    ...overrides,
-  } as MixpanelCohortMemberEntity;
 }
 
 function makeMockRepo() {
@@ -191,7 +174,7 @@ describe('MixpanelCohortSyncService', () => {
       expect(mixpanelApiService.getCohortMembers).not.toHaveBeenCalledTimes(0); // fire-and-forget called
     });
 
-    it('awaits the sync to completion when opts.awaitSync is true', async () => {
+    it('syncForJob waits for the sync and says it synced', async () => {
       mixpanelCohortsService.getDecryptedConfig.mockResolvedValueOnce({
         username: 'u',
         password: 'p',
@@ -205,99 +188,41 @@ describe('MixpanelCohortSyncService', () => {
       const newCohort = makeCohortEntity({ status: 'syncing' });
       cohortRepo.create.mockReturnValueOnce(newCohort);
       cohortRepo.save.mockResolvedValueOnce(newCohort);
-
+      (memberRepo as unknown as { query: jest.Mock }).query = jest.fn().mockResolvedValue([]);
       mixpanelApiService.getCohortMembers.mockResolvedValueOnce([]);
-      cohortRepo.findOne.mockResolvedValueOnce({ ...newCohort, status: 'synced' });
 
-      const result = await service.importCohort('proj-1', 42, { awaitSync: true });
+      const outcome = await service.syncForJob('proj-1', 42);
 
-      // If the sync were still fire-and-forget, getCohortMembers wouldn't have
-      // resolved yet and status would still read 'syncing' at this point.
       expect(mixpanelApiService.getCohortMembers).toHaveBeenCalled();
-      expect(result.status).toBe('synced');
-    });
-  });
-
-  // ---------------------------------------------------------------------------
-  // retryUnresolved
-  // ---------------------------------------------------------------------------
-  describe('retryUnresolved', () => {
-    it('returns { attempted: 0, resolved: 0 } when there are no unresolved members', async () => {
-      memberRepo.find.mockResolvedValueOnce([]);
-
-      const result = await service.retryUnresolved('cohort-uuid-1');
-
-      expect(result).toEqual({ attempted: 0, resolved: 0 });
+      expect(outcome).toEqual({ kind: 'synced' });
+      expect(cohortRepo.update).toHaveBeenCalledWith({ id: newCohort.id }, expect.objectContaining({ status: 'synced' }));
     });
 
-    it('returns attempted equal to the number of unresolved members', async () => {
-      const members = [
-        makeMemberEntity({ mixpanelDistinctId: 'u1' }),
-        makeMemberEntity({ id: 'member-uuid-2', mixpanelDistinctId: 'u2' }),
-      ];
-      memberRepo.find.mockResolvedValueOnce(members);
+    it('syncForJob reports a cohort past the member cap as not worth retrying', async () => {
+      mixpanelCohortsService.getDecryptedConfig.mockResolvedValueOnce({ username: 'u', password: 'p', mixpanelProjectId: 'mp-1' });
+      mixpanelApiService.listCohorts.mockResolvedValueOnce([{ id: 42, name: 'Big', count: 5, created: '2024-01-01' }]);
+      cohortRepo.findOne.mockResolvedValueOnce(null);
+      const newCohort = makeCohortEntity({ status: 'syncing' });
+      cohortRepo.create.mockReturnValueOnce(newCohort);
+      cohortRepo.save.mockResolvedValueOnce(newCohort);
+      mixpanelApiService.getCohortMembers.mockRejectedValueOnce(cohortTooLarge());
 
-      // identityRepo always returns null => unresolved stays unresolved
-      identityRepo.findOne.mockResolvedValue(null);
-      const qb = {
-        where: jest.fn().mockReturnThis(),
-        andWhere: jest.fn().mockReturnThis(),
-        orderBy: jest.fn().mockReturnThis(),
-        take: jest.fn().mockReturnThis(),
-        getMany: jest.fn().mockResolvedValue([]),
-      };
-      identityRepo.createQueryBuilder.mockReturnValue(qb);
+      const outcome = await service.syncForJob('proj-1', 42);
 
-      // member save returns the member as-is (isResolved stays false)
-      memberRepo.findOne.mockResolvedValue(null);
-      const unresolvedMember = makeMemberEntity({ isResolved: false });
-      memberRepo.create.mockReturnValue(unresolvedMember);
-      memberRepo.save.mockResolvedValue(unresolvedMember);
-
-      // cohort update at the end
-      cohortRepo.findOne.mockResolvedValueOnce(makeCohortEntity());
-      memberRepo.count.mockResolvedValue(0);
-      cohortRepo.save.mockResolvedValue(makeCohortEntity());
-
-      const result = await service.retryUnresolved('cohort-uuid-1');
-
-      expect(result.attempted).toBe(2);
+      expect(outcome).toMatchObject({ kind: 'failed', retryable: false });
+      expect(cohortRepo.update).toHaveBeenCalledWith({ id: newCohort.id }, expect.objectContaining({ status: 'error' }));
     });
 
-    it('counts resolved members correctly when identity match is found', async () => {
-      const member = makeMemberEntity({ mixpanelDistinctId: 'u1', mixpanelProfile: {} });
-      memberRepo.find.mockResolvedValueOnce([member]);
+    it('syncForJob reports a Mixpanel failure as worth retrying', async () => {
+      mixpanelCohortsService.getDecryptedConfig.mockResolvedValueOnce({ username: 'u', password: 'p', mixpanelProjectId: 'mp-1' });
+      mixpanelApiService.listCohorts.mockResolvedValueOnce([{ id: 42, name: 'A', count: 5, created: '2024-01-01' }]);
+      cohortRepo.findOne.mockResolvedValueOnce(null);
+      const newCohort = makeCohortEntity({ status: 'syncing' });
+      cohortRepo.create.mockReturnValueOnce(newCohort);
+      cohortRepo.save.mockResolvedValueOnce(newCohort);
+      mixpanelApiService.getCohortMembers.mockRejectedValueOnce(new Error('Mixpanel engage API error: 503'));
 
-      // identityRepo returns an identity for externalUserId lookup
-      const identity = { id: 'identity-uuid-1', projectId: 'proj-1' } as DeviceIdentityEntity;
-      identityRepo.findOne.mockResolvedValueOnce(identity); // externalUserId match
-
-      // memberRepo upsert
-      memberRepo.findOne.mockResolvedValueOnce(member);
-      const resolvedMember = { ...member, isResolved: true, deviceIdentityId: 'identity-uuid-1' };
-      memberRepo.save.mockResolvedValueOnce(resolvedMember as any);
-
-      // cohort update
-      cohortRepo.findOne.mockResolvedValueOnce(makeCohortEntity());
-      memberRepo.count.mockResolvedValue(1);
-      cohortRepo.save.mockResolvedValue(makeCohortEntity());
-
-      const result = await service.retryUnresolved('cohort-uuid-1');
-
-      expect(result.resolved).toBe(1);
-      expect(result.attempted).toBe(1);
-    });
-
-    it('updates cohort resolved and unresolved counts after retry', async () => {
-      memberRepo.find.mockResolvedValueOnce([]);
-
-      memberRepo.count.mockResolvedValueOnce(3).mockResolvedValueOnce(1);
-
-      await service.retryUnresolved('cohort-uuid-1');
-
-      // When there are no unresolved members the counts are still written
-      expect(cohortRepo.update).toHaveBeenCalledWith({ id: 'cohort-uuid-1' }, { resolvedCount: 3, unresolvedCount: 1 });
-      expect(cohortRepo.save).not.toHaveBeenCalled();
+      expect(await service.syncForJob('proj-1', 42)).toMatchObject({ kind: 'failed', retryable: true });
     });
   });
 });

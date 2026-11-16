@@ -3,7 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { getQueueToken } from '@nestjs/bullmq';
 import { In, FindOperator } from 'typeorm';
-import { CohortSyncScheduler } from './cohort-sync.scheduler';
+import { COHORT_SYNCS_PER_PROJECT_PER_TICK, CohortSyncScheduler } from './cohort-sync.scheduler';
 import { MixpanelCohortEntity } from '../../modules/mixpanel-cohorts/entities/mixpanel-cohort.entity';
 import { QUEUE_COHORT_SYNC } from '../queue.constants';
 
@@ -97,6 +97,41 @@ describe('CohortSyncScheduler', () => {
 
     await expect(scheduler.enqueueDueCohorts()).resolves.toBe(0);
     expect(cohortQueue.add).not.toHaveBeenCalled();
+  });
+
+  describe('fairness between projects', () => {
+    const at = (hoursAgo: number) => new Date(Date.UTC(2026, 10, 1) - hoursAgo * HOUR_MS);
+    const added = () => cohortQueue.add.mock.calls.map((call) => (call[1] as { cohortId: string }).cohortId);
+
+    it("queues at most the allowance of one project's cohorts, stalest first, and never as a block", async () => {
+      const big = Array.from({ length: 10 }, (_, i) => ({ id: `big-${i}`, projectId: 'big', lastSyncedAt: at(i) }));
+      cohortRepo.find.mockResolvedValueOnce([
+        ...big,
+        { id: 'small-1', projectId: 'small', lastSyncedAt: at(1) },
+        { id: 'new-1', projectId: 'new', lastSyncedAt: null },
+      ]);
+
+      await scheduler.enqueueDueCohorts();
+
+      expect(COHORT_SYNCS_PER_PROJECT_PER_TICK).toBe(3);
+      // big's three stalest (9, 8, 7 hours), each round taking one per project.
+      expect(added()).toEqual(['big-9', 'small-1', 'new-1', 'big-8', 'big-7']);
+    });
+
+    it("counts a project's jobs still waiting from earlier ticks against its allowance", async () => {
+      cohortRepo.find.mockResolvedValueOnce([
+        { id: 'a-1', projectId: 'a', lastSyncedAt: at(5) },
+        { id: 'a-2', projectId: 'a', lastSyncedAt: at(4) },
+        { id: 'a-3', projectId: 'a', lastSyncedAt: at(3) },
+        { id: 'a-4', projectId: 'a', lastSyncedAt: at(2) },
+        { id: 'b-1', projectId: 'b', lastSyncedAt: at(1) },
+      ]);
+      cohortQueue.getJobs.mockResolvedValueOnce([{ data: { cohortId: 'a-1' } }, { data: { cohortId: 'a-2' } }]);
+
+      await scheduler.enqueueDueCohorts();
+
+      expect(added()).toEqual(['a-3', 'b-1']);
+    });
   });
 
   describe('due-cohort selection', () => {

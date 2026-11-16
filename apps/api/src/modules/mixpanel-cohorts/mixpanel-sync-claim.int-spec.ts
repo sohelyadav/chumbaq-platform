@@ -53,23 +53,23 @@ describe('Starting a Mixpanel cohort sync (integration)', () => {
   it('starts a sync of an idle cohort, renamed and marked syncing', async () => {
     await cohort('synced');
     const { service, api } = build();
-    const result = await service.importCohort(projectId, 9, { awaitSync: true });
+    expect(await service.syncForJob(projectId, 9)).toEqual({ kind: 'synced' });
     expect(api.getCohortMembers).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ name: 'Renamed', status: 'synced' });
+    const [row] = await ds.query(`SELECT name, status FROM mixpanel_cohorts WHERE "projectId" = $1`, [projectId]);
+    expect(row).toMatchObject({ name: 'Renamed', status: 'synced' });
   });
 
   it('does not start a second sync while one is running', async () => {
     await cohort('syncing');
     const { service, api } = build();
-    const result = await service.importCohort(projectId, 9, { awaitSync: true });
+    expect(await service.syncForJob(projectId, 9)).toEqual({ kind: 'busy' });
     expect(api.getCohortMembers).not.toHaveBeenCalled();
-    expect(result.status).toBe('syncing');
   });
 
   it('takes over a sync left syncing for hours by a process that died', async () => {
     await cohort('syncing', '3 hours');
     const { service, api } = build();
-    await service.importCohort(projectId, 9, { awaitSync: true });
+    await service.syncForJob(projectId, 9);
     expect(api.getCohortMembers).toHaveBeenCalledTimes(1);
   });
 });

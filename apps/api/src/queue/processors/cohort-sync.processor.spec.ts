@@ -11,7 +11,7 @@ describe('CohortSyncProcessor', () => {
   let processor: CohortSyncProcessor;
 
   const cohortRepository = { findOne: jest.fn() };
-  const syncService = { importCohort: jest.fn() };
+  const syncService = { syncForJob: jest.fn() };
   const suspension = { isSuspended: jest.fn() };
 
   const makeJob = (data: CohortSyncJobData) =>
@@ -53,28 +53,28 @@ describe('CohortSyncProcessor', () => {
       processor.process(makeJob({ cohortId: 'gone' })),
     ).rejects.toThrow(UnrecoverableError);
 
-    expect(syncService.importCohort).not.toHaveBeenCalled();
+    expect(syncService.syncForJob).not.toHaveBeenCalled();
   });
 
-  it('awaits the sync to completion and does not throw when it lands in status "synced"', async () => {
-    const cohort = makeCohort();
-    cohortRepository.findOne
-      .mockResolvedValueOnce(cohort) // initial lookup
-      .mockResolvedValueOnce({ ...cohort, status: 'synced' }); // re-read after sync
-    syncService.importCohort.mockResolvedValueOnce(cohort);
+  it('waits for the sync and does not throw when it synced', async () => {
+    cohortRepository.findOne.mockResolvedValueOnce(makeCohort());
+    syncService.syncForJob.mockResolvedValueOnce({ kind: 'synced' });
 
     await expect(processor.process(makeJob({ cohortId: 'cohort-1' }))).resolves.toBeUndefined();
 
-    expect(syncService.importCohort).toHaveBeenCalledWith('proj-1', 42, { awaitSync: true });
-    expect(cohortRepository.findOne).toHaveBeenCalledTimes(2);
+    expect(syncService.syncForJob).toHaveBeenCalledWith('proj-1', 42);
   });
 
-  it('throws a retryable (non-Unrecoverable) error carrying the message when the cohort lands in status "error"', async () => {
-    const cohort = makeCohort();
-    cohortRepository.findOne
-      .mockResolvedValueOnce(cohort) // initial lookup
-      .mockResolvedValueOnce({ ...cohort, status: 'error', errorMessage: 'Mixpanel 503' }); // re-read
-    syncService.importCohort.mockResolvedValueOnce(cohort);
+  it('does nothing when another sync of the cohort holds it', async () => {
+    cohortRepository.findOne.mockResolvedValueOnce(makeCohort());
+    syncService.syncForJob.mockResolvedValueOnce({ kind: 'busy' });
+
+    await expect(processor.process(makeJob({ cohortId: 'cohort-1' }))).resolves.toBeUndefined();
+  });
+
+  it('throws a retryable (non-Unrecoverable) error carrying the message when the sync can go differently next time', async () => {
+    cohortRepository.findOne.mockResolvedValueOnce(makeCohort());
+    syncService.syncForJob.mockResolvedValueOnce({ kind: 'failed', message: 'Mixpanel 503', retryable: true });
 
     let caught: unknown;
     try {
@@ -91,6 +91,13 @@ describe('CohortSyncProcessor', () => {
     expect((caught as Error).message).toBe('Mixpanel 503');
   });
 
+  it('does not retry a sync that hit the member cap or the deadline: each try holds a shared slot', async () => {
+    cohortRepository.findOne.mockResolvedValueOnce(makeCohort());
+    syncService.syncForJob.mockResolvedValueOnce({ kind: 'failed', message: 'too large', retryable: false });
+
+    await expect(processor.process(makeJob({ cohortId: 'cohort-1' }))).rejects.toThrow(UnrecoverableError);
+  });
+
   it('does not call Mixpanel for a job queued before its tenant was suspended', async () => {
     cohortRepository.findOne.mockResolvedValue(makeCohort());
     suspension.isSuspended.mockResolvedValue(true);
@@ -98,6 +105,6 @@ describe('CohortSyncProcessor', () => {
     await processor.process(makeJob({ cohortId: 'cohort-1' } as CohortSyncJobData));
 
     expect(suspension.isSuspended).toHaveBeenCalledWith('proj-1');
-    expect(syncService.importCohort).not.toHaveBeenCalled();
+    expect(syncService.syncForJob).not.toHaveBeenCalled();
   });
 });
