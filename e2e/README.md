@@ -62,16 +62,36 @@ lockf -k /tmp/chumbaq-e2e-lane-1.lock env E2E_LANE=1 E2E_SKIP_BUILD=1 npm run te
 The whole suite is quickest split by area folder across the three lanes, each lane
 running its share with the default 3 workers. The split used for the full runs:
 
-| Lane | Areas |
-|---|---|
-| 0 | `auth`, `bill`, `proj`, `smswa`, `integ`, `_helpers` and the top-level specs |
-| 1 | `admauth`, `link`, `admten`, `email`, `admops`, `anly` |
-| 2 | `team`, `ppl`, `acct`, `push`, `seg`, `inapp` |
+| Lane | Areas | Tests |
+|---|---|---:|
+| 0 | `auth`, `bill`, `proj`, `smswa`, `integ`, `_helpers` and the walkthrough specs | 717 |
+| 1 | `admauth`, `link`, `admten`, `email`, `admops`, `anly` | 780 |
+| 2 | `team`, `ppl`, `acct`, `push`, `seg`, `inapp` | 892 |
 
-On a recent laptop each lane takes 7 to 11 minutes, stack start included (lane 0 about
-9.5, lane 1 about 7, lane 2 about 10.5), so the whole suite of 890 tests finishes in
-about 11 minutes with the three lanes side by side, against roughly half an hour on one
-lane. Build once from lane 0 first, then start the three with `E2E_SKIP_BUILD=1`.
+```bash
+lockf -k /tmp/chumbaq-e2e-lane-0.lock env E2E_LANE=0 E2E_SKIP_BUILD=1 npm run test:e2e -- \
+  tests/auth/ tests/bill/ tests/proj/ tests/smswa/ tests/integ/ tests/_helpers/ \
+  tests/auth.spec.ts tests/billing.spec.ts tests/campaigns.spec.ts \
+  tests/projects-links.spec.ts tests/team.spec.ts tests/admin.spec.ts
+lockf -k /tmp/chumbaq-e2e-lane-1.lock env E2E_LANE=1 E2E_SKIP_BUILD=1 npm run test:e2e -- \
+  tests/admauth/ tests/link/ tests/admten/ tests/email/ tests/admops/ tests/anly/
+lockf -k /tmp/chumbaq-e2e-lane-2.lock env E2E_LANE=2 E2E_SKIP_BUILD=1 npm run test:e2e -- \
+  tests/team/ tests/ppl/ tests/acct/ tests/push/ tests/seg/ tests/inapp/
+```
+
+Name the walkthrough specs one by one, as above: `tests/team/` would also match
+`tests/team.spec.ts`, but a bare `tests/team` would run it twice across lanes.
+
+On a recent laptop each lane takes 31 to 34 minutes, stack start included (lane 0 about
+31, lane 1 about 33, lane 2 about 34), so the whole suite of 2,389 tests finishes in
+about 34 minutes with the three lanes side by side. Build once from lane 0 first, then
+start the three with `E2E_SKIP_BUILD=1`.
+
+Three full stacks with nine browsers and their extra API processes keep a laptop busy.
+Under that load a handful of tests (about 1 in 150) can fail on a timeout, a reset
+connection or a slow CLI, and pass when run again on their own. Re-run a failure by
+`file:line` before treating it as real. On a smaller machine, fewer workers per lane
+(`E2E_WORKERS=2`) trade time for fewer of these.
 
 Failures keep a trace and a screenshot under `e2e/.artefacts/test-results/` (open a
 trace with `npx playwright show-trace <path>`); the HTML report is in
@@ -155,32 +175,38 @@ One journey each, end to end, in `tests/` itself:
 ### Area specs
 
 One folder per product area under `tests/<area>/`, split into files of 20 to 40 tests
-(`<area>-p0-01.spec.ts`, ...). Each test is one case and its title starts with the case
-id (`test('LINK-161 ...')`), so a failure names the case. They cover every P0 case of
-each area that the local stack can run.
+(`<area>-p0-01.spec.ts`, `<area>-p1-01.spec.ts`, ...). Each test is one case and its
+title starts with the case id (`test('LINK-161 ...')`), so a failure names the case.
+They cover every P0 and P1 case of each area that the local stack can run. A case is
+sometimes split into two tests with the same id, so a known defect in one step cannot
+hide a regression in the others.
 
-| Folder | Covers | Tests |
-|---|---|---:|
-| `auth` | Customer sign-up (two steps), sign-in and its failure limit, second factors at sign-in, passkeys and autofill, refresh tokens, sessions and their maximum length, password reset, verify email, staff-issued reset links and the cancel page, re-authentication | 81 |
-| `acct` | Account settings: profile, password change, authenticator app and recovery codes, passkeys, sessions and sign-in history, pending factor resets, view-as refusals | 43 |
-| `proj` | Project selector and create (project limit), dashboard, settings, domain proof, delete, read-only roles, suspension, view-as, cross-tenant refusals | 44 |
-| `link` | Link create, edit, delete and bulk import, reserved and released short codes, redirects by platform, interstitial, deep links and deferred match, A/B variants, click export, `.well-known` files, do-not-track on clicks | 70 |
-| `anly` | Project analytics, attribution models, touchpoints and events, roles and cross-project refusals, do-not-track and person objections in ingest | 28 |
-| `ppl` | People list and profile, identify with `userHash`, device handover, consent edits and history, do-not-track, person objections, erasure and export (dashboard and privacy keys) | 51 |
-| `seg` | Audience builder and segment API, materialised audiences, journeys (editor, activation, pause, enrolment from events and segments, waits), suspension | 48 |
-| `push` | FCM configuration, Mi Push, push campaigns (send, schedule, cancel, recurrence, A/B arms), templates, guardrails and frequency cap, token register and unregister, opt-out | 42 |
-| `email` | Email sender settings and provider connect, audience preview, test send, campaigns and their worker sends, double opt-in links, unsubscribe, Resend, Brevo and SES webhooks, suppressions | 45 |
-| `smswa` | SMS (Twilio) and WhatsApp (Meta, Twilio, Gupshup, Interakt) settings, campaigns, test sends, signed and unsigned webhooks, STOP and START, suppressions, erasure | 62 |
-| `inapp` | In-app message campaigns (editor, delivery rules, triggers, cohorts and segments, frequency cap) and widgets (categories, items, serve and click) | 47 |
-| `team` | Members and roles, invitations (create, resend, revoke, accept), seats, billing transfer, activity log and its export | 79 |
-| `integ` | API keys (including privacy keys), identity secret, outbound webhooks (create, rotate, address checks), Mixpanel cohorts | 37 |
-| `bill` | Customer billing page, plans, Checkout, subscription changes and cancel, the Razorpay webhook, invoices, staff plans and prices, comps, the cancel outbox, billing summary, billing off | 52 |
-| `admauth` | Admin app sign-in (passkey, password and second factor, enrolment codes), staff factors, staff sessions and refresh cookie, re-authentication, revocation | 58 |
-| `admten` | Admin overview, tenants list and export, tenant page, usage, project and seat limits, suspension, view-as handoff and exchange, factor resets | 44 |
-| `admops` | Audit log and its export, platform health, incidents, security alerts and the internal alert route, tripwires, security contact | 36 |
+| Folder | Covers | P0 | P1 | Tests |
+|---|---|---:|---:|---:|
+| `auth` | Customer sign-up (two steps), sign-in and its failure limit, second factors at sign-in, passkeys and autofill, refresh tokens, sessions and their maximum length, password reset, verify email, staff-issued reset links and the cancel page, re-authentication, history and route guards, malformed bodies, tripwire addresses | 81 | 93 | 174 |
+| `acct` | Account settings: profile, password change, authenticator app and recovery codes, passkeys (synced and device-bound), sessions and sign-in history, pending factor resets and their banners, view-as refusals | 43 | 60 | 103 |
+| `proj` | Project selector and create (project limit), dashboard, settings and URL fields, domain proof, delete, read-only roles, suspension, view-as, cross-tenant refusals | 44 | 49 | 93 |
+| `link` | Link create, edit, delete and bulk import, list search and tags, reserved and released short codes, redirects by platform and time zone, interstitial and crawlers, deep links and deferred match, A/B variants, click analytics and export, `.well-known` files, do-not-track on clicks | 70 | 110 | 180 |
+| `anly` | Project analytics, attribution models and their ranges, touchpoints and events, roles and cross-project refusals, do-not-track and person objections in ingest, trap API keys | 28 | 58 | 86 |
+| `ppl` | People list (filters, paging) and profile, identify with `userHash`, device handover, consent edits and history, do-not-track, person objections, erasure and export (dashboard and privacy keys), privacy request log | 51 | 81 | 132 |
+| `seg` | Audience builder and segment API, materialised audiences and their refresh, journeys (editor, activation, pause, enrolment from events and segments, waits, channel steps, stranded runs, fairness), suspension | 48 | 107 | 155 |
+| `push` | FCM configuration and test sends, Mi Push and APNs, push campaigns (composer, send, schedule, quiet hours, time-zone waves, cancel, recurrence, A/B arms), templates, reachability, guardrails and frequency cap, token register and unregister, engagement events, opt-out | 42 | 113 | 155 |
+| `email` | Email sender settings and provider connect, audience preview, test send, campaigns and their worker sends, link rewriting, double opt-in links, unsubscribe, Resend, Brevo and SES webhooks, suppressions | 45 | 84 | 129 |
+| `smswa` | SMS (Twilio) and WhatsApp (Meta, Twilio, Gupshup, Interakt) settings, composers and templates, campaigns, test sends, signed and unsigned webhooks, STOP and START, suppressions, erasure | 62 | 103 | 165 |
+| `inapp` | In-app message campaigns (list, editor, templates, delivery rules, triggers, cohorts and segments, frequency caps, detail page) and widgets (editor, categories, items, stories, serve and click, analytics) | 47 | 146 | 193 |
+| `team` | Members and roles, invitations (create, resend, revoke, accept), seats, billing transfer, activity log, its filters and its export | 79 | 75 | 154 |
+| `integ` | API keys (including privacy keys), identity secret, outbound webhooks (create, update, rotate, address checks, caps), Mixpanel configure and cohorts (import, sync, members, push and in-app triggers), conversions | 37 | 56 | 93 |
+| `bill` | Customer billing page, usage bars, billing details, plans, Checkout, subscription changes and cancel, the Razorpay webhook, invoices, staff plans and prices, comps, the cancel outbox, billing summary and tenant card, billing off | 52 | 114 | 166 |
+| `admauth` | Admin app sign-in (passkey, password and second factor, enrolment codes), staff factors, staff sessions and refresh cookie, re-authentication, revocation, new-device alarms, CLI resets | 58 | 72 | 130 |
+| `admten` | Admin overview, tenants list, filters and export, tenant page, usage, project and seat limits, suspension, view-as handoff and exchange, factor resets, staff session limits | 44 | 104 | 148 |
+| `admops` | Audit log, its filters and export, platform health, incidents and reminders, security alerts and the internal alert route, tripwires, security contact | 36 | 71 | 107 |
 
-Totals: 867 tests in the area folders, plus 7 walkthrough tests and 16 in `_helpers`
-(890 in all).
+Totals: 2,363 tests in the area folders (867 for P0 cases, 1,496 for P1), plus 7
+walkthrough tests and 19 in `_helpers` (2,389 in all). 71 of them are known-defect
+tests (`test.fail`, see below). Two are skipped: LINK-211 needs a public webhook
+receiver, and ADMTEN-204 needs account email off. A few more skip themselves when the
+machine cannot run them (no outbound DNS, an address that answers where it should hang,
+an authenticator code two keys share by chance).
 
 **Conventions.** Every test makes its own accounts, projects and client address, so the
 files of a folder run side by side (several use `test.describe.configure({ mode:
@@ -202,12 +228,23 @@ case is written, with a comment saying so.
 They are marked `test.slow()` or set their own timeout. A new case that only needs a
 worker job to have run can call `runJobNow` instead (see "Worker jobs on demand").
 
-**Extra processes.** A few specs start a second API process on the lane's database for
-one config variant, on a port derived from the lane's ports, and stop it when the
-describe block ends: an admin API with `SUPER_ADMIN_PASSKEY_REQUIRED=true` or
-`SUPER_ADMIN_ALLOW_SYNCED_PASSKEYS` set (`admauth`), a customer and an admin API with
-`BILLING_ENABLED=false` (`bill`), and an admin API with `SECURITY_ALERT_TOKEN` set
-(`admops`). The page's requests are routed to it with `page.route`.
+**Extra processes.** Some cases need the API started with one setting changed. They
+start a second customer or admin API on the lane's database, Redis and secrets, route
+the page's requests to it with `page.route`, and stop it when the test or describe
+block ends. The variants in use: an admin API with `SUPER_ADMIN_PASSKEY_REQUIRED=true`,
+without `MFA_ENCRYPTION_KEY`, or with `SECURITY_ALERT_TOKEN` set (`admauth`, `admops`);
+customer APIs with `PASSKEYS_FOR_TENANTS=false`, with account email off, with
+`SUPER_ADMIN_ALLOW_SYNCED_PASSKEYS=false`, with `BULK_EXPORT_ALERT_ROWS=1`, with a
+`TZ` other than the stack's, or with `MAX_SEATS_PER_ACCOUNT` set (`auth`, `acct`,
+`admops`, `link`, `bill`); and customer and admin APIs with `BILLING_ENABLED=false` or
+a tax rate (`bill`). Each area searches its own small range of ports above the lane's
+API or admin API port, below the next lane's. Take a port with `claimPort(portRange(from,
+to))` from `support/processes.ts`, never by checking that nothing listens: two workers
+starting an API at the same moment would pick the same port, one would fail to bind,
+and its health check would be answered by the other's process, which goes away when
+the other test ends. A claim is a file in the system's temporary directory holding the
+worker's pid (a claim left by a dead worker is taken over); release it after stopping
+the process.
 
 ### Area helpers
 
@@ -219,6 +256,25 @@ for the recent-sign-in rule, toast and card locators that still work while a mod
 the page from the accessibility tree, and request recorders and holds (`page.route`) for
 busy states and response bodies the page navigates away from. Prefer a helper from your
 own area's file; copy a small one rather than importing from another area.
+
+Kinds of helper the P1 specs added, to reuse before writing another:
+
+- **Redis readers and expiry** (`auth`, `admauth`): the sign-in attempt counters, and
+  deleting a pre-auth handle or WebAuthn challenge instead of waiting out its 5 minutes.
+- **Tokens and keys made by hand**: an access token re-signed with the run's JWT secret
+  (an expired one, a forged pre-split one), a small software authenticator for
+  registrations Chromium's virtual one will not make (`acct`), and staff passkeys copied
+  between browser contexts over CDP (`admops`).
+- **Time**: rows aged in SQL, `page.clock` for the dashboard's own timers and polling,
+  and worker methods not in `WORKER_JOBS` run the same way `runJobNow` runs them (the
+  push schedule tick and reconcile sweep in `push`, the journey stranded-run sweep in
+  `seg`).
+- **Shared rows**: the single `usage_rollup_state` row is changed only under a session
+  advisory lock (`admten` sets exact values and puts them back; `bill` only widens the
+  counted range); journey ticks run one at a time across workers (`seg`).
+- **Races**: holding a request with `page.route` until a condition, and waiting for a
+  statement to queue on a lock (`pg_stat_activity`) before letting the other side commit
+  (`seg`).
 
 ### Channel seeding and webhook signing
 
@@ -284,7 +340,15 @@ advisory locks, conditional updates). Names (`WORKER_JOBS`): `billing-reconcile`
 
 ## Known gaps
 
-- **P1 and P2 cases are not automated yet.** The area folders hold the P0 cases only.
+- **P2 cases are not automated yet.** The area folders hold the P0 and P1 cases.
+- **Still manual among P0 and P1**, by kind: email content and links that need a look by
+  eye (sign-up, reset, invite and security notice mails, staff notices); real Amazon
+  SES, SNS and STS; real Twilio, Meta, Gupshup, Interakt and Mixpanel accounts; real FCM
+  delivery and devices with both FCM and Mi Push; a public receiver for outbound
+  webhooks and controllable DNS for domain proof and address checks; real phones
+  opening apps from links; real authenticator apps and hardware or platform passkeys;
+  Razorpay Checkout under the production CSP; Redis going away; and deployment checks
+  (production cookie names, security headers, boot refusals, the log bundle).
 - **Chromium only.** WebKit and Firefox are not run yet. WebKit needs its own answer for
   the passkey specs (the virtual authenticator is a Chromium DevTools feature), and the
   phone cases use Chromium with an iPhone or Pixel profile, not Safari.
