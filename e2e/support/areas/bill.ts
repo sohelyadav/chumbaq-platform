@@ -881,22 +881,33 @@ export function utcDay(offsetDays = 0): string {
  * active devices counted from a month that covers it, so seeded `usage_daily` rows for
  * yesterday are what the billing page reads. Only ever moves the counted range out
  * (earlier start, later last closed day), which is what the worker's own ticks do.
- * Answers the day counted through.
+ * Answers the day counted through. The state is one row for the whole database, and the
+ * admten specs set it to exact values and put it back under a session advisory lock, so
+ * this waits for that lock and writes inside it.
  */
 export async function seedRollupThroughYesterday(): Promise<string> {
   const yesterday = utcDay(-1);
-  await query(
-    `INSERT INTO usage_rollup_state (id, started_on, first_day, last_closed_day, devices_through)
-     VALUES (1, $1::date, $2::date, $3::date, now())
-     ON CONFLICT (id) DO UPDATE SET
-       started_on = LEAST(usage_rollup_state.started_on, EXCLUDED.started_on),
-       first_day = LEAST(usage_rollup_state.first_day, EXCLUDED.first_day),
-       last_closed_day = GREATEST(usage_rollup_state.last_closed_day, EXCLUDED.last_closed_day)`,
-    [utcDay(-60), utcDay(-90), yesterday],
-  );
-  const [state] = await query<{ last: string }>(`SELECT to_char(last_closed_day, 'YYYY-MM-DD') AS last FROM usage_rollup_state WHERE id = 1`);
-  if (state.last !== yesterday) throw new Error(`The roll-up has counted through ${state.last}, not yesterday (${yesterday})`);
-  return yesterday;
+  return withDb(async (db) => {
+    await db.query(`SELECT pg_advisory_lock(hashtext('e2e_usage_rollup_state'))`);
+    try {
+      await db.query(
+        `INSERT INTO usage_rollup_state (id, started_on, first_day, last_closed_day, devices_through)
+         VALUES (1, $1::date, $2::date, $3::date, now())
+         ON CONFLICT (id) DO UPDATE SET
+           started_on = LEAST(usage_rollup_state.started_on, EXCLUDED.started_on),
+           first_day = LEAST(usage_rollup_state.first_day, EXCLUDED.first_day),
+           last_closed_day = GREATEST(usage_rollup_state.last_closed_day, EXCLUDED.last_closed_day)`,
+        [utcDay(-60), utcDay(-90), yesterday],
+      );
+      const { rows } = await db.query<{ last: string }>(
+        `SELECT to_char(last_closed_day, 'YYYY-MM-DD') AS last FROM usage_rollup_state WHERE id = 1`,
+      );
+      if (rows[0].last !== yesterday) throw new Error(`The roll-up has counted through ${rows[0].last}, not yesterday (${yesterday})`);
+      return yesterday;
+    } finally {
+      await db.query(`SELECT pg_advisory_unlock(hashtext('e2e_usage_rollup_state'))`);
+    }
+  });
 }
 
 /** The roll-up's coverage as the API reads it (`readUsageCoverage`), or null before it first ran. */
@@ -928,16 +939,10 @@ export async function seedMau(projectId: string, ownerId: string, day: string, v
  * helper starts on + 97.
  */
 export async function startBillingOffApiOnFreePort(): Promise<BillingOffApi> {
-  const { portInUse } = await import('../processes');
+  const { claimPort, portRange } = await import('../processes');
   const ports = stackPorts();
-  let port = 0;
-  for (let candidate = ports.api + 92; candidate <= ports.api + 96; candidate++) {
-    if (!(await portInUse(candidate))) {
-      port = candidate;
-      break;
-    }
-  }
-  if (!port) throw new Error('No free port for a billing-off customer API');
+  const claim = await claimPort(portRange(ports.api + 92, ports.api + 96));
+  const port = claim.port;
   const env = {
     ...process.env,
     ...appEnvironment(runSecrets(), ports),
@@ -949,9 +954,16 @@ export async function startBillingOffApiOnFreePort(): Promise<BillingOffApi> {
     await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
   } catch (error) {
     await stopAll([started]);
+    claim.release();
     throw error;
   }
-  return { url: `http://localhost:${port}`, stop: () => stopAll([started]) };
+  return {
+    url: `http://localhost:${port}`,
+    stop: async () => {
+      await stopAll([started]);
+      claim.release();
+    },
+  };
 }
 
 /** Sends every API request this page makes to another API, as the dev server's proxy would. */
@@ -1111,26 +1123,27 @@ export async function seedUnknownPrice(planCode: string, pricePaise: number): Pr
  * + 92 (the other extra APIs search upwards from + 92).
  */
 export async function startVariantApi(label: string, changes: Record<string, string>): Promise<BillingOffApi> {
-  const { portInUse } = await import('../processes');
+  const { claimPort, portRange } = await import('../processes');
   const ports = stackPorts();
   const taken = new Set(Object.values(ports));
-  let port = 0;
-  for (let candidate = ports.api + 96; candidate >= ports.api + 92; candidate--) {
-    if (!taken.has(candidate) && !(await portInUse(candidate))) {
-      port = candidate;
-      break;
-    }
-  }
-  if (!port) throw new Error('No free port for a variant customer API');
+  const claim = await claimPort(portRange(ports.api + 96, ports.api + 92), taken);
+  const port = claim.port;
   const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ...changes, API_PORT: String(port) };
   const started = run(`api-${label}-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
   try {
     await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
   } catch (error) {
     await stopAll([started]);
+    claim.release();
     throw error;
   }
-  return { url: `http://localhost:${port}`, stop: () => stopAll([started]) };
+  return {
+    url: `http://localhost:${port}`,
+    stop: async () => {
+      await stopAll([started]);
+      claim.release();
+    },
+  };
 }
 
 /** Staff set an account's own project limit (null clears it). */
@@ -1240,26 +1253,27 @@ export async function outboxRow(providerSubscriptionId: string): Promise<{
  * so it can run beside the extra admin API that `startBillingOffAdminApi` starts.
  */
 export async function startVariantAdminApi(label: string, changes: Record<string, string>): Promise<BillingOffApi> {
-  const { portInUse } = await import('../processes');
+  const { claimPort, portRange } = await import('../processes');
   const ports = stackPorts();
   const taken = new Set(Object.values(ports));
-  let port = 0;
-  for (let candidate = ports.adminApi + 70; candidate <= ports.adminApi + 78; candidate++) {
-    if (!taken.has(candidate) && !(await portInUse(candidate))) {
-      port = candidate;
-      break;
-    }
-  }
-  if (!port) throw new Error('No free port for a variant admin API');
+  const claim = await claimPort(portRange(ports.adminApi + 70, ports.adminApi + 78), taken);
+  const port = claim.port;
   const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ...changes, ADMIN_API_PORT: String(port) };
   const started = run(`admin-api-${label}-${port}`, 'node', ['dist/main-admin'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
   try {
     await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
   } catch (error) {
     await stopAll([started]);
+    claim.release();
     throw error;
   }
-  return { url: `http://127.0.0.1:${port}`, stop: () => stopAll([started]) };
+  return {
+    url: `http://127.0.0.1:${port}`,
+    stop: async () => {
+      await stopAll([started]);
+      claim.release();
+    },
+  };
 }
 
 /** Marks an account a super admin (the flag `admin:grant` sets), for a second staff member. */

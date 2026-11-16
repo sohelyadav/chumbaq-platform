@@ -8,7 +8,7 @@ import { adminApi, adminUrl, enrolAndSignInStaff } from '../admin';
 import { api, apiUrl, createAccount, newClientIp, uniqueEmail, type Account } from '../api';
 import { extractLink, waitForMail } from '../mailbox';
 import { nextTotpCode, recoveryCodeItems, settingsCard, totpCode, totpSetupKey, totpStep, type TotpEnrolment } from '../factors';
-import { portInUse, run, stopAll, waitForUrl } from '../processes';
+import { claimPort, portRange, run, stopAll, waitForUrl } from '../processes';
 import { appEnvironment, assertE2eDatabase, assertE2eRedisDb, REPO_ROOT, runSecrets, stackEnv, stackPorts } from '../stack';
 
 /**
@@ -927,23 +927,24 @@ export function withBrokenSignature<T extends { response: { signature: string } 
 export async function startCustomerApiWith(label: string, overrides: Record<string, string>): Promise<ExtraApi> {
   const ports = stackPorts();
   const taken = new Set(Object.values(ports));
-  let port = 0;
-  for (let candidate = ports.api + 92; candidate <= ports.api + 96; candidate++) {
-    if (!taken.has(candidate) && !(await portInUse(candidate))) {
-      port = candidate;
-      break;
-    }
-  }
-  if (!port) throw new Error('No free port for the extra customer API');
+  const claim = await claimPort(portRange(ports.api + 92, ports.api + 96), taken);
+  const port = claim.port;
   const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ...overrides, API_PORT: String(port) };
   const started = run(`api-${label}-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
   try {
     await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
   } catch (error) {
     await stopAll([started]);
+    claim.release();
     throw error;
   }
-  return { url: `http://localhost:${port}`, stop: () => stopAll([started]) };
+  return {
+    url: `http://localhost:${port}`,
+    stop: async () => {
+      await stopAll([started]);
+      claim.release();
+    },
+  };
 }
 
 /**

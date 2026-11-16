@@ -5,7 +5,7 @@ import type { Locator, Page } from '@playwright/test';
 import { adminUrl, enrolAndSignInStaff } from '../admin';
 import { api, apiUrl, createAccount, newClientIp, type Account } from '../api';
 import { addAuthenticator, type VirtualAuthenticator } from '../factors';
-import { portInUse, run, stopAll, waitForUrl, type Started } from '../processes';
+import { claimPort, portRange, run, stopAll, waitForUrl, type Started } from '../processes';
 import { appEnvironment, assertE2eDatabase, REPO_ROOT, runSecrets, stackEnv, stackPorts } from '../stack';
 
 /**
@@ -402,14 +402,8 @@ export interface ExtraAdminApi {
  */
 export async function startAlarmTokenAdminApi(): Promise<ExtraAdminApi> {
   const ports = stackPorts();
-  let port = 0;
-  for (let candidate = ports.adminApi + 60; candidate < ports.adminApi + 70; candidate++) {
-    if (!(await portInUse(candidate))) {
-      port = candidate;
-      break;
-    }
-  }
-  if (!port) throw new Error('No free port for the alarm-token admin API');
+  const claim = await claimPort(portRange(ports.adminApi + 60, ports.adminApi + 69));
+  const port = claim.port;
   const token = `e2e-alarm-${randomBytes(16).toString('hex')}`;
   const env = {
     ...process.env,
@@ -426,9 +420,17 @@ export async function startAlarmTokenAdminApi(): Promise<ExtraAdminApi> {
     await waitForUrl(started, `${url}/api/health`);
   } catch (error) {
     await stopAll([started]);
+    claim.release();
     throw error;
   }
-  return { url, token, stop: () => stopAll([started]) };
+  return {
+    url,
+    token,
+    stop: async () => {
+      await stopAll([started]);
+      claim.release();
+    },
+  };
 }
 
 /**
@@ -539,14 +541,8 @@ export async function startAdminApiWith(
 ): Promise<{ url: string; stop(): Promise<void> }> {
   if (firstOffset < 70 || firstOffset + 5 > 80) throw new Error(`Offset ${firstOffset} is outside 70..79`);
   const ports = stackPorts();
-  let port = 0;
-  for (let candidate = ports.adminApi + firstOffset; candidate < ports.adminApi + firstOffset + 5; candidate++) {
-    if (!(await portInUse(candidate))) {
-      port = candidate;
-      break;
-    }
-  }
-  if (!port) throw new Error(`No free port for the ${label} admin API`);
+  const claim = await claimPort(portRange(ports.adminApi + firstOffset, ports.adminApi + firstOffset + 4));
+  const port = claim.port;
   const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ADMIN_API_PORT: String(port), ...extra };
   const started: Started = run(`admin-api-${label}-${port}`, 'node', ['dist/main-admin'], {
     cwd: path.join(REPO_ROOT, 'apps/api'),
@@ -557,9 +553,16 @@ export async function startAdminApiWith(
     await waitForUrl(started, `${url}/api/health`);
   } catch (error) {
     await stopAll([started]);
+    claim.release();
     throw error;
   }
-  return { url, stop: () => stopAll([started]) };
+  return {
+    url,
+    stop: async () => {
+      await stopAll([started]);
+      claim.release();
+    },
+  };
 }
 
 /** Sends every request of a page under an admin API path prefix to another admin API. */
@@ -625,14 +628,8 @@ export function cardTitled(page: Page, title: string): Locator {
 export async function startExtraAdminApi(extra: Record<string, string>, label: string): Promise<{ url: string; stop(): Promise<void> }> {
   const ports = stackPorts();
   const taken = new Set(Object.values(ports));
-  let port = 0;
-  for (let candidate = ports.adminApi + 30; candidate < ports.adminApi + 40; candidate++) {
-    if (!taken.has(candidate) && !(await portInUse(candidate))) {
-      port = candidate;
-      break;
-    }
-  }
-  if (!port) throw new Error(`No free port for the ${label} admin API`);
+  const claim = await claimPort(portRange(ports.adminApi + 30, ports.adminApi + 39), taken);
+  const port = claim.port;
   const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ADMIN_API_PORT: String(port), ...extra };
   const started: Started = run(`admin-api-${label}-${port}`, 'node', ['dist/main-admin'], {
     cwd: path.join(REPO_ROOT, 'apps/api'),
@@ -643,9 +640,16 @@ export async function startExtraAdminApi(extra: Record<string, string>, label: s
     await waitForUrl(started, `${url}/api/health`);
   } catch (error) {
     await stopAll([started]);
+    claim.release();
     throw error;
   }
-  return { url, stop: () => stopAll([started]) };
+  return {
+    url,
+    stop: async () => {
+      await stopAll([started]);
+      claim.release();
+    },
+  };
 }
 
 /**
@@ -655,14 +659,8 @@ export async function startExtraAdminApi(extra: Record<string, string>, label: s
 export async function startCustomerApiWith(extra: Record<string, string>, label: string): Promise<{ url: string; stop(): Promise<void> }> {
   const ports = stackPorts();
   const taken = new Set(Object.values(ports));
-  let port = 0;
-  for (let candidate = ports.api + 92; candidate <= ports.api + 96; candidate++) {
-    if (!taken.has(candidate) && !(await portInUse(candidate))) {
-      port = candidate;
-      break;
-    }
-  }
-  if (!port) throw new Error(`No free port for the ${label} customer API`);
+  const claim = await claimPort(portRange(ports.api + 92, ports.api + 96), taken);
+  const port = claim.port;
   const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ...extra, API_PORT: String(port) };
   const started: Started = run(`api-${label}-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
   const url = `http://127.0.0.1:${port}`;
@@ -670,9 +668,16 @@ export async function startCustomerApiWith(extra: Record<string, string>, label:
     await waitForUrl(started, `${url}/api/health`);
   } catch (error) {
     await stopAll([started]);
+    claim.release();
     throw error;
   }
-  return { url, stop: () => stopAll([started]) };
+  return {
+    url,
+    stop: async () => {
+      await stopAll([started]);
+      claim.release();
+    },
+  };
 }
 
 /** The validation messages of an error body, as a list. */

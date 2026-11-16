@@ -1,8 +1,9 @@
 import { ChildProcess, spawn, spawnSync } from 'child_process';
-import { createWriteStream, mkdirSync } from 'fs';
+import { closeSync, createWriteStream, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from 'fs';
 import http from 'http';
 import https from 'https';
 import net from 'net';
+import os from 'os';
 import path from 'path';
 import { LOG_DIR } from './stack';
 
@@ -89,6 +90,85 @@ export function portInUse(port: number): Promise<boolean> {
       socket.once('error', () => resolve(false));
     });
   return Promise.all([tryHost('127.0.0.1'), tryHost('::1')]).then((answers) => answers.some(Boolean));
+}
+
+/** A port held for one extra process; `release` gives it back once the process is stopped. */
+export interface PortClaim {
+  port: number;
+  release(): void;
+}
+
+const PORT_CLAIMS_DIR = path.join(os.tmpdir(), 'chumbaq-e2e-ports');
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Creates the claim file for `port` (holding this worker's pid), or answers false if a live worker holds it. */
+function takeClaimFile(file: string): boolean {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(file, 'wx');
+      writeSync(fd, String(process.pid));
+      closeSync(fd);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const holder = Number(readFileSync(file, 'utf8').trim());
+      if (holder && processAlive(holder)) return false;
+      // Left by a worker that has gone (a run that died): take it over.
+      try {
+        unlinkSync(file);
+      } catch {
+        // Another worker removed it first; try again.
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * The first port of `candidates` (not in `skip`) that is free and that no other worker
+ * of any run on this machine has claimed. Checking only that nothing listens is not
+ * enough: two workers starting an extra API at the same moment would both pick the same
+ * port, one would fail to bind, and its health check would be answered by the other's
+ * process, which then goes away when that test stops it. The claim is a file created
+ * exclusively, holding the worker's pid, so a claim left by a dead worker is taken over.
+ */
+export async function claimPort(candidates: readonly number[], skip: Iterable<number> = []): Promise<PortClaim> {
+  mkdirSync(PORT_CLAIMS_DIR, { recursive: true });
+  const skipped = new Set(skip);
+  for (const port of candidates) {
+    if (skipped.has(port)) continue;
+    const file = path.join(PORT_CLAIMS_DIR, `${port}.claim`);
+    if (!takeClaimFile(file)) continue;
+    const release = () => {
+      try {
+        unlinkSync(file);
+      } catch {
+        // Already gone.
+      }
+    };
+    if (await portInUse(port)) {
+      release();
+      continue;
+    }
+    return { port, release };
+  }
+  throw new Error(`No free port among ${candidates.join(', ')}`);
+}
+
+/** The whole numbers from `from` to `to`, both included, counting down when `to` is smaller. */
+export function portRange(from: number, to: number): number[] {
+  const step = to >= from ? 1 : -1;
+  const out: number[] = [];
+  for (let port = from; step > 0 ? port <= to : port >= to; port += step) out.push(port);
+  return out;
 }
 
 function get(url: string): Promise<number> {

@@ -9,7 +9,7 @@ import { issueStaffEnrolmentAllowance } from '../../../apps/api/src/modules/auth
 import { createAccount, newClientIp, type Account } from '../api';
 import { adminUrl } from '../admin';
 import { addAuthenticator, totpCode, totpStep, type TotpEnrolment, type VirtualAuthenticator } from '../factors';
-import { portInUse, run, stopAll, waitForUrl, type Started } from '../processes';
+import { claimPort, portRange, run, stopAll, waitForUrl, type Started } from '../processes';
 import { appEnvironment, assertE2eDatabase, REPO_ROOT, runSecrets, stackEnv, stackPorts } from '../stack';
 
 /**
@@ -395,14 +395,8 @@ export interface ExtraAdminApi {
  */
 export async function startPasskeyRequiredAdminApi(): Promise<ExtraAdminApi> {
   const ports = stackPorts();
-  let port = 0;
-  for (let candidate = ports.adminApi + 40; candidate < ports.adminApi + 50; candidate++) {
-    if (!(await portInUse(candidate))) {
-      port = candidate;
-      break;
-    }
-  }
-  if (!port) throw new Error('No free port for the passkey-required admin API');
+  const claim = await claimPort(portRange(ports.adminApi + 40, ports.adminApi + 49));
+  const port = claim.port;
   const env = {
     ...process.env,
     ...appEnvironment(runSecrets(), ports),
@@ -418,9 +412,16 @@ export async function startPasskeyRequiredAdminApi(): Promise<ExtraAdminApi> {
     await waitForUrl(started, `${url}/api/health`);
   } catch (error) {
     await stopAll([started]);
+    claim.release();
     throw error;
   }
-  return { url, stop: () => stopAll([started]) };
+  return {
+    url,
+    stop: async () => {
+      await stopAll([started]);
+      claim.release();
+    },
+  };
 }
 
 /** Sends a page's requests for these admin API paths to another admin API, as the admin app's proxy would. */
@@ -500,14 +501,8 @@ export async function revokeStaffWithCli(email: string): Promise<void> {
  */
 export async function startAdminApiWith(extra: Record<string, string>, label: string): Promise<ExtraAdminApi> {
   const ports = stackPorts();
-  let port = 0;
-  for (let candidate = ports.adminApi + 50; candidate < ports.adminApi + 70; candidate++) {
-    if (!(await portInUse(candidate))) {
-      port = candidate;
-      break;
-    }
-  }
-  if (!port) throw new Error(`No free port for the ${label} admin API`);
+  const claim = await claimPort(portRange(ports.adminApi + 50, ports.adminApi + 69));
+  const port = claim.port;
   const env = { ...process.env, ...appEnvironment(runSecrets(), ports), ADMIN_API_PORT: String(port), ...extra };
   const started: Started = run(`admin-api-${label}-${port}`, 'node', ['dist/main-admin'], {
     cwd: path.join(REPO_ROOT, 'apps/api'),
@@ -518,9 +513,16 @@ export async function startAdminApiWith(extra: Record<string, string>, label: st
     await waitForUrl(started, `${url}/api/health`);
   } catch (error) {
     await stopAll([started]);
+    claim.release();
     throw error;
   }
-  return { url, stop: () => stopAll([started]) };
+  return {
+    url,
+    stop: async () => {
+      await stopAll([started]);
+      claim.release();
+    },
+  };
 }
 
 /** Sends every request of a page under an admin API path prefix to another admin API. */

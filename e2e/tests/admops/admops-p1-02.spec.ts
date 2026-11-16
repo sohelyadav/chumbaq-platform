@@ -261,6 +261,14 @@ test('ADMOPS-102 repeats within 15 minutes add to one alarm; later ones start a 
     { old: false, count: 1 },
   ]);
 
+  // The page lists the 50 alarms that started last. Other specs on the lane raise alarms
+  // too, so in a full run the one seeded 16 minutes back can fall outside those 50: ask
+  // for the API's maximum instead, so both of this trap's alarms are in the list.
+  await page.route('**/api/admin/security-alerts?*', async (route) => {
+    const url = new URL(route.request().url());
+    url.searchParams.set('limit', '500');
+    await route.continue({ url: url.toString() });
+  });
   await signedInStaff(page, clientIp);
   await openAdminPage(page, '/incidents', RECORD_HEADING);
   await expect(alarmListRow(page, `label: ${label}, route:`).getByText('×3', { exact: true })).toBeVisible();

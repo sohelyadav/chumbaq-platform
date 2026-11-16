@@ -714,27 +714,31 @@ export interface ExtraApi {
 /**
  * A second customer API on the lane's database and secrets with `TZ` set, for the cases
  * about how a zone-less expiry is read. On the first free port from the API port + 20 to
- * + 29 (nothing else in the harness uses that range); a process that could not bind its
- * port is not taken for the answer of another.
+ * + 29 (nothing else in the harness uses that range), claimed so that two at once never
+ * share one.
  */
 export async function startApiInZone(timeZone: string): Promise<ExtraApi> {
-  const { portInUse, run, stopAll, waitForUrl } = await import('../processes');
+  const { claimPort, portRange, run, stopAll, waitForUrl } = await import('../processes');
   const { appEnvironment, runSecrets, stackPorts } = await import('../stack');
   const ports = stackPorts();
-  for (let port = ports.api + 20; port <= ports.api + 29; port++) {
-    if (await portInUse(port)) continue;
-    const env = { ...process.env, ...appEnvironment(runSecrets(), ports), API_PORT: String(port), TZ: timeZone };
-    const started = run(`api-tz-${timeZone.replace(/\W+/g, '-')}-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
-    try {
-      await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
-    } catch {
-      await stopAll([started]);
-      continue;
-    }
-    if (started.child.exitCode !== null || started.child.signalCode !== null) continue;
-    return { url: `http://localhost:${port}`, stop: () => stopAll([started]) };
+  const claim = await claimPort(portRange(ports.api + 20, ports.api + 29));
+  const port = claim.port;
+  const env = { ...process.env, ...appEnvironment(runSecrets(), ports), API_PORT: String(port), TZ: timeZone };
+  const started = run(`api-tz-${timeZone.replace(/\W+/g, '-')}-${port}`, 'node', ['dist/main'], { cwd: path.join(REPO_ROOT, 'apps/api'), env });
+  try {
+    await waitForUrl(started, `http://127.0.0.1:${port}/api/health`);
+  } catch (error) {
+    await stopAll([started]);
+    claim.release();
+    throw error;
   }
-  throw new Error(`No free port for an API in ${timeZone}`);
+  return {
+    url: `http://localhost:${port}`,
+    stop: async () => {
+      await stopAll([started]);
+      claim.release();
+    },
+  };
 }
 
 /** Sends every API request the page makes to another API, as the dev server's proxy would. */

@@ -182,6 +182,9 @@ test('ADMTEN-010 Overview is the landing page and the sidebar marks it', async (
 
 test('ADMTEN-012 load failure shows "Could not load the overview." and Try again recovers', async ({ page, clientIp }) => {
   await signedInStaff(page, clientIp);
+  // Leave the landing page first: its own overview request can start after the route is
+  // set up, and counting it would let the second failure land on the next page's retry.
+  await page.goto('about:blank');
   let calls = 0;
   await page.route('**/api/admin/overview', async (route) => {
     calls++;
