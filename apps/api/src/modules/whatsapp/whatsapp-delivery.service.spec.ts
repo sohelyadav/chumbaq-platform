@@ -16,7 +16,7 @@ const content = {
 const log = (over: Record<string, unknown> = {}) =>
   ({
     id: 'camp-1', projectId: 'proj-1', channel: 'whatsapp', whatsappContent: content,
-    targetType: 'project', targetDeviceIds: null, totalTokens: 2, processedTokens: 0, lastTokenId: null,
+    targetType: 'project', totalTokens: 2, processedTokens: 0, lastTokenId: null,
     ...over,
   }) as never;
 

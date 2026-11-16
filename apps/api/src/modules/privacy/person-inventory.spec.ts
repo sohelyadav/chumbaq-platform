@@ -101,7 +101,7 @@ describe('person inventory', () => {
    * the inventory, or this fails when it is found in an entity.
    */
   it('scrubs every jsonb column known to hold person references', () => {
-    const PERSON_JSONB = ['target_device_ids', 'control_device_ids', 'failure_details'];
+    const PERSON_JSONB = ['failure_details'];
     const erases = PERSON_INVENTORY.map((e) => (typeof e.erase === 'function' ? e.erase(eraseWhere(e)) : '')).join('\n');
     for (const column of PERSON_JSONB) {
       expect([column, new RegExp(`${column} = `).test(erases)]).toEqual([column, true]);
@@ -123,7 +123,7 @@ describe('person inventory', () => {
     };
     walk(path.join(__dirname, '..'));
     expect([...found].filter((c) => !PERSON_JSONB.includes(c)).sort()).toEqual([]);
-    expect(found.size).toBeGreaterThanOrEqual(3);
+    expect(found.size).toBeGreaterThanOrEqual(1);
   });
 
   it('binds only the tokens a statement uses, as typed positional parameters', () => {

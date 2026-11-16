@@ -7,6 +7,7 @@ import { PushNotificationEventEntity } from './entities/push-notification-event.
 import { PushTemplateEntity } from './entities/push-template.entity';
 import { PushChannelCredentialEntity } from './entities/push-channel-credential.entity';
 import { ChannelSuppressionEntity } from './entities/channel-suppression.entity';
+import { CampaignRecipientEntity } from './entities/campaign-recipient.entity';
 import { SuppressionsService } from './suppressions.service';
 import { ProjectSuspensionModule } from '../projects/project-suspension.module';
 import { ErasedSuppressionsModule } from '../privacy/erased-suppressions.module';
@@ -37,6 +38,7 @@ import { QUEUE_PUSH_CAMPAIGN } from '../../queue/queue.constants';
       PushTemplateEntity,
       PushChannelCredentialEntity,
       ChannelSuppressionEntity,
+      CampaignRecipientEntity,
     ]),
     BullModule.registerQueue({ name: QUEUE_PUSH_CAMPAIGN }),
     PushTokensModule,

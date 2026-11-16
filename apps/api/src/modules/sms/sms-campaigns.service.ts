@@ -10,6 +10,7 @@ import {
   type ActivityRequester,
 } from '../project-activity/messaging-activity';
 import { saveCampaign } from '../push-notifications/save-campaign';
+import { Recipients, countRecipientsBy, deviceList } from '../push-notifications/recipients';
 import { PushNotificationLogEntity } from '../push-notifications/entities/push-notification-log.entity';
 import { PushConfigEntity } from '../push-notifications/entities/push-config.entity';
 import { PushNotificationsService } from '../push-notifications/push-notifications.service';
@@ -75,25 +76,26 @@ export class SmsCampaignsService {
     const cap = policy?.frequencyCapPerDay ?? null;
 
     let targetType: 'project' | 'devices' | 'segment' = 'project';
-    let deviceIdentityIds: string[] | null = null;
+    let recipients: Recipients | null = null;
 
     if (input.segmentId) {
       targetType = 'segment';
-      deviceIdentityIds = await this.push.segmentDeviceIdentityIds(
-        input.projectId,
-        input.segmentId,
-      );
+      recipients = await this.push.segmentRecipients(input.projectId, input.segmentId);
     } else if (input.deviceIdentityIds && input.deviceIdentityIds.length > 0) {
       targetType = 'devices';
-      deviceIdentityIds = input.deviceIdentityIds;
+      recipients = deviceList(input.deviceIdentityIds);
     }
 
     const scope: AddressAudienceScope = {
       projectId: input.projectId,
-      deviceIdentityIds,
+      recipients,
       requireOptIn,
     };
-    return { targetType, scope, recipients: await this.audience.count(scope, cap) };
+    // A segment is staged and counted there, never read through its query per row.
+    const count = await countRecipientsBy(this.logRepository.manager, input.projectId, recipients, (r, manager) =>
+      this.audience.count({ ...scope, recipients: r }, cap, manager),
+    );
+    return { targetType, scope, recipients: count };
   }
 
   async previewAudience(dto: SmsAudiencePreviewDto): Promise<{
@@ -183,7 +185,6 @@ export class SmsCampaignsService {
         body: dto.body,
         data: undefined,
         targetType,
-        targetDeviceIds: scope.deviceIdentityIds,
         segmentId: dto.segmentId ?? null,
         totalTokens: recipients,
         processedTokens: 0,
@@ -208,6 +209,7 @@ export class SmsCampaignsService {
         requester,
         entry: (saved) => campaignEntry(saved, heldOrSent(saved)),
       },
+      scope.recipients,
     );
 
     if (isScheduled) {

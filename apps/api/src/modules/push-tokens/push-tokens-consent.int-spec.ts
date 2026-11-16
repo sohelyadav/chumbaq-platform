@@ -8,6 +8,8 @@ import {
   seedPerson,
   INT_PROJECT_ID,
 } from '../../test-support/int-db';
+import { allPushAudienceIds, pushAudienceByTimezone } from '../../test-support/audience-pages';
+import { deviceList } from '../push-notifications/recipients';
 
 const OPTED_IN = 'eeeeeeee-0000-0000-0000-000000000001';
 const NEVER_SAID = 'eeeeeeee-0000-0000-0000-000000000002';
@@ -82,12 +84,12 @@ describe('PushTokensService and push opt-out (integration)', () => {
   });
 
   it('leaves it out of the audiences arms and waves are split over', async () => {
-    expect((await service.listDeviceIdentityIds({ projectId: INT_PROJECT_ID })).sort()).toEqual(
+    expect((await allPushAudienceIds(service, { projectId: INT_PROJECT_ID, recipients: null })).sort()).toEqual(
       [OPTED_IN, NEVER_SAID, SAME_PERSON_TABLET].sort(),
     );
-    expect(await service.listDeviceIdentityIds({ projectId: INT_PROJECT_ID, deviceIdentityIds: [OPTED_OUT] })).toEqual([]);
+    expect(await allPushAudienceIds(service, { projectId: INT_PROJECT_ID, recipients: deviceList([OPTED_OUT]) })).toEqual([]);
 
-    const waves = await service.groupDeviceIdentitiesByTimezone({ projectId: INT_PROJECT_ID, deviceIdentityIds: all }, 'UTC');
+    const waves = await pushAudienceByTimezone(service, { projectId: INT_PROJECT_ID, recipients: deviceList(all) }, 'UTC');
     expect([...waves.values()].flat().sort()).toEqual([OPTED_IN, NEVER_SAID, SAME_PERSON_TABLET].sort());
   });
 

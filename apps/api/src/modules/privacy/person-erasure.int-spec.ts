@@ -326,9 +326,11 @@ describe('PersonErasureService and PersonExportService (integration)', () => {
       );
     }
 
+    await q(`UPDATE push_notification_logs SET target_type = 'devices' WHERE id = $1`, [containers.A.campaign]);
     await q(
-      `UPDATE push_notification_logs SET target_type = 'devices', target_device_ids = $2::jsonb, control_device_ids = $3::jsonb WHERE id = $1`,
-      [containers.A.campaign, JSON.stringify([ALICE_1, BOB]), JSON.stringify([ALICE_2])],
+      `INSERT INTO campaign_recipients (campaign_id, role, device_identity_id)
+       VALUES ($1, 'target', $2), ($1, 'target', $3), ($1, 'control', $4)`,
+      [containers.A.campaign, ALICE_1, BOB, ALICE_2],
     );
   });
 
@@ -360,7 +362,10 @@ describe('PersonErasureService and PersonExportService (integration)', () => {
     expect(result.counts.user_events).toBe(3); // two devices, and the orphan under the verified id
     expect(result.notErased).toEqual(NOT_ERASED);
     expect(result.counts.click_events).toBe(2);
-    expect(result.counts.push_notification_logs).toBe(1);
+    // The campaign row names Alice only as a recipient, which is campaign_recipients
+    // rows now (two: a target and the control), so the row itself is not touched.
+    expect(result.counts.push_notification_logs).toBe(0);
+    expect(result.counts.campaign_recipients).toBe(2);
     // Consent history goes with the devices, and is counted; the person's
     // do-not-track objection goes too, Bob's and project B's stay.
     expect(result.counts.consent_events).toBe(4);
@@ -369,14 +374,16 @@ describe('PersonErasureService and PersonExportService (integration)', () => {
     expect(result.counts.monthly_active_devices).toBe(2);
   });
 
-  it('takes the person out of campaign target and control lists, keeping the campaign and others', async () => {
-    await erasure.erase(A, { type: 'externalUserId', value: 'user-42' }, ACTOR, CTX);
-    const [campaign] = await q(
-      'SELECT target_device_ids, control_device_ids FROM push_notification_logs WHERE id = $1',
+  it('takes the person out of campaign targets and control, keeping the campaign and others', async () => {
+    const result = await erasure.erase(A, { type: 'externalUserId', value: 'user-42' }, ACTOR, CTX);
+    const rows = await q(
+      'SELECT role, device_identity_id FROM campaign_recipients WHERE campaign_id = $1 ORDER BY role',
       [containers.A.campaign],
     );
-    expect(campaign.target_device_ids).toEqual([BOB]);
-    expect(campaign.control_device_ids).toEqual([]);
+    expect(rows).toEqual([{ role: 'target', device_identity_id: BOB }]);
+    expect(result.counts.campaign_recipients).toBe(2);
+    const [campaign] = await q('SELECT id FROM push_notification_logs WHERE id = $1', [containers.A.campaign]);
+    expect(campaign).toBeDefined();
   });
 
   it('erasing one device of an identified user erases the whole user', async () => {
@@ -897,7 +904,8 @@ describe('PersonErasureService and PersonExportService (integration)', () => {
     const result = await erasure.erase(A, { type: 'externalUserId', value: 'user-42' }, ACTOR, CTX);
     const [row] = await q('SELECT failure_details FROM push_notification_logs WHERE id = $1', [other.id]);
     expect(row.failure_details).toEqual([]);
-    expect(result.counts.push_notification_logs).toBe(2);
+    // Only this one: campaign A names her as a recipient alone (campaign_recipients).
+    expect(result.counts.push_notification_logs).toBe(1);
   });
 
   it('a kept clear suppression gets no hash, so a resubscribe is not undone later', async () => {

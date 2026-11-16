@@ -20,6 +20,7 @@ import { WhatsAppSettingsService } from './whatsapp-settings.service';
 import { WhatsAppProviderRegistry } from './whatsapp-provider.registry';
 import { renderWhatsApp, WhatsAppMessage } from './whatsapp-rendering';
 import { yieldForPacing } from '../../queue/campaign-pacing';
+import { storedRecipients } from '../push-notifications/recipients';
 
 /** Recipients per page: one HTTP call each, as for email and SMS. */
 export const WHATSAPP_BATCH_SIZE = 100;
@@ -71,7 +72,7 @@ export class WhatsAppDeliveryService {
 
     const scope = {
       projectId: log.projectId,
-      deviceIdentityIds: log.targetType === 'project' ? null : (log.targetDeviceIds ?? []),
+      recipients: log.targetType === 'project' ? null : storedRecipients(log.id),
       requireOptIn: settings.requireOptIn,
     };
 

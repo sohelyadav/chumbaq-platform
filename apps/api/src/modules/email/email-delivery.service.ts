@@ -25,6 +25,7 @@ import {
   renderEmail,
 } from './email-rendering';
 import { yieldForPacing } from '../../queue/campaign-pacing';
+import { storedRecipients } from '../push-notifications/recipients';
 
 /**
  * Recipients per page. Smaller than push's 500: each email is its own HTTP
@@ -92,7 +93,7 @@ export class EmailDeliveryService {
       // Only `project` fans out; any other target type is narrowed to its
       // stored list, and a missing list reaches nobody. Same rule, and same
       // reason, as the push token reader.
-      deviceIdentityIds: log.targetType === 'project' ? null : (log.targetDeviceIds ?? []),
+      recipients: log.targetType === 'project' ? null : storedRecipients(log.id),
       requireOptIn: settings.requireOptIn,
     };
 

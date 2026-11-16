@@ -15,7 +15,6 @@ const log = (over: Record<string, unknown> = {}) =>
     channel: 'sms',
     body: 'Hi {{firstName}}, sale today',
     targetType: 'project',
-    targetDeviceIds: null,
     totalTokens: 3,
     processedTokens: 0,
     lastTokenId: null,
@@ -97,10 +96,11 @@ describe('SmsDeliveryService', () => {
 
   it('reads the whole project only for a project-wide campaign', async () => {
     audience.page.mockResolvedValue([]);
-    await service.deliver(job(), log({ targetType: 'segment', targetDeviceIds: null }));
+    await service.deliver(job(), log({ targetType: 'segment' }));
+    // A segment campaign reads its own stored recipients, never everybody.
     expect(audience.page.mock.calls[0][0]).toEqual({
       projectId: 'proj-1',
-      deviceIdentityIds: [],
+      recipients: { kind: 'campaign', campaignId: 'camp-1' },
       requireOptIn: true,
     });
   });

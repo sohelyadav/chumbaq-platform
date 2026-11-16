@@ -38,6 +38,7 @@ import {
 import { EmailDeliveryService } from '../../modules/email/email-delivery.service';
 import { SmsDeliveryService } from '../../modules/sms/sms-delivery.service';
 import { WhatsAppDeliveryService } from '../../modules/whatsapp/whatsapp-delivery.service';
+import { storedRecipients } from '../../modules/push-notifications/recipients';
 import {
   CAMPAIGN_STOPPED_BY_SUSPENSION,
   ProjectSuspensionService,
@@ -480,8 +481,8 @@ export class PushCampaignProcessor extends WorkerHost {
    * Selects the token reader for the campaign's audience.
    *
    * Written as "only `project` fans out", never as "only `devices` is
-   * targeted". Both `devices` and `segment` carry a resolved
-   * `targetDeviceIds` list, and an earlier form that named `devices` alone
+   * targeted". Both `devices` and `segment` have stored recipients
+   * (`campaign_recipients`), and an earlier form that named `devices` alone
    * let `segment` fall through to every active token in the project — a
    * 50-person segment sending to the whole install base, silently and
    * irreversibly. Phrased this way, a target type added later defaults to the
@@ -504,7 +505,7 @@ export class PushCampaignProcessor extends WorkerHost {
         )
       : this.pushTokensService.getTokensByDeviceIdentityIdsPage(
           log.projectId,
-          log.targetDeviceIds ?? [],
+          storedRecipients(log.id),
           cursor,
           PUSH_BATCH_SIZE,
           frequencyCap,

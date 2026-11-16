@@ -10,15 +10,10 @@ import { SegmentNode } from './segment-ast';
 export const SEGMENT_QUERY_TIMEOUT_MS = 30000;
 export const SEGMENT_PREVIEW_TIMEOUT_MS = 5000;
 
-/**
- * Segment sends resolve person keys to device ids at enqueue time and store
- * them on the log row, so the campaign processor stays untouched. That bounds
- * the audience: beyond this the jsonb array is unreasonable and the request is
- * rejected rather than silently truncated.
- */
-export const SEGMENT_SEND_MAX_PEOPLE = 25000;
-
 const DEVICE_KEY_PREFIX = 'device:';
+
+/** Named parameters of an embedded segment query, so they cannot meet the host query's. */
+const SEGMENT_PARAM = (index: number): string => `:segp${index}`;
 
 /**
  * A materialised segment reads its membership from segment_members, and that
@@ -155,6 +150,45 @@ WHERE person_key = $${params.length} LIMIT 1`;
       SEGMENT_PREVIEW_TIMEOUT_MS,
     );
     return Number(rows[0]?.count ?? 0);
+  }
+
+  /**
+   * Every device of every person in the segment, as a sub-select for a campaign's
+   * recipients (`Recipients` of kind `query`). It is never loaded into memory, so an
+   * audience has no size limit: a campaign stores it with one INSERT ... SELECT, and
+   * counts and previews run it in place. Same people as `enumerate` then
+   * `resolveDeviceIdentityIds`: a person key names every device with that external
+   * id, a `device:` key the one device.
+   */
+  devicesQuery(segment: SegmentEntity): { sql: string; params: Record<string, unknown> } {
+    let members: string;
+    const params: Record<string, unknown> = {};
+    if (segment.evaluationMode === 'materialized') {
+      assertMaterialized(segment);
+      members = `SELECT person_key FROM segment_members WHERE segment_id = :segMembersOf`;
+      params.segMembersOf = segment.id;
+      params.segp1 = segment.projectId;
+    } else {
+      const core = this.compiler.compile(segment.definition, segment.projectId, SEGMENT_PARAM);
+      core.params.forEach((value, i) => {
+        params[`segp${i + 1}`] = value;
+      });
+      members = core.sql;
+    }
+    // Linear whatever the table's statistics say (a project that just gained tens of
+    // thousands of rows is unknown to them, and a plan guessed from that must not be
+    // quadratic): a device key already is the device's id, read off the key with no
+    // join, and an external id is one probe of the (project_id, external_user_id)
+    // index. Both kinds of key come only from this project's rows. A device key is
+    // matched only in its exact form, so the uuid cast cannot fail.
+    const deviceKey = `'^${DEVICE_KEY_PREFIX}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`;
+    const sql = `WITH seg AS MATERIALIZED (${members})
+SELECT d.id FROM seg JOIN device_identities d ON d.project_id = :segp1 AND d.external_user_id = seg.person_key
+ WHERE seg.person_key !~ ${deviceKey}
+UNION
+SELECT substr(seg.person_key, ${DEVICE_KEY_PREFIX.length + 1})::uuid FROM seg
+ WHERE seg.person_key ~ ${deviceKey}`;
+    return { sql, params };
   }
 
   /** Fans person keys back out to every device those people own. */

@@ -19,7 +19,7 @@ describe('WhatsAppCampaignsService', () => {
   const queue = { add: jest.fn() };
   const settings = { requireSendable: jest.fn(), find: jest.fn() };
   const audience = { count: jest.fn().mockResolvedValue(3) };
-  const push = { segmentDeviceIdentityIds: jest.fn() };
+  const push = { segmentRecipients: jest.fn() };
   const provider = { canListTemplates: true, listTemplates: jest.fn(), sendToRecipients: jest.fn() };
   const registry = { get: jest.fn(() => provider) };
   let service: WhatsAppCampaignsService;

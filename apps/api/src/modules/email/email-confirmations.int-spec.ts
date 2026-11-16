@@ -8,6 +8,7 @@ import { ConsentEventEntity } from '../consent/entities/consent-event.entity';
 import { DeviceIdentityEntity } from '../identity/entities/device-identity.entity';
 import { EmailAudienceService } from './email-audience.service';
 import { EmailConfirmationsService, mailboxOf } from './email-confirmations.service';
+import { allRecipientIds } from '../../test-support/audience-pages';
 
 /**
  * Double opt-in, against Postgres: who is mailed a confirmation, once, and what a
@@ -102,8 +103,8 @@ describe('Email double opt-in (integration)', () => {
   it('counts the address in only once its holder confirms, over any earlier refusal', async () => {
     await person(A, 'priya@example.com', false);
     await person(B, 'priya@example.com', true);
-    const scope = { projectId: INT_PROJECT_ID, deviceIdentityIds: null, requireOptIn: true };
-    expect(await audience.listRecipientIds(scope)).toEqual([]);
+    const scope = { projectId: INT_PROJECT_ID, recipients: null, requireOptIn: true };
+    expect(await allRecipientIds(audience, scope)).toEqual([]);
 
     await service.sendPending();
     const link = linkIn(sent[0].text);
@@ -111,7 +112,7 @@ describe('Email double opt-in (integration)', () => {
     expect(signed?.address).toBe('priya@example.com');
     expect(await service.confirm(INT_PROJECT_ID, signed!.address, signed!.sentAt)).toBe(2);
 
-    expect(await audience.listRecipientIds(scope)).toEqual([A]);
+    expect(await allRecipientIds(audience, scope)).toEqual([A]);
     const history = await ds.query(
       `SELECT DISTINCT source, granted FROM consent_events WHERE device_identity_id = ANY($1::uuid[])`,
       [[A, B]],
@@ -128,8 +129,8 @@ describe('Email double opt-in (integration)', () => {
     await ds.query(`UPDATE device_identities SET email_opt_in = false, consent_updated_at = now() + interval '1 second' WHERE id = $1`, [A]);
 
     expect(await service.confirm(INT_PROJECT_ID, signed.address, signed.sentAt)).toBe(0);
-    const scope = { projectId: INT_PROJECT_ID, deviceIdentityIds: null, requireOptIn: true };
-    expect(await audience.listRecipientIds(scope)).toEqual([]);
+    const scope = { projectId: INT_PROJECT_ID, recipients: null, requireOptIn: true };
+    expect(await allRecipientIds(audience, scope)).toEqual([]);
   });
 
   it('takes only the latest send\'s link, and none older than a week', async () => {

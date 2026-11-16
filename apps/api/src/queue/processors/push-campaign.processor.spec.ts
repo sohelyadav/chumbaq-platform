@@ -108,7 +108,6 @@ describe('PushCampaignProcessor', () => {
     imageUrl: null,
     status: 'queued',
     targetType: 'project',
-    targetDeviceIds: null,
     totalTokens: 3,
     processedTokens: 0,
     lastTokenId: null,
@@ -381,7 +380,6 @@ describe('PushCampaignProcessor', () => {
     logRepo.findOne.mockResolvedValueOnce({
       ...queuedLog,
       targetType: 'devices',
-      targetDeviceIds: ['dev-1', 'dev-2'],
     });
     configRepo.findOne.mockResolvedValueOnce(activeConfig);
     pushTokensService.getTokensByDeviceIdentityIdsPage.mockResolvedValueOnce([]);
@@ -390,7 +388,7 @@ describe('PushCampaignProcessor', () => {
 
     expect(pushTokensService.getTokensByDeviceIdentityIdsPage).toHaveBeenCalledWith(
       'proj-1',
-      ['dev-1', 'dev-2'],
+      { kind: 'campaign', campaignId: 'log-1' },
       null,
       500,
       null,
@@ -401,15 +399,14 @@ describe('PushCampaignProcessor', () => {
   });
 
   it('walks segment-targeted campaigns through the identity-scoped page reader', async () => {
-    // The whole point of this case: a segment resolves to a device id list at
-    // enqueue time exactly like an explicit device target. A reader that only
-    // recognises targetType 'devices' sends a 2-person segment to every active
-    // token in the project instead.
+    // The whole point of this case: a segment's recipients are stored at enqueue
+    // time exactly like an explicit device target's. A reader that only recognises
+    // targetType 'devices' sends a 2-person segment to every active token in the
+    // project instead.
     logRepo.findOne.mockResolvedValueOnce({
       ...queuedLog,
       targetType: 'segment',
       segmentId: 'seg-1',
-      targetDeviceIds: ['dev-7', 'dev-8'],
     });
     configRepo.findOne.mockResolvedValueOnce(activeConfig);
     pushTokensService.getTokensByDeviceIdentityIdsPage
@@ -424,7 +421,7 @@ describe('PushCampaignProcessor', () => {
     expect(pushTokensService.getTokensByDeviceIdentityIdsPage).toHaveBeenNthCalledWith(
       1,
       'proj-1',
-      ['dev-7', 'dev-8'],
+      { kind: 'campaign', campaignId: 'log-1' },
       null,
       500,
       null,
@@ -436,7 +433,7 @@ describe('PushCampaignProcessor', () => {
     expect(pushTokensService.getTokensByDeviceIdentityIdsPage).toHaveBeenNthCalledWith(
       2,
       'proj-1',
-      ['dev-7', 'dev-8'],
+      { kind: 'campaign', campaignId: 'log-1' },
       'tok-7',
       500,
       null,

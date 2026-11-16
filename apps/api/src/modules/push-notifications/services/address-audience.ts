@@ -1,18 +1,18 @@
-import { Repository, SelectQueryBuilder } from 'typeorm';
+import { EntityManager, Repository, SelectQueryBuilder } from 'typeorm';
 import { DeviceIdentityEntity } from '../../identity/entities/device-identity.entity';
 import { MessageChannel } from '../message-channel';
+import { Recipients, recipientsCondition } from '../recipients';
 
 /**
- * Who a campaign on an addressed channel (email, SMS) may reach.
+ * Who a campaign on an addressed channel (email, SMS, WhatsApp) may reach.
  *
- * `deviceIdentityIds` null means the whole project; an array (even an empty
- * one) means exactly those identities. The two are kept distinct on purpose:
- * the push worker once let a narrowed audience fall through to the whole
- * project, and an empty list here must reach nobody.
+ * `recipients` null means the whole project; anything else means exactly those
+ * identities, and an empty list nobody. The two are kept distinct on purpose: the
+ * push worker once let a narrowed audience fall through to the whole project.
  */
 export interface AddressAudienceScope {
   projectId: string;
-  deviceIdentityIds: string[] | null;
+  recipients: Recipients | null;
   /** From the channel's settings: only explicit opt-ins, or everyone not opted out. */
   requireOptIn: boolean;
 }
@@ -53,51 +53,40 @@ export abstract class AddressAudience {
 
   constructor(protected readonly identityRepository: Repository<DeviceIdentityEntity>) {}
 
-  /** Recipients a send would reach, under the frequency cap. */
-  async count(scope: AddressAudienceScope, frequencyCap: number | null): Promise<number> {
-    const qb = this.eligible(scope);
+  /**
+   * Recipients a send would reach, under the frequency cap. A manager when counting
+   * against recipients staged in its transaction.
+   */
+  async count(scope: AddressAudienceScope, frequencyCap: number | null, manager?: EntityManager): Promise<number> {
+    const qb = this.eligible(scope, manager);
     if (!qb) return 0;
     this.applyFrequencyCap(qb, frequencyCap, null);
     return qb.getCount();
   }
 
   /**
-   * One identity per reachable address, for splitting an experiment.
-   *
-   * An arm is then made of these representatives, so a person with two
-   * devices cannot land in two arms and receive both versions.
+   * One page of reachable representatives (one identity per address) with each one's
+   * timezone, the fallback when unknown, by keyset on identity id: what the scheduler
+   * splits into arms and waves, a page at a time. An arm is made of these
+   * representatives, so a person with two devices cannot land in two arms and
+   * receive both versions.
    */
-  async listRecipientIds(scope: AddressAudienceScope): Promise<string[]> {
+  async pageIds(
+    scope: AddressAudienceScope,
+    afterId: string | null,
+    limit: number,
+    fallbackTimezone: string,
+  ): Promise<Array<{ id: string; timezone: string }>> {
     const qb = this.eligible(scope);
     if (!qb) return [];
-    const rows = await qb.select('i.id', 'id').getRawMany<{ id: string }>();
-    return rows.map((row) => row.id);
-  }
-
-  /**
-   * Reachable representatives grouped by their timezone. Identities with no
-   * known timezone fall under the fallback rather than being dropped.
-   */
-  async groupByTimezone(
-    scope: AddressAudienceScope,
-    fallbackTimezone: string,
-  ): Promise<Map<string, string[]>> {
-    const qb = this.eligible(scope);
-    if (!qb) return new Map();
-
-    const rows = await qb
+    if (afterId) qb.andWhere('i.id > :afterId', { afterId });
+    return qb
       .select('i.id', 'id')
       .addSelect('COALESCE(i.timezone, :fallback)', 'timezone')
       .setParameter('fallback', fallbackTimezone)
+      .orderBy('i.id', 'ASC')
+      .limit(limit)
       .getRawMany<{ id: string; timezone: string }>();
-
-    const grouped = new Map<string, string[]>();
-    for (const row of rows) {
-      const bucket = grouped.get(row.timezone) ?? [];
-      bucket.push(row.id);
-      grouped.set(row.timezone, bucket);
-    }
-    return grouped;
   }
 
   /**
@@ -129,9 +118,11 @@ export abstract class AddressAudience {
    */
   private eligible(
     scope: AddressAudienceScope,
+    manager?: EntityManager,
   ): SelectQueryBuilder<DeviceIdentityEntity> | null {
-    const ids = scope.deviceIdentityIds;
-    if (ids !== null && ids.length === 0) return null;
+    const inRecipients = (alias: string) =>
+      scope.recipients === null ? { sql: '', params: {} } : recipientsCondition(`${alias}.id`, scope.recipients);
+    if (inRecipients('i') === null) return null;
 
     const { channel, address, consent: optIn, confirmed } = this.columns;
     // Required opt-in counts only once the address holder confirmed it, where the
@@ -140,10 +131,12 @@ export abstract class AddressAudience {
       scope.requireOptIn
         ? `${alias}.${optIn} = true${confirmed ? ` AND ${alias}.${confirmed} IS NOT NULL` : ''}`
         : `${alias}.${optIn} IS DISTINCT FROM false`;
-    const inScope = (alias: string) =>
-      ids === null ? '' : `AND ${alias}.id = ANY(:ids::uuid[])`;
+    const inScope = (alias: string) => {
+      const condition = inRecipients(alias)!;
+      return condition.sql ? `AND ${condition.sql}` : '';
+    };
 
-    const qb = this.identityRepository
+    const qb = (manager ? manager.getRepository(DeviceIdentityEntity) : this.identityRepository)
       .createQueryBuilder('i')
       .where('i.project_id = :projectId', { projectId: scope.projectId })
       .andWhere(`i.${address} IS NOT NULL`)
@@ -181,11 +174,11 @@ export abstract class AddressAudience {
             AND ${consent('b')}
             ${inScope('b')}
         )`,
+        inRecipients('b')!.params,
       );
 
-    if (ids !== null) {
-      qb.andWhere('i.id = ANY(:ids::uuid[])', { ids });
-    }
+    const own = inRecipients('i')!;
+    if (own.sql) qb.andWhere(own.sql, own.params);
 
     return qb;
   }

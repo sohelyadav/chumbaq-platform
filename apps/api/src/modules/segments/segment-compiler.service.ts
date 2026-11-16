@@ -31,7 +31,11 @@ const BEHAVIOURAL_ATTRIBUTES = new Set<string>([
 interface Ctx {
   params: unknown[];
   ctes: string[];
+  placeholder: (index: number) => string;
 }
+
+/** `$n`, for running the SQL on its own. */
+const POSITIONAL = (index: number): string => '$' + index;
 
 /**
  * Compiles a segment AST into parameterised SQL selecting one column,
@@ -50,15 +54,24 @@ interface Ctx {
  */
 @Injectable()
 export class SegmentCompilerService {
-  compile(ast: SegmentNode, projectId: string): CompiledSegment {
-    const ctx: Ctx = { params: [projectId], ctes: [] };
+  /**
+   * `placeholder` names the n-th parameter (1-based); the default is `$n`. A named
+   * form (`:segp1`) lets the SQL be embedded in a TypeORM query beside its own
+   * parameters.
+   */
+  compile(
+    ast: SegmentNode,
+    projectId: string,
+    placeholder: (index: number) => string = POSITIONAL,
+  ): CompiledSegment {
+    const ctx: Ctx = { params: [projectId], ctes: [], placeholder };
     const predicate = this.node(ast, ctx);
 
     const joins = ctx.ctes
       .map((_, i) => `  LEFT JOIN b${i} ON b${i}.person_key = p.person_key`)
       .join('\n');
 
-    const allCtes = [this.personCte(), ...ctx.ctes].join(',\n');
+    const allCtes = [this.personCte(placeholder(1)), ...ctx.ctes].join(',\n');
 
     const sql = `WITH ${allCtes}
 SELECT DISTINCT p.person_key
@@ -77,17 +90,17 @@ WHERE ${predicate}`;
    * spreads, see the trust model in tracking-consent.service.ts), or a
    * trusted objection covers its external id (every row of that person).
    */
-  private personCte(): string {
+  private personCte(projectParam: string): string {
     const cols = Object.values(ATTRIBUTE_COLUMNS).join(', ');
     return `person AS (
   SELECT id, COALESCE(external_user_id, 'device:' || id::text) AS person_key,
          ${cols}, traits,
          (do_not_track OR EXISTS (
             SELECT 1 FROM tracking_objections o
-             WHERE o.project_id = $1 AND o.external_user_id = device_identities.external_user_id
+             WHERE o.project_id = ${projectParam} AND o.external_user_id = device_identities.external_user_id
          )) AS row_dnt
   FROM device_identities
-  WHERE project_id = $1
+  WHERE project_id = ${projectParam}
 )`;
   }
 
@@ -112,7 +125,7 @@ WHERE ${predicate}`;
   /** Appends a value and returns its placeholder. */
   private bind(ctx: Ctx, value: unknown): string {
     ctx.params.push(value);
-    return `$${ctx.params.length}`;
+    return ctx.placeholder(ctx.params.length);
   }
 
   private node(node: SegmentNode, ctx: Ctx): string {

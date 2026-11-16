@@ -190,9 +190,6 @@ export class PushNotificationLogEntity {
   @Column({ type: 'varchar', length: 20, name: 'target_type', default: 'project' })
   targetType: 'project' | 'devices' | 'segment';
 
-  @Column({ type: 'jsonb', nullable: true, name: 'target_device_ids' })
-  targetDeviceIds: string[] | null;
-
   @Column({ type: 'uuid', nullable: true, name: 'segment_id' })
   segmentId: string | null;
 
@@ -350,16 +347,6 @@ export class PushNotificationLogEntity {
   /** Which arm this child is. Null on a parent and on ordinary campaigns. */
   @Column({ type: 'varchar', length: 16, nullable: true, name: 'variant_key' })
   variantKey: string | null;
-
-  /**
-   * The held-back slice, recorded on the parent.
-   *
-   * No child campaign exists for control — sending nothing is the point — so
-   * this is the only record of who was withheld, and the report needs it to
-   * measure conversions against.
-   */
-  @Column({ type: 'jsonb', nullable: true, name: 'control_device_ids' })
-  controlDeviceIds: string[] | null;
 
   @Column({ type: 'timestamp', nullable: true, name: 'completed_at' })
   completedAt: Date | null;

@@ -36,17 +36,37 @@ describe('PushNotificationsService', () => {
   const activity = { record: jest.fn() };
   const CTX = { ipAddress: null, userAgent: null };
 
+  // Raw statements (storing and counting recipients) go through the manager: recorded
+  // here with their named parameters, answering a count of `recipientCount`.
+  let recipientCount = 0;
+  const rawQueries: Array<{ sql: string; params: Record<string, unknown> }> = [];
+  const managerApi = {
+    connection: {
+      driver: {
+        escapeQueryWithParameters: (sql: string, params: Record<string, unknown>) => {
+          rawQueries.push({ sql, params });
+          return [sql, []];
+        },
+      },
+    },
+    query: jest.fn(async () => [{ n: recipientCount }]),
+  };
   const logRepo = {
     find: jest.fn(),
     findOne: jest.fn(),
     findAndCount: jest.fn(),
     save: jest.fn(),
     create: jest.fn(),
-    // A campaign row and its activity entry are written in one transaction.
+    // A campaign row, its recipients and its activity entry are written in one transaction.
     manager: {
-      transaction: async (work: (m: unknown) => unknown) => work({ getRepository: () => logRepo }),
+      ...managerApi,
+      transaction: async (work: (m: unknown) => unknown) => work({ ...managerApi, getRepository: () => logRepo }),
     },
   };
+  /** The recipients stored for a campaign, as the parameters of the statement that stored them. */
+  const storedFor = (campaignId: string) =>
+    rawQueries.filter((q) => q.sql.includes('INSERT INTO campaign_recipients') && q.params.storeCampaignId === campaignId);
+  const SEGMENT_QUERY = { sql: 'SELECT seg.id FROM seg', params: { segp1: 'proj-1' } };
 
   const cryptoService = {
     encrypt: jest.fn(),
@@ -91,7 +111,11 @@ describe('PushNotificationsService', () => {
   const projectDevices: Record<string, string[]> = {};
 
   const segmentsService = { findOne: jest.fn() };
-  const segmentEvaluation = { enumerate: jest.fn(), resolveDeviceIdentityIds: jest.fn() };
+  const segmentEvaluation = {
+    enumerate: jest.fn(),
+    resolveDeviceIdentityIds: jest.fn(),
+    devicesQuery: jest.fn(() => SEGMENT_QUERY),
+  };
 
   const pushQueue = {
     add: jest.fn(),
@@ -105,6 +129,8 @@ describe('PushNotificationsService', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    recipientCount = 0;
+    rawQueries.length = 0;
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -439,12 +465,7 @@ describe('PushNotificationsService', () => {
         projectId: 'proj-1',
         evaluationMode: 'live',
       });
-      segmentEvaluation.enumerate.mockResolvedValueOnce(['p1', 'p2']);
-      segmentEvaluation.resolveDeviceIdentityIds.mockResolvedValueOnce([
-        'dev-1',
-        'dev-2',
-        'dev-3',
-      ]);
+      recipientCount = 3;
       pushTokensService.countTokensByDeviceIdentityIds.mockResolvedValueOnce(4);
 
       const preview = await service.previewAudience({
@@ -459,6 +480,15 @@ describe('PushNotificationsService', () => {
         totalTokens: 4,
         deviceCount: 3,
       });
+      // Staged from the segment's own query and counted there, never loaded into memory.
+      expect(rawQueries.find((q) => q.sql.includes('INSERT INTO staged_recipients'))?.sql).toContain(SEGMENT_QUERY.sql);
+      expect(pushTokensService.countTokensByDeviceIdentityIds).toHaveBeenCalledWith(
+        'proj-1',
+        { kind: 'staged' },
+        null,
+        expect.anything(),
+      );
+      expect(segmentEvaluation.enumerate).not.toHaveBeenCalled();
     });
 
     it('does not enqueue anything', async () => {
@@ -531,9 +561,10 @@ describe('PushNotificationsService', () => {
           failureCount: 0,
           status: 'queued',
           targetType: 'project',
-          targetDeviceIds: null,
         }),
       );
+      // The whole project needs no stored recipients.
+      expect(storedFor('log-1')).toEqual([]);
       expect(pushQueue.add).toHaveBeenCalledWith(
         'dispatch-campaign',
         { logId: 'log-1', projectId: 'proj-1' },
@@ -622,16 +653,12 @@ describe('PushNotificationsService', () => {
       // with the count so the preview matches what the send will reach.
       expect(pushTokensService.countTokensByDeviceIdentityIds).toHaveBeenCalledWith(
         'proj-1',
-        ['dev-1', 'dev-2'],
+        { kind: 'devices', ids: ['dev-1', 'dev-2'] },
         null,
       );
       expect(pushTokensService.countActiveTokensByProject).not.toHaveBeenCalled();
-      expect(logRepo.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          targetType: 'devices',
-          targetDeviceIds: ['dev-1', 'dev-2'],
-        }),
-      );
+      expect(logRepo.create).toHaveBeenCalledWith(expect.objectContaining({ targetType: 'devices' }));
+      expect(storedFor('log-1').map((q) => q.params.recipientIds)).toEqual([['dev-1', 'dev-2']]);
     });
 
     it('keeps only this project\'s devices and never counts another tenant\'s', async () => {
@@ -643,10 +670,12 @@ describe('PushNotificationsService', () => {
 
       await service.send({ ...baseDto, deviceIdentityIds: ['dev-1', 'other-tenant-dev'] }, REQUESTER);
 
-      expect(pushTokensService.countTokensByDeviceIdentityIds).toHaveBeenCalledWith('proj-1', ['dev-1'], null);
-      expect(logRepo.create).toHaveBeenCalledWith(
-        expect.objectContaining({ targetType: 'devices', targetDeviceIds: ['dev-1'] }),
+      expect(pushTokensService.countTokensByDeviceIdentityIds).toHaveBeenCalledWith(
+        'proj-1',
+        { kind: 'devices', ids: ['dev-1'] },
+        null,
       );
+      expect(storedFor('log-1').map((q) => q.params.recipientIds)).toEqual([['dev-1']]);
     });
 
     it('refuses, rather than broadcasting, when no device belongs to the project', async () => {
@@ -672,13 +701,11 @@ describe('PushNotificationsService', () => {
       expect(pushTokensService.countTokensByDeviceIdentityIds).not.toHaveBeenCalled();
     });
 
-    it('resolves a segment to devices and records the segment on the log', async () => {
+    it('stores the segment as recipients with one statement and records the segment on the log', async () => {
       configRepo.findOne.mockResolvedValueOnce(activeConfig);
       segmentsService.findOne.mockResolvedValueOnce({
         id: 'seg-1', projectId: 'proj-1', evaluationMode: 'live',
       });
-      segmentEvaluation.enumerate.mockResolvedValueOnce(['user-1', 'device:d3']);
-      segmentEvaluation.resolveDeviceIdentityIds.mockResolvedValueOnce(['d1', 'd2', 'd3']);
       pushTokensService.countTokensByDeviceIdentityIds.mockResolvedValueOnce(3);
       logRepo.create.mockImplementation((o) => o);
       logRepo.save.mockImplementation(async (o) => ({ id: 'log-1', ...o }));
@@ -689,46 +716,16 @@ describe('PushNotificationsService', () => {
         expect.objectContaining({
           targetType: 'segment',
           segmentId: 'seg-1',
-          targetDeviceIds: ['d1', 'd2', 'd3'],
           totalTokens: 3,
           status: 'queued',
         }),
       );
+      const [stored] = storedFor('log-1');
+      expect(stored.sql).toContain(SEGMENT_QUERY.sql);
+      expect(stored.params).toMatchObject({ ...SEGMENT_QUERY.params, storeCampaignId: 'log-1' });
+      // No member list is ever walked into memory, so a segment has no size limit.
+      expect(segmentEvaluation.enumerate).not.toHaveBeenCalled();
       expect(fcmProvider.send).not.toHaveBeenCalled();
-    });
-
-    it('pages through every member rather than stopping at the first page', async () => {
-      configRepo.findOne.mockResolvedValueOnce(activeConfig);
-      segmentsService.findOne.mockResolvedValueOnce({
-        id: 'seg-1', projectId: 'proj-1', evaluationMode: 'live',
-      });
-      const page1 = Array.from({ length: 1000 }, (_, i) => `u${i}`);
-      segmentEvaluation.enumerate
-        .mockResolvedValueOnce(page1)
-        .mockResolvedValueOnce(['u1000']);
-      segmentEvaluation.resolveDeviceIdentityIds.mockResolvedValueOnce(['d1']);
-      pushTokensService.countTokensByDeviceIdentityIds.mockResolvedValueOnce(1);
-      logRepo.create.mockImplementation((o) => o);
-      logRepo.save.mockImplementation(async (o) => ({ id: 'log-1', ...o }));
-
-      await service.send({ ...baseDto, segmentId: 'seg-1' }, REQUESTER);
-
-      expect(segmentEvaluation.enumerate).toHaveBeenCalledTimes(2);
-      expect(segmentEvaluation.enumerate.mock.calls[1][1]).toBe('u999');
-    });
-
-    it('rejects an audience larger than the cap instead of writing a huge array', async () => {
-      configRepo.findOne.mockResolvedValueOnce(activeConfig);
-      segmentsService.findOne.mockResolvedValueOnce({
-        id: 'seg-1', projectId: 'proj-1', evaluationMode: 'live',
-      });
-      segmentEvaluation.enumerate.mockImplementation(async () =>
-        Array.from({ length: 1000 }, (_, i) => `u${Math.random()}${i}`),
-      );
-
-      await expect(service.send({ ...baseDto, segmentId: 'seg-1' }, REQUESTER))
-        .rejects.toThrow(BadRequestException);
-      expect(logRepo.save).not.toHaveBeenCalled();
     });
 
     it('rejects a segment with no members before enqueueing', async () => {
@@ -736,8 +733,6 @@ describe('PushNotificationsService', () => {
       segmentsService.findOne.mockResolvedValueOnce({
         id: 'seg-1', projectId: 'proj-1', evaluationMode: 'live',
       });
-      segmentEvaluation.enumerate.mockResolvedValueOnce([]);
-      segmentEvaluation.resolveDeviceIdentityIds.mockResolvedValueOnce([]);
       pushTokensService.countTokensByDeviceIdentityIds.mockResolvedValueOnce(0);
 
       await expect(service.send({ ...baseDto, segmentId: 'seg-1' }, REQUESTER))

@@ -245,11 +245,12 @@ export class PushAnalyticsService {
       where: { parentCampaignId: parent.id },
     });
     const arms = children.filter((child) => child.variantKey !== null);
+    const controlSize = await this.controlSizeOf(parent.id);
 
     if (arms.length === 0) {
       return {
         isExperiment: !!parent.variants,
-        controlSize: parent.controlDeviceIds?.length ?? 0,
+        controlSize,
         arms: [],
         leader: null,
         verdict: parent.variants
@@ -301,10 +302,19 @@ export class PushAnalyticsService {
 
     return {
       isExperiment: true,
-      controlSize: parent.controlDeviceIds?.length ?? 0,
+      controlSize,
       arms: rows,
       ...this.callExperiment(rows),
     };
+  }
+
+  /** How many people an experiment held back (its `control` recipients). */
+  private async controlSizeOf(parentId: string): Promise<number> {
+    const [{ n }] = (await this.logRepository.query(
+      `SELECT count(*)::int AS n FROM campaign_recipients WHERE campaign_id = $1 AND role = 'control'`,
+      [parentId],
+    )) as Array<{ n: number }>;
+    return n;
   }
 
   /**

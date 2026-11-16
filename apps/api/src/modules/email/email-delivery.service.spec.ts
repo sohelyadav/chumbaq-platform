@@ -15,7 +15,6 @@ const log = (over: Record<string, unknown> = {}) =>
     channel: 'email',
     emailContent: { subject: 'Hi {{firstName}}', html: '<p>Hello</p>' },
     targetType: 'project',
-    targetDeviceIds: null,
     totalTokens: 3,
     processedTokens: 0,
     lastTokenId: null,
@@ -98,16 +97,16 @@ describe('EmailDeliveryService', () => {
 
   it('reads the whole project only for a project-wide campaign', async () => {
     audience.page.mockResolvedValue([]);
-    await service.deliver(job(), log({ targetType: 'segment', targetDeviceIds: null }));
-    // A segment campaign with no stored list reaches nobody, never everybody.
+    await service.deliver(job(), log({ targetType: 'segment' }));
+    // A segment campaign reads its own stored recipients, never everybody.
     expect(audience.page.mock.calls[0][0]).toEqual({
       projectId: 'proj-1',
-      deviceIdentityIds: [],
+      recipients: { kind: 'campaign', campaignId: 'camp-1' },
       requireOptIn: true,
     });
 
     await service.deliver(job(), log());
-    expect(audience.page.mock.calls[1][0].deviceIdentityIds).toBeNull();
+    expect(audience.page.mock.calls[1][0].recipients).toBeNull();
   });
 
   it('checkpoints only the resolved prefix, then fails the attempt to retry the rest', async () => {

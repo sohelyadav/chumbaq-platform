@@ -42,10 +42,8 @@ import { PushTokensService } from '../push-tokens/push-tokens.service';
 import { IdentityService } from '../identity/identity.service';
 import { logValue } from '../../common/log-value';
 import { SegmentsService } from '../segments/segments.service';
-import {
-  SegmentEvaluationService,
-  SEGMENT_SEND_MAX_PEOPLE,
-} from '../segments/segment-evaluation.service';
+import { SegmentEvaluationService } from '../segments/segment-evaluation.service';
+import { Recipients, STAGED, deviceList, stageRecipients } from './recipients';
 import { SegmentEntity } from '../segments/entities/segment.entity';
 import {
   ConfigurePushDto,
@@ -372,8 +370,10 @@ export class PushNotificationsService {
     deviceIdentityIds?: string[];
   }): Promise<{
     targetType: 'project' | 'devices' | 'segment';
-    targetDeviceIds: string[] | null;
+    recipients: Recipients | null;
     totalTokens: number;
+    /** Devices the recipients are; null for the whole project. */
+    deviceCount: number | null;
   }> {
     // The cap excludes devices from delivery, so it has to exclude them from
     // the count too — otherwise the preview promises reach the send cannot
@@ -384,26 +384,18 @@ export class PushNotificationsService {
     const cap = config?.frequencyCapPerDay ?? null;
 
     if (input.segmentId) {
-      const segment = await this.segmentsService.findOne(
-        input.projectId,
-        input.segmentId,
-      );
-      const personKeys = await this.collectSegmentMembers(segment);
-      const targetDeviceIds =
-        await this.segmentEvaluation.resolveDeviceIdentityIds(
-          input.projectId,
-          personKeys,
-        );
-      return {
-        targetType: 'segment',
-        targetDeviceIds,
-        totalTokens:
-          await this.pushTokensService.countTokensByDeviceIdentityIds(
-            input.projectId,
-            targetDeviceIds,
-            cap,
-          ),
-      };
+      // Never loaded into memory: staged once to be counted, and stored with the
+      // campaign by one INSERT ... SELECT, so a segment has no size limit.
+      const recipients = await this.segmentRecipients(input.projectId, input.segmentId);
+      return this.logRepository.manager.transaction(async (manager) => {
+        const deviceCount = await stageRecipients(manager, input.projectId, recipients);
+        return {
+          targetType: 'segment' as const,
+          recipients,
+          deviceCount,
+          totalTokens: await this.pushTokensService.countTokensByDeviceIdentityIds(input.projectId, STAGED, cap, manager),
+        };
+      });
     }
 
     if (input.deviceIdentityIds && input.deviceIdentityIds.length > 0) {
@@ -419,21 +411,19 @@ export class PushNotificationsService {
       if (targetDeviceIds.length === 0) {
         throw new BadRequestException('None of these devices belong to this project.');
       }
+      const recipients = deviceList(targetDeviceIds);
       return {
         targetType: 'devices',
-        targetDeviceIds,
-        totalTokens:
-          await this.pushTokensService.countTokensByDeviceIdentityIds(
-            input.projectId,
-            targetDeviceIds,
-            cap,
-          ),
+        recipients,
+        deviceCount: targetDeviceIds.length,
+        totalTokens: await this.pushTokensService.countTokensByDeviceIdentityIds(input.projectId, recipients, cap),
       };
     }
 
     return {
       targetType: 'project',
-      targetDeviceIds: null,
+      recipients: null,
+      deviceCount: null,
       totalTokens: await this.pushTokensService.countActiveTokensByProject(
         input.projectId,
         cap,
@@ -447,15 +437,10 @@ export class PushNotificationsService {
     totalTokens: number;
     deviceCount: number | null;
   }> {
-    const { targetType, targetDeviceIds, totalTokens } =
-      await this.resolveAudience(dto);
-    return {
-      targetType,
-      totalTokens,
-      // Devices and tokens differ: one person may have several installs, and a
-      // device that has never registered for push has no token at all.
-      deviceCount: targetDeviceIds ? targetDeviceIds.length : null,
-    };
+    const { targetType, totalTokens, deviceCount } = await this.resolveAudience(dto);
+    // Devices and tokens differ: one person may have several installs, and a
+    // device that has never registered for push has no token at all.
+    return { targetType, totalTokens, deviceCount };
   }
 
   /**
@@ -627,7 +612,7 @@ export class PushNotificationsService {
       );
     }
 
-    const { targetType, targetDeviceIds, totalTokens } =
+    const { targetType, recipients, totalTokens } =
       await this.resolveAudience(dto);
 
     if (totalTokens === 0) {
@@ -709,7 +694,6 @@ export class PushNotificationsService {
         carousel: (dto.carousel ?? null) as never,
         timer: (dto.timer ?? null) as never,
         targetType,
-        targetDeviceIds,
         segmentId: dto.segmentId ?? null,
         totalTokens,
         processedTokens: 0,
@@ -739,6 +723,7 @@ export class PushNotificationsService {
         status: isScheduled ? 'scheduled' : 'queued',
       } as Partial<PushNotificationLogEntity>) as PushNotificationLogEntity,
       logging,
+      recipients,
     );
 
     await this.recordTemplateUse(dto.projectId, dto.templateId);
@@ -839,39 +824,13 @@ export class PushNotificationsService {
   }
 
   /**
-   * Every device behind a segment's members, with the same size limit a push
-   * send applies. Public so the email channel targets a segment through
-   * exactly the code push does.
+   * Every device behind a segment's members, as recipients that are never loaded
+   * into memory. Public so email, SMS and WhatsApp target a segment through exactly
+   * the code push does.
    */
-  async segmentDeviceIdentityIds(
-    projectId: string,
-    segmentId: string,
-  ): Promise<string[]> {
+  async segmentRecipients(projectId: string, segmentId: string): Promise<Recipients> {
     const segment = await this.segmentsService.findOne(projectId, segmentId);
-    const personKeys = await this.collectSegmentMembers(segment);
-    return this.segmentEvaluation.resolveDeviceIdentityIds(projectId, personKeys);
-  }
-
-  /** Walks the whole segment, refusing an audience too large to store inline. */
-  private async collectSegmentMembers(segment: SegmentEntity): Promise<string[]> {
-    const all: string[] = [];
-    let cursor: string | null = null;
-
-    for (;;) {
-      const page = await this.segmentEvaluation.enumerate(segment, cursor, 1000);
-      if (page.length === 0) break;
-      all.push(...page);
-      if (all.length > SEGMENT_SEND_MAX_PEOPLE) {
-        throw new BadRequestException(
-          `Segment has more than ${SEGMENT_SEND_MAX_PEOPLE} members; ` +
-            `narrow it or split the campaign`,
-        );
-      }
-      cursor = page[page.length - 1];
-      if (page.length < 1000) break;
-    }
-
-    return all;
+    return { kind: 'query', ...this.segmentEvaluation.devicesQuery(segment) };
   }
 
   /**

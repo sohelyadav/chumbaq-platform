@@ -8,6 +8,8 @@ import {
   seedPerson,
   INT_PROJECT_ID,
 } from '../../test-support/int-db';
+import { deviceList } from '../push-notifications/recipients';
+import { allRecipientIds, recipientsByTimezone } from '../../test-support/audience-pages';
 
 // Ids sort in this order, which the dedupe relies on ("lowest id wins").
 const A = 'eeeeeeee-0000-0000-0000-000000000001';
@@ -69,7 +71,7 @@ describe('EmailAudienceService (integration)', () => {
 
   const scope = (over: Partial<EmailAudienceScope> = {}): EmailAudienceScope => ({
     projectId: INT_PROJECT_ID,
-    deviceIdentityIds: null,
+    recipients: null,
     requireOptIn: true,
     ...over,
   });
@@ -121,7 +123,7 @@ describe('EmailAudienceService (integration)', () => {
     await person(B, 'priya@example.com', true);
 
     expect(await deliverAll(scope())).toEqual(['priya@example.com']);
-    expect(await service.listRecipientIds(scope())).toEqual([A]);
+    expect(await allRecipientIds(service, scope())).toEqual([A]);
   });
 
   it('never emails a suppressed address', async () => {
@@ -151,7 +153,7 @@ describe('EmailAudienceService (integration)', () => {
     await person(A, 'priya@example.com', false);
     await person(B, 'priya@example.com', true);
 
-    expect(await service.listRecipientIds(scope())).toEqual([]);
+    expect(await allRecipientIds(service, scope())).toEqual([]);
   });
 
   // Double opt-in: a reported opt-in counts only once the address holder confirmed it.
@@ -159,27 +161,27 @@ describe('EmailAudienceService (integration)', () => {
     await person(A, 'claimed@example.com', true, null, false);
     await person(B, 'confirmed@example.com', true);
 
-    expect(await service.listRecipientIds(scope())).toEqual([B]);
+    expect(await allRecipientIds(service, scope())).toEqual([B]);
   });
 
   it('needs no confirmation when the project does not require opt-in', async () => {
     await person(A, 'unconfirmed@example.com', true, null, false);
 
-    expect(await service.listRecipientIds(scope({ requireOptIn: false }))).toEqual([A]);
+    expect(await allRecipientIds(service, scope({ requireOptIn: false }))).toEqual([A]);
   });
 
   it('does not let a twin outside the audience suppress the one inside it', async () => {
     await person(A, 'priya@example.com', true);
     await person(B, 'priya@example.com', true);
 
-    expect(await service.listRecipientIds(scope({ deviceIdentityIds: [B] }))).toEqual([B]);
+    expect(await allRecipientIds(service, scope({ recipients: deviceList([B]) }))).toEqual([B]);
   });
 
   it('reaches nobody for an empty audience list, never the whole project', async () => {
     await person(A, 'priya@example.com', true);
 
-    expect(await deliverAll(scope({ deviceIdentityIds: [] }))).toEqual([]);
-    expect(await service.count(scope({ deviceIdentityIds: [] }), null)).toBe(0);
+    expect(await deliverAll(scope({ recipients: deviceList([]) }))).toEqual([]);
+    expect(await service.count(scope({ recipients: deviceList([]) }), null)).toBe(0);
   });
 
   it('skips people without an address', async () => {
@@ -217,7 +219,7 @@ describe('EmailAudienceService (integration)', () => {
     await person(C, 'tom@example.com', true, 'Europe/London');
     await person(D, 'sam@example.com', true, null);
 
-    const grouped = await service.groupByTimezone(scope(), 'UTC');
+    const grouped = await recipientsByTimezone(service, scope(), 'UTC');
     expect(Object.fromEntries(grouped)).toEqual({
       'Asia/Kolkata': [A],
       'Europe/London': [C],

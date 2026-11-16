@@ -15,6 +15,10 @@ import { ProjectEntity } from '../../projects/entities/project.entity';
 @Index('IDX_device_identities_project_first_seen', ['projectId', 'firstSeenAt'])
 @Index(['projectId', 'deviceFingerprint'], { unique: true })
 @Index(['projectId', 'distinctId'])
+// A segment's people are fanned out to their devices by one probe of this per
+// person (segment-evaluation.service.ts, devicesQuery), linear however stale the
+// statistics on a fast-growing project are.
+@Index('IDX_device_identities_project_external_user', ['projectId', 'externalUserId'])
 // Email recipient selection reads `project_id = ? AND email IS NOT NULL` and
 // deduplicates on (project_id, email). Partial because most identities never
 // carry an address.

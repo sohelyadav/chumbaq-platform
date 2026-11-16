@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, SelectQueryBuilder, In } from 'typeorm';
+import { EntityManager, Repository, SelectQueryBuilder, In } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import {
   PushProvider,
@@ -10,18 +10,21 @@ import {
 } from './entities/push-token.entity';
 import { IdentityService } from '../identity/identity.service';
 import { RegisterPushTokenDto } from './dto/register-token.dto';
+import { Recipients, deviceList, recipientsCondition } from '../push-notifications/recipients';
 
 /**
- * Who a reader looks at: the whole project, or listed devices within it.
- *
- * The project is required in both forms. Device ids come from a campaign's
- * stored `targetDeviceIds`, and a campaign saved before ids were checked at
- * creation can name another tenant's devices; filtering by id alone would
- * count and send to them.
+ * Who a reader looks at: the whole project (`recipients` null), or recipients within
+ * it. The project is required either way: a list from a request, or a campaign's
+ * stored recipients, is never trusted to name only this project's devices.
  */
-export type AudienceScope =
-  | { projectId: string }
-  | { projectId: string; deviceIdentityIds: string[] };
+export interface AudienceScope {
+  projectId: string;
+  recipients: Recipients | null;
+}
+
+function asRecipients(recipients: string[] | Recipients): Recipients {
+  return Array.isArray(recipients) ? deviceList(recipients) : recipients;
+}
 
 @Injectable()
 export class PushTokensService {
@@ -105,76 +108,38 @@ export class PushTokensService {
   }
 
   /**
-   * Every device identity with a reachable token in scope.
+   * One page of the device identities with a reachable token in scope, with each one's
+   * timezone (the fallback when unknown), by keyset on the identity id. The scheduler
+   * splits a campaign's audience into arms and waves a page at a time, so no audience
+   * is ever held in memory whole.
    *
-   * Distinct identities rather than tokens: an experiment assigns a *person* to
-   * an arm, and someone with a phone and a tablet must not land in two
-   * different arms and receive both messages.
+   * Distinct identities rather than tokens: an experiment assigns a *person* to an arm,
+   * and someone with a phone and a tablet must not land in two arms and receive both
+   * messages. Joined to identities, so a device that never registered for push is not
+   * put in a wave that would have nobody to send to.
    */
-  async listDeviceIdentityIds(
+  async pageAudience(
     scope: AudienceScope,
-  ): Promise<string[]> {
-    const qb = this.tokenRepository
-      .createQueryBuilder('t')
-      .select('DISTINCT t.device_identity_id', 'deviceIdentityId')
-      .where('t.is_active = true');
-    this.applyPushConsent(qb);
-
-    qb.andWhere('t.project_id = :projectId', { projectId: scope.projectId });
-    if ('deviceIdentityIds' in scope) {
-      if (scope.deviceIdentityIds.length === 0) return [];
-      qb.andWhere('t.device_identity_id IN (:...ids)', {
-        ids: scope.deviceIdentityIds,
-      });
-    }
-
-    const rows = await qb.getRawMany<{ deviceIdentityId: string }>();
-    return rows.map((row) => row.deviceIdentityId);
-  }
-
-  /**
-   * Groups a campaign's reachable devices by the recipient's timezone.
-   *
-   * Joins identities to tokens so a device that never registered for push is
-   * not counted into a wave that would then have nobody to send to. Devices
-   * with no known timezone are grouped under the fallback rather than dropped
-   * — losing them would silently shrink the audience.
-   */
-  async groupDeviceIdentitiesByTimezone(
-    scope: AudienceScope,
+    afterId: string | null,
+    limit: number,
     fallbackTimezone: string,
-  ): Promise<Map<string, string[]>> {
+  ): Promise<Array<{ id: string; timezone: string }>> {
     const qb = this.tokenRepository
       .createQueryBuilder('t')
       .innerJoin('device_identities', 'i', 'i.id = t.device_identity_id')
-      .select('COALESCE(i.timezone, :fallback)', 'timezone')
-      .addSelect('t.device_identity_id', 'deviceIdentityId')
+      .select('t.device_identity_id', 'id')
+      .addSelect('COALESCE(MAX(i.timezone), :fallback)', 'timezone')
       .where('t.is_active = true')
+      .andWhere('t.project_id = :projectId', { projectId: scope.projectId })
       .setParameter('fallback', fallbackTimezone)
-      .groupBy('COALESCE(i.timezone, :fallback)')
-      .addGroupBy('t.device_identity_id');
+      .groupBy('t.device_identity_id')
+      .orderBy('t.device_identity_id', 'ASC')
+      .limit(limit);
     this.applyPushConsent(qb);
+    if (!this.applyRecipients(qb, scope.recipients)) return [];
+    if (afterId) qb.andWhere('t.device_identity_id > :afterId', { afterId });
 
-    qb.andWhere('t.project_id = :projectId', { projectId: scope.projectId });
-    if ('deviceIdentityIds' in scope) {
-      if (scope.deviceIdentityIds.length === 0) return new Map();
-      qb.andWhere('t.device_identity_id IN (:...ids)', {
-        ids: scope.deviceIdentityIds,
-      });
-    }
-
-    const rows = await qb.getRawMany<{
-      timezone: string;
-      deviceIdentityId: string;
-    }>();
-
-    const grouped = new Map<string, string[]>();
-    for (const row of rows) {
-      const bucket = grouped.get(row.timezone) ?? [];
-      bucket.push(row.deviceIdentityId);
-      grouped.set(row.timezone, bucket);
-    }
-    return grouped;
+    return qb.getRawMany<{ id: string; timezone: string }>();
   }
 
   /**
@@ -197,28 +162,37 @@ export class PushTokensService {
   }
 
   /**
-   * Like every device-id reader here, scoped to the project as well as the
-   * ids. A campaign's `targetDeviceIds` is stored, and a scheduled or
-   * recurring campaign saved before ids were checked at creation can still
-   * name another tenant's devices; the project filter is what keeps those
-   * from being counted or sent to.
+   * Like every recipient reader here, scoped to the project as well as the
+   * recipients: a list from a request, or a campaign's stored recipients, is never
+   * trusted to name only this project's devices.
    */
   async countTokensByDeviceIdentityIds(
     projectId: string,
-    deviceIdentityIds: string[],
+    recipients: string[] | Recipients,
     frequencyCap?: number | null,
+    manager?: EntityManager,
   ): Promise<number> {
-    if (deviceIdentityIds.length === 0) return 0;
-
-    const qb = this.tokenRepository
+    const condition = recipientsCondition('t.device_identity_id', asRecipients(recipients));
+    if (!condition) return 0;
+    // A manager when counting against recipients staged in its transaction.
+    const qb = (manager ? manager.getRepository(PushTokenEntity) : this.tokenRepository)
       .createQueryBuilder('t')
       .where('t.project_id = :projectId', { projectId })
-      .andWhere('t.device_identity_id IN (:...ids)', { ids: deviceIdentityIds })
+      .andWhere(condition.sql, condition.params)
       .andWhere('t.is_active = true');
 
     this.applyPushConsent(qb);
     this.applyFrequencyCap(qb, frequencyCap, null);
     return qb.getCount();
+  }
+
+  /** Limits a token query to the recipients; false when they are nobody (null: the whole project). */
+  private applyRecipients(qb: SelectQueryBuilder<PushTokenEntity>, recipients: Recipients | null): boolean {
+    if (recipients === null) return true;
+    const condition = recipientsCondition('t.device_identity_id', recipients);
+    if (!condition) return false;
+    qb.andWhere(condition.sql, condition.params);
+    return true;
   }
 
   /**
@@ -379,19 +353,19 @@ export class PushTokensService {
 
   async getTokensByDeviceIdentityIdsPage(
     projectId: string,
-    deviceIdentityIds: string[],
+    recipients: string[] | Recipients,
     afterId: string | null,
     limit: number,
     frequencyCap?: number | null,
     currentCampaignId: string | null = null,
     deliverable?: PushProvider[],
   ): Promise<PushTokenEntity[]> {
-    if (deviceIdentityIds.length === 0) return [];
-
+    const condition = recipientsCondition('t.device_identity_id', asRecipients(recipients));
+    if (!condition) return [];
     const qb = this.tokenRepository
       .createQueryBuilder('t')
       .where('t.project_id = :projectId', { projectId })
-      .andWhere('t.device_identity_id IN (:...ids)', { ids: deviceIdentityIds })
+      .andWhere(condition.sql, condition.params)
       .andWhere('t.is_active = true')
       .orderBy('t.id', 'ASC')
       .limit(limit);

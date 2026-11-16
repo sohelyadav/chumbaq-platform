@@ -902,10 +902,7 @@ export default function PushCampaignDetailPage() {
           ) : campaign.targetType === 'devices' ? (
             <div className="flex items-center gap-2 text-sm">
               <Smartphone className="h-4 w-4 text-muted-foreground" />
-              <span>
-                {campaign.targetDeviceIds?.length ?? campaign.totalTokens} specific device
-                {(campaign.targetDeviceIds?.length ?? campaign.totalTokens) === 1 ? '' : 's'}
-              </span>
+              <span>Specific devices</span>
             </div>
           ) : (
             <div className="flex items-center gap-2 text-sm">

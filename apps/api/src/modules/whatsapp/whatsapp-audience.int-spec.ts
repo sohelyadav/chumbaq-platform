@@ -9,6 +9,7 @@ import {
   seedPerson,
   INT_PROJECT_ID,
 } from '../../test-support/int-db';
+import { allRecipientIds } from '../../test-support/audience-pages';
 
 const A = 'cccccccc-0000-0000-0000-000000000001';
 const B = 'cccccccc-0000-0000-0000-000000000002';
@@ -39,7 +40,7 @@ describe('WhatsAppAudienceService (integration)', () => {
     );
   const scope = (over: Partial<AddressAudienceScope> = {}): AddressAudienceScope => ({
     projectId: INT_PROJECT_ID,
-    deviceIdentityIds: null,
+    recipients: null,
     requireOptIn: true,
     ...over,
   });
@@ -75,6 +76,6 @@ describe('WhatsAppAudienceService (integration)', () => {
     await person(A, '+919876543210', true);
     await person(B, '+919876543210', true);
     await person(C, null, true);
-    expect(await service.listRecipientIds(scope())).toEqual([A]);
+    expect(await allRecipientIds(service, scope())).toEqual([A]);
   });
 });

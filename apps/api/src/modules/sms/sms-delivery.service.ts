@@ -23,6 +23,7 @@ import { renderSms, SmsMessage } from './sms-rendering';
 import { SmsSettingsEntity } from './entities/sms-settings.entity';
 import { TWILIO_UNREACHABLE, TWILIO_UNSUBSCRIBED } from './providers/twilio.provider';
 import { yieldForPacing } from '../../queue/campaign-pacing';
+import { storedRecipients } from '../push-notifications/recipients';
 
 /** Recipients per page. As for email: one HTTP call each, so kept small. */
 export const SMS_BATCH_SIZE = 100;
@@ -81,7 +82,7 @@ export class SmsDeliveryService {
       projectId: log.projectId,
       // Only `project` fans out; anything else is its stored list, and a
       // missing list reaches nobody.
-      deviceIdentityIds: log.targetType === 'project' ? null : (log.targetDeviceIds ?? []),
+      recipients: log.targetType === 'project' ? null : storedRecipients(log.id),
       requireOptIn: settings.requireOptIn,
     };
 

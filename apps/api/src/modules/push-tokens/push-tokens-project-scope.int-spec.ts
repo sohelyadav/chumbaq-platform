@@ -9,6 +9,8 @@ import {
   seedPerson,
   INT_PROJECT_ID,
 } from '../../test-support/int-db';
+import { allPushAudienceIds, pushAudienceByTimezone } from '../../test-support/audience-pages';
+import { deviceList, storedRecipients } from '../push-notifications/recipients';
 
 const PROJECT_B = '33333333-3333-3333-3333-333333333333';
 const OWNER_B = '44444444-4444-4444-4444-444444444444';
@@ -87,19 +89,29 @@ describe('PushTokensService device-id readers stay inside the project (integrati
     await seedToken(INT_PROJECT_ID, DEVICE_A2, 'tok-a2');
     await seedToken(PROJECT_B, DEVICE_B, 'tok-b');
 
-    // A stored campaign from before ids were checked at creation.
+    // A campaign whose stored recipients name another project's device (stored
+    // recipients are filtered to the project when written; the readers must not rely on it).
     const [{ id }] = await ds.query(
-      `INSERT INTO push_notification_logs (project_id, title, target_type, target_device_ids)
-       VALUES ($1, 'old scheduled campaign', 'devices', $2) RETURNING id`,
-      [INT_PROJECT_ID, JSON.stringify([DEVICE_A1, DEVICE_B, DEVICE_A2])],
+      `INSERT INTO push_notification_logs (project_id, title, target_type)
+       VALUES ($1, 'old scheduled campaign', 'devices') RETURNING id`,
+      [INT_PROJECT_ID],
+    );
+    await ds.query(
+      `INSERT INTO campaign_recipients (campaign_id, role, device_identity_id)
+       SELECT $1, 'target', unnest($2::uuid[])`,
+      [id, [DEVICE_A1, DEVICE_B, DEVICE_A2]],
     );
     log = (await ds.getRepository(PushNotificationLogEntity).findOneByOrFail({ id }))!;
   });
 
-  it('reads the stored list back with the foreign device in it', () => {
-    // Guards the fixture: without B's id in the stored list, every assertion
+  it('reads the stored recipients back with the foreign device in them', async () => {
+    // Guards the fixture: without B's id in the stored rows, every assertion
     // below would pass for the wrong reason.
-    expect(log.targetDeviceIds).toContain(DEVICE_B);
+    const rows: Array<{ device_identity_id: string }> = await ds.query(
+      `SELECT device_identity_id FROM campaign_recipients WHERE campaign_id = $1`,
+      [log.id],
+    );
+    expect(rows.map((row) => row.device_identity_id)).toContain(DEVICE_B);
   });
 
   it('pages only project A\'s tokens (the campaign worker)', async () => {
@@ -108,7 +120,7 @@ describe('PushTokensService device-id readers stay inside the project (integrati
     for (;;) {
       const page: PushTokenEntity[] = await service.getTokensByDeviceIdentityIdsPage(
         log.projectId,
-        log.targetDeviceIds ?? [],
+        storedRecipients(log.id),
         cursor,
         1,
         null,
@@ -122,21 +134,22 @@ describe('PushTokensService device-id readers stay inside the project (integrati
   });
 
   it('counts only project A\'s tokens (send, preview and journeys)', async () => {
-    expect(await service.countTokensByDeviceIdentityIds(log.projectId, log.targetDeviceIds ?? [])).toBe(2);
+    expect(await service.countTokensByDeviceIdentityIds(log.projectId, storedRecipients(log.id))).toBe(2);
     expect(await service.countTokensByDeviceIdentityIds(log.projectId, [DEVICE_B])).toBe(0);
   });
 
   it('lists only project A\'s devices (experiment arms)', async () => {
-    const ids = await service.listDeviceIdentityIds({
+    const ids = await allPushAudienceIds(service, {
       projectId: log.projectId,
-      deviceIdentityIds: log.targetDeviceIds ?? [],
+      recipients: storedRecipients(log.id),
     });
     expect(ids.sort()).toEqual([DEVICE_A1, DEVICE_A2].sort());
   });
 
   it('groups only project A\'s devices (timezone waves)', async () => {
-    const waves = await service.groupDeviceIdentitiesByTimezone(
-      { projectId: log.projectId, deviceIdentityIds: log.targetDeviceIds ?? [] },
+    const waves = await pushAudienceByTimezone(
+      service,
+      { projectId: log.projectId, recipients: storedRecipients(log.id) },
       'UTC',
     );
     expect([...waves.values()].flat().sort()).toEqual([DEVICE_A1, DEVICE_A2].sort());
@@ -146,7 +159,7 @@ describe('PushTokensService device-id readers stay inside the project (integrati
   it('still reaches project B\'s own device for project B', async () => {
     // The filter scopes, it does not merely drop B's devices everywhere.
     expect(await service.countTokensByDeviceIdentityIds(PROJECT_B, [DEVICE_B])).toBe(1);
-    expect(await service.listDeviceIdentityIds({ projectId: PROJECT_B, deviceIdentityIds: [DEVICE_B] })).toEqual([
+    expect(await allPushAudienceIds(service, { projectId: PROJECT_B, recipients: deviceList([DEVICE_B]) })).toEqual([
       DEVICE_B,
     ]);
   });

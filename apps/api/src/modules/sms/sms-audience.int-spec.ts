@@ -9,6 +9,8 @@ import {
   seedPerson,
   INT_PROJECT_ID,
 } from '../../test-support/int-db';
+import { deviceList } from '../push-notifications/recipients';
+import { allRecipientIds } from '../../test-support/audience-pages';
 
 const A = 'dddddddd-0000-0000-0000-000000000001';
 const B = 'dddddddd-0000-0000-0000-000000000002';
@@ -49,7 +51,7 @@ describe('SmsAudienceService (integration)', () => {
 
   const scope = (over: Partial<AddressAudienceScope> = {}): AddressAudienceScope => ({
     projectId: INT_PROJECT_ID,
-    deviceIdentityIds: null,
+    recipients: null,
     requireOptIn: true,
     ...over,
   });
@@ -79,7 +81,7 @@ describe('SmsAudienceService (integration)', () => {
     await person(C, '+14155550100', true);
 
     expect(await numbers(scope())).toEqual(['+14155550100', '+919876543210']);
-    expect((await service.listRecipientIds(scope())).sort()).toEqual([A, C]); // No order is promised.
+    expect((await allRecipientIds(service, scope())).sort()).toEqual([A, C]); // No order is promised.
   });
 
   it('follows SMS consent, not email consent', async () => {
@@ -104,7 +106,7 @@ describe('SmsAudienceService (integration)', () => {
     await person(B, '+14155550100', true);
 
     expect(await numbers(scope())).toEqual(['+14155550100']);
-    expect(await service.count(scope({ deviceIdentityIds: [] }), null)).toBe(0);
+    expect(await service.count(scope({ recipients: deviceList([]) }), null)).toBe(0);
   });
 
   it('without required opt-in, excludes only an explicit opt-out', async () => {

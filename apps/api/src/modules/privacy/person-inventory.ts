@@ -61,6 +61,7 @@ export const PROJECT_PREDICATES = [
   'project_id = $project',
   '"projectId" = $project',
   'link_id IN (SELECT l.id FROM links l WHERE l.project_id = $project)',
+  'campaign_id IN (SELECT c.id FROM push_notification_logs c WHERE c.project_id = $project)',
 ] as const;
 
 export function exportWhere(entry: InventoryEntry): string {
@@ -91,6 +92,7 @@ function camel(snake: string): string {
 
 const PROJECT = PROJECT_PREDICATES[0];
 const LINK_IN_PROJECT = PROJECT_PREDICATES[2];
+const CAMPAIGN_IN_PROJECT = PROJECT_PREDICATES[3];
 
 /** Orphans keyed by the verified external id (erase only). */
 const ORPHAN_BY_EXTERNAL_ID = 'device_identity_id IS NULL AND distinct_id = ANY($externalUserIds)';
@@ -113,13 +115,6 @@ const VISIBLE_SPLITS = `(SELECT COALESCE(jsonb_agg(s ORDER BY n), '[]'::jsonb)
 const PERSON_CONVERSIONS = `SELECT c.id FROM conversion_events c
   WHERE c.link_id IN (SELECT l.id FROM links l WHERE l.project_id = $project)
     AND (c.device_identity_id = ANY($ids) OR c.external_user_id = ANY($externalUserIds))`;
-
-/** Removes the person's identity ids from a jsonb array of ids, keeping the rest. */
-const withoutIds = (column: string) =>
-  `CASE WHEN ${column} ?| $idsText
-     THEN COALESCE((SELECT jsonb_agg(e) FROM jsonb_array_elements(${column}) e
-                    WHERE NOT ((e #>> '{}') = ANY($idsText))), '[]'::jsonb)
-     ELSE ${column} END`;
 
 /**
  * Every value a failure entry's `token` can hold for this person and nobody
@@ -256,20 +251,30 @@ export const PERSON_INVENTORY: InventoryEntry[] = [
     },
   },
   {
-    // Campaign rows stay; only the person leaves them: their identity ids from
-    // the target and control lists, and every failure_details entry whose
-    // token is one of their push tokens or an address only they hold. Runs
-    // before push_tokens is deleted, which it reads. Not exported: campaign
-    // data, not the person's.
+    // Who each campaign was for: the person's devices as targets, and as an
+    // experiment's held-back control. Rows go with the device anyway (cascade); deleted
+    // here so the count says so. Exported: which campaigns were meant for them.
+    name: 'campaign_recipients',
+    project: CAMPAIGN_IN_PROJECT,
+    match: 'device_identity_id = ANY($ids)',
+    erase: 'delete',
+    export: {
+      columns: cols(['campaign_id', 'role', 'device_identity_id']),
+      orderBy: 'campaign_id',
+      tieBreak: 'role, device_identity_id',
+    },
+  },
+  {
+    // Campaign rows stay; only the person leaves them: every failure_details entry
+    // whose token is one of their push tokens or an address only they hold. Runs
+    // before push_tokens is deleted, which it reads. Not exported: campaign data,
+    // not the person's.
     name: 'push_notification_logs',
     project: PROJECT,
-    match: `target_device_ids ?| $idsText OR control_device_ids ?| $idsText
-      OR (jsonb_typeof(failure_details) = 'array' AND EXISTS (
-        SELECT 1 FROM jsonb_array_elements(failure_details) f WHERE (f->>'token') = ANY(${PERSON_RECIPIENT_TOKENS})))`,
+    match: `jsonb_typeof(failure_details) = 'array' AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements(failure_details) f WHERE (f->>'token') = ANY(${PERSON_RECIPIENT_TOKENS}))`,
     erase: (where) => `UPDATE push_notification_logs
-            SET target_device_ids = ${withoutIds('target_device_ids')},
-                control_device_ids = ${withoutIds('control_device_ids')},
-                failure_details = ${withoutFailuresFor('failure_details')}
+            SET failure_details = ${withoutFailuresFor('failure_details')}
             WHERE ${where}`,
   },
   {

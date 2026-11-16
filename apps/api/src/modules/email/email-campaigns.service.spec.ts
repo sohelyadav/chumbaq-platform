@@ -11,13 +11,29 @@ describe('EmailCampaignsService', () => {
     create: jest.fn((row) => row),
     save: jest.fn(async (row) => ({ id: 'camp-1', ...row })),
     // The row and its activity entry are written in one transaction.
-    manager: { transaction: async (work: (m: unknown) => unknown) => work({ getRepository: () => logRepository }) },
+    manager: {
+      transaction: async (work: (m: unknown) => unknown) =>
+        work({
+          getRepository: () => logRepository,
+          // Storing recipients: the statement and its named parameters are recorded.
+          connection: {
+            driver: {
+              escapeQueryWithParameters: (sql: string, params: Record<string, unknown>) => {
+                stored.push({ sql, params });
+                return [sql, []];
+              },
+            },
+          },
+          query: async () => [{ n: 0 }],
+        }),
+    },
   };
   const policy = { findOne: jest.fn() };
   const queue = { add: jest.fn() };
   const settings = { requireSendable: jest.fn(), find: jest.fn() };
   const audience = { count: jest.fn() };
-  const push = { segmentDeviceIdentityIds: jest.fn() };
+  const stored: Array<{ sql: string; params: Record<string, unknown> }> = [];
+  const push = { segmentRecipients: jest.fn() };
   const registry = { get: jest.fn() };
   const unsubscribe = { url: jest.fn(() => 'https://u') };
 
@@ -55,7 +71,6 @@ describe('EmailCampaignsService', () => {
         title: 'Big sale',
         emailContent: { subject: 'Big sale', html: '<p>Sale</p>', text: null, preheader: null },
         targetType: 'project',
-        targetDeviceIds: null,
         totalTokens: 40,
         status: 'queued',
       }),
@@ -87,17 +102,27 @@ describe('EmailCampaignsService', () => {
   it('counts the audience under the frequency cap and consent policy', async () => {
     await service.send(base, REQUESTER);
     expect(audience.count).toHaveBeenCalledWith(
-      { projectId: PROJECT, deviceIdentityIds: null, requireOptIn: true },
+      { projectId: PROJECT, recipients: null, requireOptIn: true },
       3,
+      undefined,
     );
   });
 
   it('targets a segment through the same resolution push uses', async () => {
-    push.segmentDeviceIdentityIds.mockResolvedValueOnce(['d1', 'd2']);
+    const segment = { kind: 'query', sql: 'SELECT seg.id FROM seg', params: { segp1: PROJECT } };
+    push.segmentRecipients.mockResolvedValueOnce(segment);
     await service.send({ ...base, segmentId: '11111111-2222-4333-8444-555555555555' }, REQUESTER);
-    expect(logRepository.create).toHaveBeenCalledWith(
-      expect.objectContaining({ targetType: 'segment', targetDeviceIds: ['d1', 'd2'] }),
+    expect(logRepository.create).toHaveBeenCalledWith(expect.objectContaining({ targetType: 'segment' }));
+    // Staged from the segment's own query and counted there, then stored from the same
+    // query: never a list in memory, and never read through the query once per row.
+    expect(stored.find((q) => q.sql.includes('INSERT INTO staged_recipients'))?.sql).toContain(segment.sql);
+    expect(audience.count).toHaveBeenCalledWith(
+      { projectId: PROJECT, recipients: { kind: 'staged' }, requireOptIn: true },
+      3,
+      expect.anything(),
     );
+    const insert = stored.find((q) => q.sql.includes('INSERT INTO campaign_recipients'));
+    expect(insert?.sql).toContain(segment.sql);
   });
 
   it('refuses an audience nobody in which can be emailed, and says why', async () => {

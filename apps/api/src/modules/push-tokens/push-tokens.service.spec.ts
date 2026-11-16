@@ -309,8 +309,8 @@ describe('PushTokensService', () => {
         { projectId: 'proj-1' },
       );
       expect(queryBuilder.andWhere).toHaveBeenCalledWith(
-        't.device_identity_id IN (:...ids)',
-        { ids: ['dev-1', 'dev-2'] },
+        't.device_identity_id = ANY(:recipientIds::uuid[])',
+        { recipientIds: ['dev-1', 'dev-2'] },
       );
     });
   });
@@ -365,8 +365,8 @@ describe('PushTokensService', () => {
         { projectId: 'proj-1' },
       );
       expect(queryBuilder.andWhere).toHaveBeenCalledWith(
-        't.device_identity_id IN (:...ids)',
-        { ids: ['dev-1'] },
+        't.device_identity_id = ANY(:recipientIds::uuid[])',
+        { recipientIds: ['dev-1'] },
       );
       expect(queryBuilder.andWhere).toHaveBeenCalledWith('t.id > :afterId', {
         afterId: 'tok-9',

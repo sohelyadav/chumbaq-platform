@@ -179,8 +179,6 @@ export interface PushNotificationLog {
   failureDetails?: Array<{ token: string; error: string; errorCode?: string }>;
   errorMessage?: string;
   targetType: PushTargetType;
-  /** Only set when `targetType` is `devices`. */
-  targetDeviceIds?: string[] | null;
   /** Only set when `targetType` is `segment`. */
   segmentId?: string | null;
   /** Where a tap should land. Null/absent means the app's own default. */

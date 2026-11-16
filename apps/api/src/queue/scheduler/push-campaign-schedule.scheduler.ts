@@ -11,15 +11,21 @@ import {
   isValidTimezone,
   nextLocalOccurrence,
 } from '../../modules/push-notifications/local-send-time';
-import { splitAudience } from '../../modules/push-notifications/variant-assignment';
+import { assignVariant } from '../../modules/push-notifications/variant-assignment';
 import { shiftOutOfQuietHours } from '../../modules/push-notifications/local-send-time';
 import { PushConfigEntity } from '../../modules/push-notifications/entities/push-config.entity';
 import { nextOccurrence, nextOccurrenceAfterNow } from '../../modules/push-notifications/recurrence';
 import {
+  DEFAULT_SEND_HOUR,
   bestHourPerDevice,
-  groupBySendHour,
   hourToLocalTime,
 } from '../../modules/push-notifications/send-time-optimisation';
+import {
+  RecipientRow,
+  copyRecipients,
+  insertRecipientRows,
+  storedRecipients,
+} from '../../modules/push-notifications/recipients';
 import { PushAnalyticsService } from '../../modules/push-notifications/push-analytics.service';
 import { EmailAudienceService } from '../../modules/email/email-audience.service';
 import { EmailSettingsService } from '../../modules/email/email-settings.service';
@@ -38,6 +44,9 @@ import {
   JOB_DISPATCH_CAMPAIGN,
   PushCampaignJobData,
 } from '../queue.constants';
+
+/** Audience rows read per page when a campaign is split into arms or waves. */
+export const SPLIT_PAGE_SIZE = 5000;
 
 /**
  * Promotes scheduled campaigns onto the delivery queue when their time comes.
@@ -70,63 +79,44 @@ export class PushCampaignScheduleScheduler {
   ) {}
 
   /**
-   * The people a parent campaign is split across, from the right channel.
+   * The people a parent campaign is split across, from the right channel, a page at a
+   * time with each one's timezone, so no audience is ever held in memory whole.
    *
-   * Push splits over identities holding a live token; email and SMS over
-   * one identity per reachable address. Asking push for an email campaign's
-   * audience would assign arms and waves to people who cannot receive it and
-   * leave out people who can.
+   * Push splits over identities holding a live token; email, SMS and WhatsApp over
+   * one identity per reachable address. Asking push for an email campaign's audience
+   * would assign arms and waves to people who cannot receive it and leave out people
+   * who can.
    */
-  private async audienceOf(parent: PushNotificationLogEntity): Promise<string[]> {
-    if (parent.channel === 'email') {
-      return this.emailAudience.listRecipientIds(await this.addressScope(parent));
-    }
-    if (parent.channel === 'sms') {
-      return this.smsAudience.listRecipientIds(await this.addressScope(parent));
-    }
-    if (parent.channel === 'whatsapp') {
-      return this.whatsappAudience.listRecipientIds(await this.addressScope(parent));
-    }
-    return this.pushTokensService.listDeviceIdentityIds(
-      parent.targetType === 'project'
-        ? { projectId: parent.projectId }
-        : {
-            projectId: parent.projectId,
-            deviceIdentityIds: parent.targetDeviceIds ?? [],
-          },
-    );
-  }
-
-  private async audienceByTimezone(
+  private async *audiencePages(
     parent: PushNotificationLogEntity,
-  ): Promise<Map<string, string[]>> {
-    if (parent.channel === 'email') {
-      return this.emailAudience.groupByTimezone(
-        await this.addressScope(parent),
-        DEFAULT_TIMEZONE,
-      );
+  ): AsyncGenerator<Array<{ id: string; timezone: string }>> {
+    const addressed =
+      parent.channel === 'email'
+        ? this.emailAudience
+        : parent.channel === 'sms'
+          ? this.smsAudience
+          : parent.channel === 'whatsapp'
+            ? this.whatsappAudience
+            : null;
+    const addressScope = addressed ? await this.addressScope(parent) : null;
+    const recipients = parent.targetType === 'project' ? null : storedRecipients(parent.id);
+
+    let after: string | null = null;
+    for (;;) {
+      const page: Array<{ id: string; timezone: string }> =
+        addressed && addressScope
+          ? await addressed.pageIds(addressScope, after, SPLIT_PAGE_SIZE, DEFAULT_TIMEZONE)
+          : await this.pushTokensService.pageAudience(
+              { projectId: parent.projectId, recipients },
+              after,
+              SPLIT_PAGE_SIZE,
+              DEFAULT_TIMEZONE,
+            );
+      if (page.length === 0) return;
+      yield page;
+      if (page.length < SPLIT_PAGE_SIZE) return;
+      after = page[page.length - 1].id;
     }
-    if (parent.channel === 'sms') {
-      return this.smsAudience.groupByTimezone(
-        await this.addressScope(parent),
-        DEFAULT_TIMEZONE,
-      );
-    }
-    if (parent.channel === 'whatsapp') {
-      return this.whatsappAudience.groupByTimezone(
-        await this.addressScope(parent),
-        DEFAULT_TIMEZONE,
-      );
-    }
-    return this.pushTokensService.groupDeviceIdentitiesByTimezone(
-      parent.targetType === 'project'
-        ? { projectId: parent.projectId }
-        : {
-            projectId: parent.projectId,
-            deviceIdentityIds: parent.targetDeviceIds ?? [],
-          },
-      DEFAULT_TIMEZONE,
-    );
   }
 
   /** The audience scope of an email or SMS parent, under its channel's consent policy. */
@@ -139,8 +129,7 @@ export class PushCampaignScheduleScheduler {
           : await this.emailSettings.find(parent.projectId);
     return {
       projectId: parent.projectId,
-      deviceIdentityIds:
-        parent.targetType === 'project' ? null : (parent.targetDeviceIds ?? []),
+      recipients: parent.targetType === 'project' ? null : storedRecipients(parent.id),
       requireOptIn: settings?.requireOptIn ?? true,
     };
   }
@@ -352,7 +341,6 @@ export class PushCampaignScheduleScheduler {
       translations: template.translations,
       sendTimeOptimised: template.sendTimeOptimised,
       targetType: template.targetType,
-      targetDeviceIds: template.targetDeviceIds,
       segmentId: template.segmentId,
       // Carried so a recurring campaign can also be an experiment or be
       // delivered in local time — the later sweeps pick the occurrence up.
@@ -370,7 +358,14 @@ export class PushCampaignScheduleScheduler {
       status: 'scheduled',
     } as Partial<PushNotificationLogEntity>) as PushNotificationLogEntity;
 
-    await this.logRepository.save(occurrence);
+    // The occurrence sends to the template's recipients, written with it, so it can
+    // never be promoted (by another instance) before they exist.
+    await this.logRepository.manager.transaction(async (manager) => {
+      await manager.getRepository(PushNotificationLogEntity).save(occurrence);
+      if (template.targetType !== 'project') {
+        await copyRecipients(manager, template.id, occurrence.id);
+      }
+    });
     this.logger.log(
       `Recurring campaign ${template.id} spawned occurrence ${occurrence.id}`,
     );
@@ -431,78 +426,94 @@ export class PushCampaignScheduleScheduler {
     parent: PushNotificationLogEntity,
   ): Promise<void> {
     const variants = parent.variants ?? [];
-    const audience = await this.audienceOf(parent);
+    const controlPercentage = parent.controlPercentage ?? 0;
 
-    const { control, byVariant } = splitAudience(
-      parent.id,
-      audience,
-      variants,
-      parent.controlPercentage ?? 0,
-    );
+    // One transaction: the arms and their recipients become visible together, so no
+    // instance can promote an arm whose recipients are still being written.
+    const { arms, control } = await this.logRepository.manager.transaction(async (manager) => {
+      const repo = manager.getRepository(PushNotificationLogEntity);
+      const arms = new Map<string, { child: PushNotificationLogEntity; size: number }>();
+      for (const variant of variants) {
+        const child = await repo.save(this.variantChild(parent, variant));
+        arms.set(variant.key, { child, size: 0 });
+      }
 
-    // Recorded even when empty, so the report can distinguish "no control
-    // group was configured" from "the control group drew nobody".
-    await this.logRepository.update(
-      { id: parent.id },
-      { controlDeviceIds: control },
-    );
+      // The control slice gets no child: sending nothing is the point. It is stored
+      // on the parent as `control` rows for the report to measure against.
+      let control = 0;
+      for await (const page of this.audiencePages(parent)) {
+        const rows: RecipientRow[] = page.map(({ id }) => {
+          const assignment = assignVariant(parent.id, id, variants, controlPercentage);
+          if (assignment.arm === 'control') {
+            control += 1;
+            return { campaignId: parent.id, role: 'control', deviceIdentityId: id };
+          }
+          const arm = arms.get(assignment.key)!;
+          arm.size += 1;
+          return { campaignId: arm.child.id, role: 'target', deviceIdentityId: id };
+        });
+        await insertRecipientRows(manager, rows);
+      }
 
-    const children = variants
-      .filter((variant) => (byVariant.get(variant.key) ?? []).length > 0)
-      .map((variant) => {
-        const deviceIdentityIds = byVariant.get(variant.key)!;
-        return this.logRepository.create({
-          projectId: parent.projectId,
-          channel: parent.channel,
-          emailContent: this.variantEmail(parent, variant),
-          whatsappContent: this.variantWhatsApp(parent, variant),
-          parentCampaignId: parent.id,
-          variantKey: variant.key,
-          // The arm's own copy. Downstream, this child is just a campaign.
-          title: variant.title,
-          body: variant.body ?? parent.body,
-          imageUrl: variant.imageUrl ?? parent.imageUrl,
-          deepLinkUrl: variant.deepLinkUrl ?? parent.deepLinkUrl,
-          // The arm's own languages, never the parent's: a campaign-level
-          // translation would overwrite the copy this arm is testing.
-          translations: variant.translations ?? null,
-          data: parent.data,
-          silent: parent.silent,
-          deliveryOptions: parent.deliveryOptions,
-          // Buttons are campaign-level furniture, not part of what an arm is
-          // testing, so every arm carries the same set.
-          actions: parent.actions,
-          iosCategory: parent.iosCategory,
-          carousel: parent.carousel,
-          timer: parent.timer,
-          sendTimeOptimised: parent.sendTimeOptimised,
-          // Inherited so an experiment can also be delivered in local time —
-          // the timezone sweep splits each arm again.
-          deliverInRecipientTimezone: parent.deliverInRecipientTimezone,
-          localSendTime: parent.localSendTime,
-          targetType: 'devices',
-          targetDeviceIds: deviceIdentityIds,
-          segmentId: parent.segmentId,
-          totalTokens: deviceIdentityIds.length,
-          processedTokens: 0,
-          successCount: 0,
-          failureCount: 0,
-          scheduledAt: parent.scheduledAt ?? new Date(),
-          status: 'scheduled',
-        } as Partial<PushNotificationLogEntity>) as PushNotificationLogEntity;
-      });
+      for (const arm of arms.values()) {
+        if (arm.size === 0) await repo.delete({ id: arm.child.id });
+        else await repo.update({ id: arm.child.id }, { totalTokens: arm.size });
+      }
+      return { arms: [...arms.values()].filter((arm) => arm.size > 0), control };
+    });
 
-    if (children.length === 0) {
+    if (arms.length === 0) {
       this.logger.warn(
         `Experiment ${parent.id} produced no arms — its audience had no reachable devices`,
       );
       return;
     }
-
-    await this.logRepository.save(children);
     this.logger.log(
-      `Experiment ${parent.id} split into ${children.length} arm(s), ${control.length} held back as control`,
+      `Experiment ${parent.id} split into ${arms.length} arm(s), ${control} held back as control`,
     );
+  }
+
+  /** One arm of an experiment, as an ordinary campaign with the arm's own copy. */
+  private variantChild(parent: PushNotificationLogEntity, variant: PushVariant): PushNotificationLogEntity {
+    return this.logRepository.create({
+      projectId: parent.projectId,
+      channel: parent.channel,
+      emailContent: this.variantEmail(parent, variant),
+      whatsappContent: this.variantWhatsApp(parent, variant),
+      parentCampaignId: parent.id,
+      variantKey: variant.key,
+      // The arm's own copy. Downstream, this child is just a campaign.
+      title: variant.title,
+      body: variant.body ?? parent.body,
+      imageUrl: variant.imageUrl ?? parent.imageUrl,
+      deepLinkUrl: variant.deepLinkUrl ?? parent.deepLinkUrl,
+      // The arm's own languages, never the parent's: a campaign-level
+      // translation would overwrite the copy this arm is testing.
+      translations: variant.translations ?? null,
+      data: parent.data,
+      silent: parent.silent,
+      deliveryOptions: parent.deliveryOptions,
+      // Buttons are campaign-level furniture, not part of what an arm is
+      // testing, so every arm carries the same set.
+      actions: parent.actions,
+      iosCategory: parent.iosCategory,
+      carousel: parent.carousel,
+      timer: parent.timer,
+      sendTimeOptimised: parent.sendTimeOptimised,
+      // Inherited so an experiment can also be delivered in local time —
+      // the timezone sweep splits each arm again.
+      deliverInRecipientTimezone: parent.deliverInRecipientTimezone,
+      localSendTime: parent.localSendTime,
+      // Its recipients are its own stored rows, written by the split.
+      targetType: 'devices',
+      segmentId: parent.segmentId,
+      totalTokens: 0,
+      processedTokens: 0,
+      successCount: 0,
+      failureCount: 0,
+      scheduledAt: parent.scheduledAt ?? new Date(),
+      status: 'scheduled',
+    } as Partial<PushNotificationLogEntity>) as PushNotificationLogEntity;
   }
 
   /** Rebuilds an entity from a RETURNING * row. */
@@ -580,96 +591,120 @@ export class PushCampaignScheduleScheduler {
   ): Promise<void> {
     const localSendTime = parent.localSendTime ?? '09:00';
 
-    const grouped = await this.audienceByTimezone(parent);
-
     // Quiet hours are expressed on the recipient's clock, so they can only be
     // applied once a campaign has a single known zone per wave — which is
     // exactly what this split produces.
     const config = await this.configRepository.findOne({
       where: { projectId: parent.projectId },
     });
-
-    // For an optimised campaign each zone splits again by the hour its
-    // recipients actually engage, so one wave becomes several.
-    const bestHours = parent.sendTimeOptimised
-      ? bestHourPerDevice(
-          await this.pushAnalytics.clickHoursForDevices(
-            parent.projectId,
-            [...grouped.values()].flat(),
-          ),
-        )
-      : new Map<string, number | null>();
-
     const now = new Date();
-    const children: PushNotificationLogEntity[] = [];
 
-    for (const [timezone, deviceIdentityIds] of grouped) {
-      // A device can report any string as its timezone. An unrecognised one
-      // falls back rather than throwing, which would strand the whole campaign
-      // because of one bad row.
-      const zone = isValidTimezone(timezone) ? timezone : DEFAULT_TIMEZONE;
+    // One transaction: the waves and their recipients become visible together, so no
+    // instance can promote a wave whose recipients are still being written.
+    const waves = await this.logRepository.manager.transaction(async (manager) => {
+      const repo = manager.getRepository(PushNotificationLogEntity);
+      const waves = new Map<string, { child: PushNotificationLogEntity; size: number }>();
 
-      const waves = parent.sendTimeOptimised
-        ? [...groupBySendHour(deviceIdentityIds, bestHours)].map(
-            ([hour, ids]) => ({ time: hourToLocalTime(hour), ids }),
-          )
-        : [{ time: localSendTime, ids: deviceIdentityIds }];
+      for await (const page of this.audiencePages(parent)) {
+        // For an optimised campaign each zone splits again by the hour its
+        // recipients actually engage, so one wave becomes several.
+        const bestHours = parent.sendTimeOptimised
+          ? bestHourPerDevice(
+              await this.pushAnalytics.clickHoursForDevices(
+                parent.projectId,
+                page.map((row) => row.id),
+              ),
+            )
+          : new Map<string, number | null>();
 
-      for (const wave of waves) children.push(
-        this.logRepository.create({
-          projectId: parent.projectId,
-          channel: parent.channel,
-          emailContent: parent.emailContent,
-          whatsappContent: parent.whatsappContent,
-          parentCampaignId: parent.id,
-          title: parent.title,
-          body: parent.body,
-          data: parent.data,
-          imageUrl: parent.imageUrl,
-          deepLinkUrl: parent.deepLinkUrl,
-          silent: parent.silent,
-          deliveryOptions: parent.deliveryOptions,
-          actions: parent.actions,
-          iosCategory: parent.iosCategory,
-          translations: parent.translations,
-          carousel: parent.carousel,
-          timer: parent.timer,
-          // Carried so a wave split off an experiment arm stays attributable
-          // to that arm. `sendTimeOptimised` deliberately is not: this wave's
-          // hour is already resolved, and re-flagging it would ask the sweep
-          // to split an already-split campaign again.
-          variantKey: parent.variantKey,
-          // Always an explicit device list: the parent's own audience has
-          // already been split, so a child must never re-resolve it.
-          targetType: 'devices',
-          targetDeviceIds: wave.ids,
-          segmentId: parent.segmentId,
-          totalTokens: wave.ids.length,
-          processedTokens: 0,
-          successCount: 0,
-          failureCount: 0,
-          scheduledAt: shiftOutOfQuietHours(
-            nextLocalOccurrence(wave.time, zone, now),
-            zone,
-            config?.quietHoursStart ?? null,
-            config?.quietHoursEnd ?? null,
-          ),
-          status: 'scheduled',
-        } as Partial<PushNotificationLogEntity>) as PushNotificationLogEntity,
-      );
-    }
+        const rows: RecipientRow[] = [];
+        for (const { id, timezone } of page) {
+          // A device can report any string as its timezone. An unrecognised one
+          // falls back rather than throwing, which would strand the whole campaign
+          // because of one bad row.
+          const zone = isValidTimezone(timezone) ? timezone : DEFAULT_TIMEZONE;
+          // Without a habit, the default hour: send-time optimisation refines when a
+          // campaign goes out, never who receives it.
+          const time = parent.sendTimeOptimised
+            ? hourToLocalTime(bestHours.get(id) ?? DEFAULT_SEND_HOUR)
+            : localSendTime;
+          const key = `${zone} ${time}`;
+          let wave = waves.get(key);
+          if (!wave) {
+            const child = await repo.save(this.timezoneChild(parent, zone, time, config, now));
+            wave = { child, size: 0 };
+            waves.set(key, wave);
+          }
+          wave.size += 1;
+          rows.push({ campaignId: wave.child.id, role: 'target', deviceIdentityId: id });
+        }
+        await insertRecipientRows(manager, rows);
+      }
 
-    if (children.length === 0) {
+      for (const wave of waves.values()) {
+        await repo.update({ id: wave.child.id }, { totalTokens: wave.size });
+      }
+      return waves;
+    });
+
+    if (waves.size === 0) {
       this.logger.warn(
         `Campaign ${parent.id} expanded to no timezones — its audience had no reachable devices`,
       );
       return;
     }
-
-    await this.logRepository.save(children);
     this.logger.log(
-      `Campaign ${parent.id} split into ${children.length} timezone wave(s)`,
+      `Campaign ${parent.id} split into ${waves.size} timezone wave(s)`,
     );
+  }
+
+  /** One wave: the parent sent at `time` on `zone`'s clock, out of quiet hours. */
+  private timezoneChild(
+    parent: PushNotificationLogEntity,
+    zone: string,
+    time: string,
+    config: PushConfigEntity | null,
+    now: Date,
+  ): PushNotificationLogEntity {
+    return this.logRepository.create({
+      projectId: parent.projectId,
+      channel: parent.channel,
+      emailContent: parent.emailContent,
+      whatsappContent: parent.whatsappContent,
+      parentCampaignId: parent.id,
+      title: parent.title,
+      body: parent.body,
+      data: parent.data,
+      imageUrl: parent.imageUrl,
+      deepLinkUrl: parent.deepLinkUrl,
+      silent: parent.silent,
+      deliveryOptions: parent.deliveryOptions,
+      actions: parent.actions,
+      iosCategory: parent.iosCategory,
+      translations: parent.translations,
+      carousel: parent.carousel,
+      timer: parent.timer,
+      // Carried so a wave split off an experiment arm stays attributable
+      // to that arm. `sendTimeOptimised` deliberately is not: this wave's
+      // hour is already resolved, and re-flagging it would ask the sweep
+      // to split an already-split campaign again.
+      variantKey: parent.variantKey,
+      // Always its own stored recipients: the parent's audience has already
+      // been split, so a child must never re-resolve it.
+      targetType: 'devices',
+      segmentId: parent.segmentId,
+      totalTokens: 0,
+      processedTokens: 0,
+      successCount: 0,
+      failureCount: 0,
+      scheduledAt: shiftOutOfQuietHours(
+        nextLocalOccurrence(time, zone, now),
+        zone,
+        config?.quietHoursStart ?? null,
+        config?.quietHoursEnd ?? null,
+      ),
+      status: 'scheduled',
+    } as Partial<PushNotificationLogEntity>) as PushNotificationLogEntity;
   }
 
   /**

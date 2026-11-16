@@ -45,7 +45,13 @@ describe('PushAnalyticsService', () => {
   let qb: ReturnType<typeof makeQueryBuilder>;
 
   const eventRepo = { createQueryBuilder: jest.fn() };
-  const logRepo = { findOne: jest.fn(), find: jest.fn() };
+  // `query` answers the control-group count (campaign_recipients rows of role control).
+  let controlRows = 0;
+  const logRepo = {
+    findOne: jest.fn(),
+    find: jest.fn(),
+    query: jest.fn(async (sql: string) => (sql.includes("role = 'control'") ? [{ n: controlRows }] : [])),
+  };
   const identityService = { findByFingerprintAndProject: jest.fn() };
   const touchpointsService = { record: jest.fn() };
 
@@ -351,7 +357,6 @@ describe('PushAnalyticsService', () => {
       logRepo.findOne.mockResolvedValueOnce({
         id: 'exp-1',
         variants: [{ key: 'A' }, { key: 'B' }],
-        controlDeviceIds: [],
         ...parent,
       });
       // Two reads: the arms under the experiment, then any waves under those
@@ -527,15 +532,14 @@ describe('PushAnalyticsService', () => {
     });
 
     it('reports the held-back control size', async () => {
-      arrange(
-        [arm('A', 'a1', 5, 5), arm('B', 'b1', 5, 5)],
-        [],
-        { controlDeviceIds: ['d1', 'd2', 'd3'] },
-      );
+      controlRows = 3;
+      arrange([arm('A', 'a1', 5, 5), arm('B', 'b1', 5, 5)], []);
 
       const report = await service.getExperimentReport('proj-1', 'exp-1');
 
       expect(report.controlSize).toBe(3);
+      expect(logRepo.query).toHaveBeenCalledWith(expect.stringContaining("role = 'control'"), ['exp-1']);
+      controlRows = 0;
     });
 
     it('handles a campaign that is not an experiment', async () => {
