@@ -1,6 +1,7 @@
 import { newClientIp } from '../../support/api';
 import { expect, test } from '../../support/fixtures';
 import { runJobNow, WORKER_JOBS, type WorkerJob } from '../../support/jobs';
+import { campaignRow, pushProject, seedLogRow } from '../../support/areas/push';
 import { addDevice, attribute, createSegment, group, insertEvent, segmentRow, segProject, sql, uniqueId } from '../../support/areas/seg';
 
 /**
@@ -55,10 +56,41 @@ test.describe('worker jobs on demand', () => {
       .toBe(1);
   });
 
-  test('every job runs once without logging an error', async () => {
+  test('push-schedule-tick promotes a due campaign, and push-reconcile fails a stranded one', async () => {
+    const p = await pushProject('jobs-push', { fcm: true });
+    const due = await seedLogRow(p.project.id, {
+      title: 'Jobs due',
+      status: 'scheduled',
+      scheduled_at: new Date(Date.now() - 60_000),
+      total_tokens: 0,
+      success_count: 0,
+      processed_tokens: 0,
+    });
+    const stranded = await seedLogRow(p.project.id, {
+      title: 'Jobs stranded',
+      status: 'queued',
+      total_tokens: 10,
+      success_count: 0,
+      processed_tokens: 0,
+      updated_at: new Date(Date.now() - 20 * 60_000),
+    });
+
+    // The tick covers every project on the lane, so another test's campaign may log here.
+    await runJobNow('push-schedule-tick', { allowErrors: true });
+    expect((await campaignRow(due))?.status).not.toBe('scheduled');
+
+    await runJobNow('push-reconcile', { allowErrors: true });
+    const row = await campaignRow(stranded);
+    expect(row?.status).toBe('failed');
+    expect(row?.completed_at).not.toBeNull();
+  });
+
+  test('every job runs once', async () => {
     test.setTimeout(300_000);
+    // These cover every project on the lane, where other tests' campaigns may fail on purpose.
+    const sharedLogs: WorkerJob[] = ['push-schedule-tick', 'push-reconcile'];
     for (const name of Object.keys(WORKER_JOBS) as WorkerJob[]) {
-      const run = await runJobNow(name);
+      const run = await runJobNow(name, { allowErrors: sharedLogs.includes(name) });
       expect(run.result, name).toBeNull();
     }
   });

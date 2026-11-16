@@ -33,6 +33,18 @@ export const WORKER_JOBS = {
   'segment-refresh': { file: 'queue/scheduler/segment-refresh.scheduler.js', className: 'SegmentRefreshScheduler', method: 'handleRefresh' },
   /** Journey tick (every minute): enrol people who newly match, then advance due runs. */
   'journey-tick': { file: 'queue/scheduler/journey.scheduler.js', className: 'JourneyScheduler', method: 'handleTick' },
+  /** Journey runs claimed and never resolved, made due again (every 5 minutes). */
+  'journey-stranded-sweep': { file: 'queue/scheduler/journey.scheduler.js', className: 'JourneyScheduler', method: 'handleStrandedRuns' },
+  /**
+   * Push schedule tick (every minute), for every channel's campaigns: suspension
+   * retirements, recurring spawns, experiment and timezone splits, then promotion of due
+   * campaigns onto the queue (the stack's worker sends them).
+   */
+  'push-schedule-tick': { file: 'queue/scheduler/push-campaign-schedule.scheduler.js', className: 'PushCampaignScheduleScheduler', method: 'handleTick' },
+  /** Queued or sending campaigns with no live job and no progress for 15 minutes, failed (every 5 minutes). */
+  'push-reconcile': { file: 'queue/scheduler/push-campaign-reconciliation.scheduler.js', className: 'PushCampaignReconciliationScheduler', method: 'handleSweep' },
+  /** Pending email double opt-in confirmations, mailed through the tenant's provider (every minute). */
+  'email-confirmations': { file: 'queue/scheduler/email-confirmation.scheduler.js', className: 'EmailConfirmationScheduler', method: 'tick' },
 } as const;
 
 export type WorkerJob = keyof typeof WORKER_JOBS;

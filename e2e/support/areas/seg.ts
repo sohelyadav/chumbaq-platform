@@ -1,6 +1,4 @@
-import { execFile } from 'child_process';
 import { createHmac, randomBytes } from 'crypto';
-import path from 'path';
 import type { Browser, Locator, Page } from '@playwright/test';
 import { Queue } from 'bullmq';
 import { Client } from 'pg';
@@ -8,7 +6,7 @@ import { adminApi, enrolAndSignInStaff } from '../admin';
 import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, type Account, type Project } from '../api';
 import { newPersonContext } from '../fixtures';
 import { runJobNow } from '../jobs';
-import { appEnvironment, assertE2eDatabase, REPO_ROOT, runSecrets, stackEnv, stackPorts } from '../stack';
+import { assertE2eDatabase, stackEnv } from '../stack';
 
 /**
  * Helpers for the audiences (segments) and journeys specs (SEG): a project with an
@@ -809,28 +807,11 @@ export async function tickNow(): Promise<string> {
 }
 
 /**
- * Runs one scheduler method of the built worker once (as `runJobNow` does, through the
- * same `run-job.cjs`), for a method `WORKER_JOBS` does not list. Answers what it printed.
+ * The journey scheduler's five-minute sweep of stranded runs, now (`runJobNow`). Answers
+ * what it printed; an error line from another test's journey is allowed.
  */
-export async function runWorkerMethod(file: string, className: string, method: string): Promise<string> {
-  const env = { ...process.env, ...appEnvironment(runSecrets(), stackPorts()) };
-  return new Promise<string>((resolve, reject) => {
-    execFile(
-      process.execPath,
-      [path.join(__dirname, '../run-job.cjs'), file, className, method],
-      { cwd: path.join(REPO_ROOT, 'apps/api'), env, timeout: 90_000, maxBuffer: 16 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        const all = `${stdout}${stderr}`;
-        if (error) reject(new Error(`Worker method ${className}.${method} failed (${error.message.split('\n')[0]}):\n${all}`));
-        else resolve(all);
-      },
-    );
-  });
-}
-
-/** The journey scheduler's five-minute sweep of stranded runs, now. */
 export async function sweepStrandedRunsNow(): Promise<string> {
-  return runWorkerMethod('queue/scheduler/journey.scheduler.js', 'JourneyScheduler', 'handleStrandedRuns');
+  return (await runJobNow('journey-stranded-sweep', { allowErrors: true, timeoutMs: 90_000 })).output;
 }
 
 /** Makes every active run of the journey due now, as if its wait had run out. */

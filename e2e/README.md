@@ -266,9 +266,9 @@ Kinds of helper the P1 specs added, to reuse before writing another:
   registrations Chromium's virtual one will not make (`acct`), and staff passkeys copied
   between browser contexts over CDP (`admops`).
 - **Time**: rows aged in SQL, `page.clock` for the dashboard's own timers and polling,
-  and worker methods not in `WORKER_JOBS` run the same way `runJobNow` runs them (the
-  push schedule tick and reconcile sweep in `push`, the journey stranded-run sweep in
-  `seg`).
+  and worker jobs run now through `runJobNow` (`push` wraps the push schedule tick and
+  reconcile sweep as `runPushJob`, `seg` the journey stranded-run sweep as
+  `sweepStrandedRunsNow`; both allow error lines from other tests' rows).
 - **Shared rows**: the single `usage_rollup_state` row is changed only under a session
   advisory lock (`admten` sets exact values and puts them back; `bill` only widens the
   counted range); journey ticks run one at a time across workers (`seg`).
@@ -323,16 +323,23 @@ scheduler method the cron calls, and exits. It refuses to run if any cron was mo
 The stack's worker keeps its own schedule, which these jobs already tolerate (claims,
 advisory locks, conditional updates). Names (`WORKER_JOBS`): `billing-reconcile`,
 `billing-outbox`, `mau-notices`, `usage-rollup`, `factor-reset-sweep`,
-`incident-reminders`, `segment-refresh` and `journey-tick`.
+`incident-reminders`, `segment-refresh`, `journey-tick`, `journey-stranded-sweep`,
+`push-schedule-tick` (every channel's campaigns: recurring spawns, experiment and
+timezone splits, promotion), `push-reconcile` and `email-confirmations`. A cron not
+listed there is added with its built file, class and method; nothing else changes.
 
 - Each cron method catches and logs its own failures, so a run whose output has a Nest
   `ERROR` line throws; pass `{ allowErrors: true }` to read the output instead.
 - `segment-refresh` only enqueues; the stack's worker materialises, so poll
   `last_materialized_at` afterwards. Jobs keyed on time (the usage roll-up's days,
   factor-reset waits, incident ages, journey waits) are moved by ageing rows in SQL.
-- The once-a-minute jobs (`billing-outbox`, `incident-reminders`, `journey-tick`) also run
-  on the stack's own worker, so a case cannot tell whose run did the work; assert the
-  outcome, not who produced it.
+- The once-a-minute jobs (`billing-outbox`, `incident-reminders`, `journey-tick`,
+  `push-schedule-tick`, `email-confirmations`) also run on the stack's own worker, so a
+  case cannot tell whose run did the work; assert the outcome, not who produced it.
+- Every job covers all projects on the lane. The push jobs log errors for other tests'
+  campaigns that fail on purpose, so call them with `{ allowErrors: true }` and assert
+  on your own rows.
+- `push-schedule-tick` only promotes; the stack's worker sends, so poll the campaign row.
 - It runs the built API (`apps/api/dist`): rebuild (run without `E2E_SKIP_BUILD`) after
   changing worker code.
 

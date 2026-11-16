@@ -1,4 +1,3 @@
-import { execFile } from 'child_process';
 import { generateKeyPairSync, randomBytes, randomUUID } from 'crypto';
 import { readFileSync } from 'fs';
 import path from 'path';
@@ -9,7 +8,8 @@ import { api, apiUrl, createAccount, createApiKey, createProject, newClientIp, t
 import { seedFcmConfig, type FakeServiceAccount } from '../channels';
 import { newPersonContext } from '../fixtures';
 import { failStub, stubCalls } from '../provider-stub';
-import { appEnvironment, assertE2eDatabase, LOG_DIR, REPO_ROOT, runSecrets, stackEnv, stackPorts } from '../stack';
+import { runJobNow, type WorkerJob } from '../jobs';
+import { assertE2eDatabase, LOG_DIR, stackEnv } from '../stack';
 
 /**
  * Helpers for the push specs (PUSH): projects with a seeded FCM connection, devices
@@ -795,48 +795,16 @@ export function backArrow(page: Page): Locator {
 
 // ---- P1 chunk 4: push worker jobs on demand, channel credentials, worker log
 
-/**
- * The push schedulers `runJobNow` does not list, run once the way their crons run them,
- * through the shared `run-job.cjs` (a short-lived copy of the worker with no crons and no
- * queue consumers; jobs it enqueues are run by the stack's worker).
- */
-const PUSH_JOBS = {
-  /** Every minute: suspension retirements, recurring spawns, experiment and timezone splits, promotion. */
-  'push-schedule-tick': {
-    file: 'queue/scheduler/push-campaign-schedule.scheduler.js',
-    className: 'PushCampaignScheduleScheduler',
-    method: 'handleTick',
-  },
-  /** Every 5 minutes: queued or sending campaigns with no job and no progress for 15 minutes. */
-  'push-reconcile': {
-    file: 'queue/scheduler/push-campaign-reconciliation.scheduler.js',
-    className: 'PushCampaignReconciliationScheduler',
-    method: 'handleSweep',
-  },
-} as const;
-
-export type PushJob = keyof typeof PUSH_JOBS;
+/** The push schedulers, by the names `WORKER_JOBS` gives them. */
+export type PushJob = Extract<WorkerJob, 'push-schedule-tick' | 'push-reconcile'>;
 
 /**
- * Runs a push scheduler once and answers what it printed. The tick covers every project
- * on the lane, so another test's campaign may log its own errors here: by default an
+ * Runs a push scheduler once (`runJobNow`) and answers what it printed. The tick covers
+ * every project on the lane, so another test's campaign may log its own errors here: an
  * error line is allowed, and callers assert on their own rows.
  */
 export async function runPushJob(name: PushJob, options: { timeoutMs?: number } = {}): Promise<string> {
-  const job = PUSH_JOBS[name];
-  const env = { ...process.env, ...appEnvironment(runSecrets(), stackPorts()) };
-  return new Promise<string>((resolve, reject) => {
-    execFile(
-      process.execPath,
-      [path.join(__dirname, '..', 'run-job.cjs'), job.file, job.className, job.method],
-      { cwd: path.join(REPO_ROOT, 'apps/api'), env, timeout: options.timeoutMs ?? 60_000, maxBuffer: 16 * 1024 * 1024 },
-      (error, stdout, stderr) => {
-        const all = `${stdout}${stderr}`;
-        if (error) reject(new Error(`Push job ${name} failed (${error.message.split('\n')[0]}):\n${all}`));
-        else resolve(all);
-      },
-    );
-  });
+  return (await runJobNow(name, { allowErrors: true, timeoutMs: options.timeoutMs })).output;
 }
 
 /** What the stack's worker has logged so far on this lane. */
