@@ -60,6 +60,7 @@ import {
   widgetRowStat,
   IPHONE_SAFARI_UA,
   type InAppProject,
+  type RawResponse,
 } from '../../support/areas/inapp';
 
 /**
@@ -537,6 +538,19 @@ test('INAPP-314 activate failure on the detail page is silent', async ({ page })
   const live = await messageIn(p.owner, p.project.id, 'active', { name: 'Live campaign' });
   await signIn(page, p.owner);
   const errors = collectPageErrors(page);
+  const triggerFailed = await failRequests(page, (method, pathname) => method === 'POST' && pathname.endsWith('/in-app-messages/trigger'));
+  // The control: a trigger that fails, which the page does report. Its toast, shown
+  // after the failure under test, is then the only one on screen.
+  const failTrigger = async () => {
+    const before = triggerFailed.length;
+    await page.getByRole('button', { name: 'Trigger Now', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Trigger Message Now' });
+    await dialog.getByRole('button', { name: 'All Users', exact: true }).click();
+    await expect.poll(() => triggerFailed.length).toBe(before + 1);
+    await expect(toastWithTitle(page, 'Failed to trigger')).toBeVisible();
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+  };
 
   await page.goto(`/projects/${p.project.id}/in-app-messages/${draft.id}`);
   await expect(detailBadge(page, 'Untitled draft').getByText('Draft', { exact: true })).toBeVisible();
@@ -548,7 +562,8 @@ test('INAPP-314 activate failure on the detail page is silent', async ({ page })
   // Expected (current code): an unhandled rejection and nothing on the page.
   await expect.poll(() => errors.length).toBeGreaterThan(0);
   expect(errors.join('\n')).toContain('status code 400');
-  expect(await toastTitles(page)).toEqual([]);
+  await failTrigger();
+  await expect(toastTitles(page)).resolves.toEqual(['Failed to trigger']);
   await expect(detailBadge(page, 'Untitled draft').getByText('Draft', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Activate', exact: true })).toBeVisible();
   expect((await messageRow(draft.id))?.status).toBe('draft');
@@ -562,10 +577,13 @@ test('INAPP-314 activate failure on the detail page is silent', async ({ page })
   await expect.poll(() => failed.length).toBe(1);
   await expect.poll(() => errors.length).toBeGreaterThan(0);
   expect(errors.join('\n')).toContain('status code 500');
-  expect(await toastTitles(page)).toEqual([]);
+  await failTrigger();
+  await expect(toastTitles(page)).resolves.toEqual(['Failed to trigger']);
   await expect(detailBadge(page, 'Live campaign').getByText('Active', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeVisible();
   expect((await messageRow(live.id))?.status).toBe('active');
+  expect(errors).toHaveLength(1);
+  expect(await pendingRows(draft.id)).toHaveLength(0);
 });
 
 test('INAPP-317 list row menu Edit opens the editor', async ({ page }) => {
@@ -750,6 +768,16 @@ test('INAPP-327 item toggle, delete and reorder failures are silent', async ({ p
       (['PATCH', 'DELETE'].includes(method) && /^\/api\/in-app-banners\/[0-9a-f-]{36}$/.test(pathname)) ||
       (method === 'PATCH' && /^\/api\/banner-categories\/[0-9a-f-]{36}\/banners\/reorder$/.test(pathname)),
   );
+  const statusFailed = await failRequests(page, (method, pathname) => method === 'PATCH' && /^\/api\/banner-categories\/[0-9a-f-]{36}\/status$/.test(pathname));
+  // The control: a status change that fails, which the page does report.
+  const failStatusChange = async (widgetId: string) => {
+    const before = statusFailed.length;
+    await page.getByRole('combobox').filter({ hasText: 'Draft' }).click();
+    await page.getByRole('option', { name: 'Active', exact: true }).click();
+    await expect.poll(() => statusFailed.length).toBe(before + 1);
+    expect(statusFailed.at(-1)).toBe(`PATCH /api/banner-categories/${widgetId}/status`);
+    await expect(toastWithTitle(page, 'Failed to update status')).toBeVisible();
+  };
 
   await page.goto(`/projects/${p.project.id}/widgets/carousels/${widget.id}`);
   await expect(itemTitlesShown(page)).toHaveText(['Item A', 'Item B']);
@@ -762,9 +790,10 @@ test('INAPP-327 item toggle, delete and reorder failures are silent', async ({ p
   page.once('dialog', (dialog) => dialog.accept());
   await widgetItemCard(page, 'Item B').getByRole('button').nth(4).click();
   await expect.poll(() => failed.length).toBe(3);
-  // Expected (current code): nothing says any of them failed.
-  await page.waitForTimeout(2000);
-  expect(await toastTitles(page)).toEqual([]);
+  // Expected (current code): nothing says any of them failed. Only the status select
+  // reports its failure, so its toast, shown after the three, is the only one on screen.
+  await failStatusChange(widget.id);
+  await expect(toastTitles(page)).resolves.toEqual(['Failed to update status']);
   await expect(switchA).toBeChecked();
   await expect(itemTitlesShown(page)).toHaveText(['Item A', 'Item B']);
 
@@ -776,8 +805,8 @@ test('INAPP-327 item toggle, delete and reorder failures are silent', async ({ p
   await expect.poll(() => failed.length).toBe(4);
   await page.getByRole('button', { name: 'Delete', exact: true }).click();
   await expect.poll(() => failed.length).toBe(5);
-  await page.waitForTimeout(2000);
-  expect(await toastTitles(page)).toEqual([]);
+  await failStatusChange(single.widget.id);
+  await expect(toastTitles(page)).resolves.toEqual(['Failed to update status']);
   await expect(toggle).toBeChecked();
   await expect(page.getByRole('heading', { level: 3, name: 'Only banner', exact: true })).toBeVisible();
 
@@ -785,6 +814,7 @@ test('INAPP-327 item toggle, delete and reorder failures are silent', async ({ p
   expect(failed.map((f) => f.split(' ')[0])).toEqual(['PATCH', 'PATCH', 'DELETE', 'PATCH', 'DELETE']);
   expect(await widgetItemRows(widget.id)).toEqual(before.carousel);
   expect(await widgetItemRows(single.widget.id)).toEqual(before.single);
+  for (const id of [widget.id, single.widget.id]) expect((await widgetRow(id))?.status).toBe('draft');
 });
 
 test('INAPP-329 a single-layout widget with more than one banner', async ({ page }) => {
@@ -954,11 +984,19 @@ test('INAPP-335 category update validation', async () => {
   }
   expect(await widgetRow(widget.id)).toEqual(before);
 
+  // The string values are sent before the expected failure is declared, so an error
+  // (a 500, a refused request) still fails the test outright.
+  const strings: Array<[string, RawResponse]> = [];
+  for (const autoRotate of ['yes', 'false']) {
+    const result = await call('PATCH', `/api/banner-categories/${widget.id}`, p.owner, { autoRotate });
+    expect([200, 400], autoRotate).toContain(result.status);
+    strings.push([autoRotate, result]);
+  }
+
   // Only the boolean check below is expected to fail; everything above must hold.
   test.fail(true, 'INAPP-335');
   test.info().annotations.push({ type: 'issue', description: 'INAPP-335' });
-  for (const autoRotate of ['yes', 'false']) {
-    const result = await call('PATCH', `/api/banner-categories/${widget.id}`, p.owner, { autoRotate });
+  for (const [autoRotate, result] of strings) {
     expect(result.status, autoRotate).toBe(400);
     expect(result.body.message, autoRotate).toEqual(['autoRotate must be a boolean value']);
   }
