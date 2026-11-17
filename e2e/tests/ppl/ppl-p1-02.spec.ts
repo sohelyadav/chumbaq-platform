@@ -1154,8 +1154,7 @@ test('PPL-169 A second owner uses the privacy log and person objections', async 
 
 // ---- Identify
 
-test('PPL-172 Two first identifies for the same new fingerprint at once', { annotation: { type: 'issue', description: 'PPL-172' } }, async ({ clientIp }) => {
-  test.fail();
+test('PPL-172 Two first identifies for the same new fingerprint at once', async ({ clientIp }) => {
   const p = await peopleProject(clientIp);
   const statuses: number[] = [];
   for (let round = 0; round < 10; round++) {

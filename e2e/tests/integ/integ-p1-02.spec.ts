@@ -190,10 +190,6 @@ test('INTEG-097 import on a project with no Mixpanel config is refused as a bad 
   const p = await ownerWithProject();
   const response = await as(p.owner, 'POST', `/api/projects/${p.project.id}/mixpanel/cohorts/import`, { mixpanelCohortId: 1 });
   expect(await sql(`SELECT id FROM mixpanel_cohorts WHERE "projectId" = $1`, [p.project.id])).toHaveLength(0);
-  expect(response.status).toBeGreaterThanOrEqual(400);
-  // Only the status and message below are expected to fail; the checks above must hold.
-  test.fail(true, 'INTEG-097');
-  test.info().annotations.push({ type: 'issue', description: 'INTEG-097' });
   expect(response.status).toBe(400);
   expect(messageOf(response)).toBe(NOT_CONFIGURED);
 });
