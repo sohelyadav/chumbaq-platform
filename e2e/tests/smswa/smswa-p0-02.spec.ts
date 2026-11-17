@@ -3,6 +3,7 @@ import { api, apiUrl, newClientIp } from '../../support/api';
 import { allowClipboard, readClipboard } from '../../support/browser-tools';
 import { connectFakeWhatsAppProvider, fakeTwilioCredentials, fakeWhatsAppCredentials } from '../../support/channels';
 import { expect, signIn, test } from '../../support/fixtures';
+import { campaignRecipients } from '../../support/seed';
 import { hubSignature, interaktSignature, publicApiUrl } from '../../support/signing';
 import {
   activityRows,
@@ -970,8 +971,8 @@ test('SMSWA-230 send with people from another project in deviceIdentityIds', asy
   const smsRows = await campaignRows(sms.project.id);
   expect(smsRows).toHaveLength(1);
   expect(smsRows[0]).toMatchObject({ id: dataOf(both).id, target_type: 'devices', total_tokens: 1 });
-  // The ids are stored as given; the worker reads them through the project-scoped audience.
-  expect(smsRows[0].target_device_ids).toEqual([S2, x]);
+  // Only the project's own people are stored as recipients.
+  expect(await campaignRecipients(smsRows[0].id)).toEqual([S2]);
 
   const waSend = (extra: Record<string, unknown>) => scheduleWhatsAppCampaign(sms.owner, wa.project.id, extra);
   const waBoth = await waSend({ deviceIdentityIds: [S1, x] });
@@ -982,7 +983,8 @@ test('SMSWA-230 send with people from another project in deviceIdentityIds', asy
   expect([waSeg.status, messageOf(waSeg)]).toEqual([404, `Segment ${segOther} not found`]);
   const waRows = await campaignRows(wa.project.id);
   expect(waRows).toHaveLength(1);
-  expect(waRows[0]).toMatchObject({ target_type: 'devices', total_tokens: 1 });
+  expect(waRows[0]).toMatchObject({ id: dataOf(waBoth).id, target_type: 'devices', total_tokens: 1 });
+  expect(await campaignRecipients(waRows[0].id)).toEqual([S1]);
 
   expect(await activityRows(sms.project.id, 'campaign.scheduled')).toHaveLength(1);
   expect(await activityRows(wa.project.id, 'campaign.scheduled')).toHaveLength(1);

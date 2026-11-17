@@ -1,6 +1,7 @@
 import { randomBytes } from 'crypto';
 import { apiUrl, uniqueEmail } from '../../support/api';
 import { seedEmailCredentials } from '../../support/channels';
+import { campaignRecipients } from '../../support/seed';
 import { expect, signIn, test } from '../../support/fixtures';
 import { pathAndQuery, signConfirmLink, signUnsubscribeLink } from '../../support/signing';
 import {
@@ -543,7 +544,9 @@ test('EMAIL-116 send to explicit people', async () => {
   const created = dataOf(await sendEmail(p.owner, p.project.id, { deviceIdentityIds: [E1], scheduledAt: monthAhead() }));
   const [row] = await campaignRows(p.project.id);
   expect(row.id).toBe(created.id);
-  expect(row).toMatchObject({ target_type: 'devices', target_device_ids: [E1], total_tokens: 1, status: 'scheduled' });
+  expect(row).toMatchObject({ target_type: 'devices', total_tokens: 1, status: 'scheduled' });
+  expect(await campaignRecipients(created.id)).toEqual([E1]);
+  expect(await campaignRecipients(created.id, 'control')).toEqual([]);
 });
 
 // ------------------------------------------------------------ H. Campaign page ---

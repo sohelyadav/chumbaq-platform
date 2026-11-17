@@ -682,9 +682,21 @@ test('ACCT-135 the account menu for a tenant', async ({ page, clientIp }) => {
   const account = await createAccount(clientIp, 'acct135', 'Mia Menu');
   const project = await createProject(account, clientIp);
   await signIn(page, account);
-  const me = page.waitForResponse(isCall('GET', '/api/auth/me'));
+  // The body is read as each answer arrives: one the sign-in page asked for can land as the
+  // next page loads, and its body is gone once that page replaces it.
+  let meBody: { data: { billingEnabled: boolean } } | undefined;
+  const me = page.waitForResponse(async (response) => {
+    if (!isCall('GET', '/api/auth/me')(response)) return false;
+    try {
+      meBody = await response.json();
+      return true;
+    } catch {
+      return false;
+    }
+  });
   await page.goto(`/projects/${project.id}`);
-  expect(((await (await me).json()) as { data: { billingEnabled: boolean } }).data.billingEnabled).toBe(true);
+  await me;
+  expect(meBody?.data.billingEnabled).toBe(true);
   const menu = await openSidebarAccountMenu(page, account.email);
 
   await expect(menu.getByText('Mia Menu', { exact: true })).toBeVisible();

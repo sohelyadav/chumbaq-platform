@@ -7,6 +7,7 @@ import {
   addDevice,
   addMember,
   call,
+  campaignRecipients,
   campaignRows,
   card,
   credentialRows,
@@ -765,7 +766,9 @@ test('PUSH-073 quiet hours move timezone waves', async () => {
   }
 
   const zoneOf = async (row: Record<string, any>) => {
-    const [identity] = await campaignDeviceZone(row.targetDeviceIds[0]);
+    const recipients = await campaignRecipients(row.id);
+    expect(recipients).toHaveLength(1);
+    const [identity] = await campaignDeviceZone(recipients[0]);
     return identity;
   };
   for (const [p, expected] of [

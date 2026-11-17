@@ -5,6 +5,7 @@ import {
   activityRows,
   addDevice,
   call,
+  campaignRecipients,
   campaignRow,
   campaignRows,
   captureRefusedSend,
@@ -1196,7 +1197,7 @@ test('PUSH-155 deliver in each recipient’s local time', async ({ page }) => {
   expect(children).toHaveLength(3);
   const seen = new Set<string>();
   for (const child of children) {
-    const ids = child.target_device_ids as string[];
+    const ids = await campaignRecipients(child.id);
     expect(ids).toHaveLength(1);
     const zone = zones[ids[0]];
     seen.add(zone);

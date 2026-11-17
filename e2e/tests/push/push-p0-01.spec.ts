@@ -5,6 +5,7 @@ import {
   activityRows,
   addDevice,
   call,
+  campaignRecipients,
   campaignRow,
   campaignRows,
   card,
@@ -502,8 +503,8 @@ test('PUSH-137 start an experiment', async ({ page }) => {
   await expect.poll(async () => (await campaignRow(parentId))?.status, { timeout: 100_000, intervals: [2_000] }).toBe('expanded');
   const children = (await campaignRows(p.project.id)).filter((row) => row.parent_campaign_id === parentId);
   expect(children.length).toBeGreaterThan(0);
-  const control: string[] = (await campaignRow(parentId))!.control_device_ids;
-  const armed = children.flatMap((child) => child.target_device_ids as string[]);
+  const control = await campaignRecipients(parentId, 'control');
+  const armed = (await Promise.all(children.map((child) => campaignRecipients(child.id)))).flat();
   const titles: Record<string, string> = { A: 'Free shipping today', B: 'Twenty percent off' };
   for (const child of children) {
     expect(['A', 'B']).toContain(child.variant_key);
@@ -549,9 +550,8 @@ test('PUSH-169 send API: configuration and audience errors', async () => {
 
   const mixed = await send(p.owner, { projectId: p.project.id, deviceIdentityIds: [own.id, foreign.id, own.id] });
   expect(mixed.status).toBe(201);
-  expect(dataOf(mixed)).toMatchObject({ targetType: 'devices', targetDeviceIds: [own.id], totalTokens: 2 });
-  const stored = await campaignRow(dataOf(mixed).id);
-  expect(stored?.target_device_ids).toEqual([own.id]);
+  expect(dataOf(mixed)).toMatchObject({ targetType: 'devices', totalTokens: 2 });
+  expect(await campaignRecipients(dataOf(mixed).id)).toEqual([own.id]);
 
   // Every role may send (messaging.write).
   for (const as of [p.owner, admin, member]) {

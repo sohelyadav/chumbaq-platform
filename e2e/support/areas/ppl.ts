@@ -546,15 +546,20 @@ export async function oneClickUnsubscribe(link: string, ip: string): Promise<num
   return response.status;
 }
 
-/** A push campaign row naming devices in its target and control lists, with per-token failures. */
+/** A push campaign row for the given devices (targets and an experiment's control), with per-token failures. */
 export async function insertCampaignWithLists(
   projectId: string,
   { targets, controls, failures }: { targets: string[]; controls: string[]; failures: Array<{ token: string; error: string }> },
 ): Promise<string> {
   const [row] = await sql<{ id: string }>(
-    `INSERT INTO push_notification_logs (project_id, title, channel, status, success_count, failure_count, target_device_ids, control_device_ids, failure_details)
-     VALUES ($1, 'E2E lists', 'push', 'sent', 5, $2, $3::jsonb, $4::jsonb, $5::jsonb) RETURNING id`,
-    [projectId, failures.length, JSON.stringify(targets), JSON.stringify(controls), JSON.stringify(failures)],
+    `INSERT INTO push_notification_logs (project_id, title, channel, status, target_type, success_count, failure_count, failure_details)
+     VALUES ($1, 'E2E lists', 'push', 'sent', 'devices', 5, $2, $3::jsonb) RETURNING id`,
+    [projectId, failures.length, JSON.stringify(failures)],
+  );
+  await sql(
+    `INSERT INTO campaign_recipients (campaign_id, role, device_identity_id)
+     SELECT $1::uuid, 'target', unnest($2::uuid[]) UNION ALL SELECT $1::uuid, 'control', unnest($3::uuid[])`,
+    [row.id, targets, controls],
   );
   return row.id;
 }

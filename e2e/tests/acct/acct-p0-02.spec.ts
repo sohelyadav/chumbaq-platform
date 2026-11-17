@@ -825,7 +825,9 @@ test('ACCT-146 a suspended account is signed out of settings', async ({ page, cl
   });
 
   await otherDevice.click();
-  await page.waitForURL(`${baseURL}/login?suspended=1`);
+  // Polled rather than a load event: the sign-out can start a second navigation that
+  // aborts the first page load.
+  await expect(page).toHaveURL(`${baseURL}/login?suspended=1`);
   await expect(page.getByRole('alert')).toHaveText(
     'This account has been suspended, so you have been signed out. Contact support if you think this is a mistake.',
   );

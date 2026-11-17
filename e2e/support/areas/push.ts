@@ -11,6 +11,8 @@ import { failStub, stubCalls } from '../provider-stub';
 import { runJobNow, type WorkerJob } from '../jobs';
 import { assertE2eDatabase, LOG_DIR, stackEnv } from '../stack';
 
+export { campaignRecipients } from '../seed';
+
 /**
  * Helpers for the push specs (PUSH): projects with a seeded FCM connection, devices
  * through the SDK's identify and token routes, teammates with a role, staff view-as,
@@ -549,6 +551,14 @@ export async function seedLogRow(projectId: string, columns: Record<string, unkn
     values,
   );
   return inserted.id;
+}
+
+/** Stores who a seeded campaign is for, as `saveCampaign` does for a device list. */
+export async function seedRecipients(campaignId: string, deviceIds: string[], role: 'target' | 'control' = 'target'): Promise<void> {
+  await sql(
+    `INSERT INTO campaign_recipients (campaign_id, role, device_identity_id) SELECT $1, $2, unnest($3::uuid[])`,
+    [campaignId, role, deviceIds],
+  );
 }
 
 /** An engagement report through the SDK's event route, as the app sends it. */

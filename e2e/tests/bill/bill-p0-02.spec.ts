@@ -694,9 +694,8 @@ test('BILL-149 MRR and ARR come from paying subscriptions', async ({ clientIp })
   }
   expect(checked).toBe(true);
 
-  await staffPage.goto(adminUrl('/billing'));
   const shown = staffPage.waitForResponse((r) => new URL(r.url()).pathname === '/api/admin/billing/summary' && r.ok());
-  await staffPage.reload();
+  await staffPage.goto(adminUrl('/billing'));
   const page = ((await (await shown).json()) as { data: Summary }).data;
   await expect(adminCard(staffPage, 'MRR').getByText(rupees(page.mrr.netPaise), { exact: true })).toBeVisible();
   await expect(adminCard(staffPage, 'ARR').getByText(rupees(page.arr.netPaise), { exact: true })).toBeVisible();

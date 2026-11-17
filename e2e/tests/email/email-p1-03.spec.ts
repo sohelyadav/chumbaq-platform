@@ -75,7 +75,7 @@ import {
  * versions and several signatures), SES refusals before any certificate fetch (unknown
  * token, a switched topic, fields the signature covers), the link rewrite route, what
  * members and admins can do, the activity log entries, a suspended billing owner, the
- * composer when its preview fails or a segment is too large, replaced Resend and SES
+ * composer when its preview fails, a segment over 25,000 members, replaced Resend and SES
  * credentials, the campaign list with child campaigns, Settings that fail to load,
  * schedules combined with timezones and experiments, the confirmation mailer, an
  * unsubscribe link the suppression store refuses, and view-as on Settings. Providers are
@@ -93,7 +93,6 @@ const NO_TOPIC_YET =
 const NO_RESEND_SECRET = 'Add the Resend webhook signing secret in Email settings to receive events.';
 const NOT_SET_UP_CARD = 'Email is not set up yet. Add a sender and connect a provider under Settings.';
 const SUSPENDED = "This project's account is suspended.";
-const TOO_BIG = 'Segment has more than 25000 members; narrow it or split the campaign';
 
 const sendButton = (page: import('@playwright/test').Page, name = 'Send email') =>
   card(page, 'Preview').getByRole('button', { name, exact: true });
@@ -717,51 +716,80 @@ test('EMAIL-200 composer reach is unknown when the preview fails, and Send stays
   }
 });
 
-test('EMAIL-201 segment with more than 25,000 members is refused for preview and send', async ({ page }) => {
+test('EMAIL-201 segment with more than 25,000 members is accepted for preview and send', async ({ page }) => {
   test.setTimeout(240_000);
   const p = await emailProject('email-201', { provider: 'brevo', requireOptIn: false });
-  // 25,000 people in group "all" with plan "edge", and one more in group "all" only.
-  await seedManyPeople(p.project.id, `edge-${randomBytes(3).toString('hex')}`, 25_000, { group: 'all', plan: 'edge' });
-  await seedManyPeople(p.project.id, `extra-${randomBytes(3).toString('hex')}`, 1, { group: 'all' });
-  const tag = randomBytes(2).toString('hex');
+  // S-big: 25,001 people in group "all" with an address, and one more member with none.
+  // One person outside it, with an address.
+  const tag = randomBytes(3).toString('hex');
+  await seedManyPeople(p.project.id, `big-${tag}`, 25_001, { group: 'all' });
+  const [noAddress] = await sql(
+    `INSERT INTO device_identities (project_id, device_fingerprint, platform, traits)
+     VALUES ($1, $2, 'web', '{"group":"all"}'::jsonb) RETURNING id`,
+    [p.project.id, `big-${tag}-no-address`],
+  );
+  await seedManyPeople(p.project.id, `outside-${tag}`, 1, { group: 'other' });
+  const [outside] = await sql(`SELECT id FROM device_identities WHERE project_id = $1 AND device_fingerprint = $2`, [
+    p.project.id,
+    `outside-${tag}-1`,
+  ]);
   const big = { name: `S-big ${tag}`, id: await createLiveSegment(p.owner, p.project.id, `S-big ${tag}`, traitIs('group', 'all')) };
-  const edge = await createLiveSegment(p.owner, p.project.id, `S-edge ${tag}`, traitIs('plan', 'edge'));
-  const before = await projectActivity(p.project.id);
 
-  const previewBig = await call('POST', '/api/email/audience-preview', p.owner, { projectId: p.project.id, segmentId: big.id });
-  expect(previewBig.status).toBe(400);
-  expect(messageOf(previewBig)).toBe(TOO_BIG);
-  const sendBig = await call('POST', '/api/email/send', p.owner, { projectId: p.project.id, segmentId: big.id, subject: 'Too many', html: '<p>x</p>' });
-  expect(sendBig.status).toBe(400);
-  expect(messageOf(sendBig)).toBe(TOO_BIG);
-  expect(await campaignRows(p.project.id)).toHaveLength(0);
-  expect(await projectActivity(p.project.id)).toEqual(before);
+  const preview = await call('POST', '/api/email/audience-preview', p.owner, { projectId: p.project.id, segmentId: big.id });
+  expect(preview.status, messageOf(preview)).toBe(201);
+  expect(dataOf(preview)).toMatchObject({ targetType: 'segment', recipients: 25_001 });
 
-  // Exactly 25,000 is within the cap.
-  const previewEdge = await call('POST', '/api/email/audience-preview', p.owner, { projectId: p.project.id, segmentId: edge });
-  expect(previewEdge.status, messageOf(previewEdge)).toBe(201);
-  expect(dataOf(previewEdge)).toMatchObject({ targetType: 'segment', recipients: 25_000 });
+  const sent = await call('POST', '/api/email/send', p.owner, {
+    projectId: p.project.id,
+    segmentId: big.id,
+    subject: 'Everyone in it',
+    html: '<p>x</p>',
+    scheduledAt: new Date(Date.now() + 30 * 24 * 3600_000).toISOString(),
+  });
+  expect(sent.status, messageOf(sent)).toBe(201);
+  const apiId = dataOf<{ id: string }>(sent).id;
 
   await signIn(page, p.owner);
   await page.goto(`/projects/${p.project.id}/email/new`);
-  await expect(reachLine(page)).toHaveText('25001 recipient(s)', { timeout: 30_000 });
-  await page.getByLabel('Subject').fill('Too many');
+  await expect(reachLine(page)).toHaveText('25002 recipient(s)', { timeout: 30_000 });
+  await page.getByLabel('Subject').fill('From the composer');
   const selects = card(page, 'Audience').getByRole('combobox');
   await selects.first().click();
   await page.getByRole('option', { name: 'A segment', exact: true }).click();
   await selects.nth(1).click();
-  const [refused] = await Promise.all([
+  const [previewed] = await Promise.all([
     page.waitForResponse((r) => r.url().endsWith('/api/email/audience-preview') && r.request().postDataJSON()?.segmentId === big.id, {
       timeout: 60_000,
     }),
     page.getByRole('option', { name: big.name, exact: true }).click(),
   ]);
-  expect(refused.status()).toBe(400);
-  await expect(reachLine(page)).toHaveText('Choose an audience to see its reach.');
-  await expect(sendButton(page)).toBeEnabled();
-  await sendButton(page).click();
-  await expect(toastWith(page, 'Could not create email', TOO_BIG)).toBeVisible({ timeout: 60_000 });
-  expect(await campaignRows(p.project.id)).toHaveLength(0);
+  expect(previewed.status()).toBe(201);
+  await expect(reachLine(page)).toHaveText('25001 recipient(s)');
+  await scheduleSwitch(page).click();
+  await pickNextMonth(page);
+  const [created] = await Promise.all([
+    page.waitForResponse((r) => r.url().endsWith('/api/email/send') && r.request().method() === 'POST', { timeout: 60_000 }),
+    sendButton(page, 'Schedule email').click(),
+  ]);
+  expect(created.status()).toBe(201);
+  await expect(toastWith(page, 'Email scheduled', '25001 recipient(s).')).toBeVisible();
+  const uiId = ((await created.json()) as { data: { id: string } }).data.id;
+
+  const rows = await campaignRows(p.project.id);
+  expect(rows.map((row) => row.id).sort()).toEqual([apiId, uiId].sort());
+  for (const row of rows) {
+    expect(row).toMatchObject({ target_type: 'segment', segment_id: big.id, total_tokens: 25_001, status: 'scheduled' });
+    // Every member is a stored recipient, the one with no address too; nobody outside it is.
+    const [stored] = await sql(
+      `SELECT count(*)::int AS members,
+              count(*) FILTER (WHERE device_identity_id = $2)::int AS no_address,
+              count(*) FILTER (WHERE device_identity_id = $3)::int AS outside,
+              count(*) FILTER (WHERE role <> 'target')::int AS other_roles
+         FROM campaign_recipients WHERE campaign_id = $1`,
+      [row.id, noAddress.id, outside.id],
+    );
+    expect(stored).toEqual({ members: 25_002, no_address: 1, outside: 0, other_roles: 0 });
+  }
 });
 
 test('EMAIL-202 replacing Resend credentials without the secret drops the stored signing secret', async ({ page }) => {

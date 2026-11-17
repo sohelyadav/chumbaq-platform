@@ -5,6 +5,7 @@ import { seedFcmConfig } from '../../support/channels';
 import { confirmWithPassword } from '../../support/factors';
 import { expect, newPersonContext, signIn, test } from '../../support/fixtures';
 import { answerStub, stubCalls } from '../../support/provider-stub';
+import { campaignRecipients } from '../../support/seed';
 import {
   HIDDEN,
   HIDDEN_FROM_ROLE,
@@ -1215,7 +1216,7 @@ test('INTEG-118 send a push to a cohort', async ({ page }) => {
   expect(campaigns[0].id).toBe(data.campaignIds[0]);
   expect([campaigns[0].title, campaigns[0].body]).toEqual(['Sale', 'Today only']);
   expect(campaigns[0].data).toEqual({ deep_link_url: 'myapp://sale' });
-  expect([...campaigns[0].target_device_ids].sort()).toEqual([d1.id, d2.id].sort());
+  expect(await campaignRecipients(campaigns[0].id)).toEqual([d1.id, d2.id].sort());
 
   const sent = await activityRows(p.project.id, 'cohort.push_sent');
   expect(sent).toHaveLength(1);

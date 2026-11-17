@@ -7,6 +7,7 @@ import {
   addDevice,
   backArrow,
   call,
+  campaignRecipients,
   campaignRow,
   campaignRows,
   card,
@@ -359,14 +360,16 @@ test('PUSH-170 send API: an empty device list means the whole project', async ()
   // A one-device list is the positive control: a list does narrow the audience.
   const narrowed = await call('POST', SEND, p.owner, { projectId: p.project.id, title: 'One', deviceIdentityIds: [one.id] });
   expect(narrowed.status).toBe(201);
-  expect(dataOf(narrowed)).toMatchObject({ targetType: 'devices', targetDeviceIds: [one.id], totalTokens: 1 });
+  expect(dataOf(narrowed)).toMatchObject({ targetType: 'devices', totalTokens: 1 });
+  expect(await campaignRecipients(dataOf(narrowed).id)).toEqual([one.id]);
 
   // Current behaviour: an empty list is no filter at all.
   const empty = await call('POST', SEND, p.owner, { projectId: p.project.id, title: 'Everyone', deviceIdentityIds: [] });
   expect(empty.status).toBe(201);
-  expect(dataOf(empty)).toMatchObject({ targetType: 'project', targetDeviceIds: null, totalTokens: 3 });
+  expect(dataOf(empty)).toMatchObject({ targetType: 'project', totalTokens: 3 });
   const row = await campaignRow(dataOf(empty).id);
-  expect([row?.target_type, row?.target_device_ids, row?.total_tokens]).toEqual(['project', null, 3]);
+  expect([row?.target_type, row?.total_tokens]).toEqual(['project', 3]);
+  expect(await campaignRecipients(dataOf(empty).id)).toEqual([]);
 });
 
 test('PUSH-175 campaign with no configured channel fails with a reason', async ({ page }) => {
@@ -462,7 +465,7 @@ test('PUSH-181 send to one person by distinct id', async ({ browser, baseURL }) 
   expect(sent.status).toBe(201);
   const campaign = dataOf(sent);
   expect(campaign).toMatchObject({ targetType: 'devices', totalTokens: 2 });
-  expect([...campaign.targetDeviceIds].sort()).toEqual([d6.id, d7.id].sort());
+  expect(await campaignRecipients(campaign.id)).toEqual([d6.id, d7.id].sort());
 
   const entries = await activityRows(p.project.id, 'push.sent_to_person');
   expect(entries).toHaveLength(1);

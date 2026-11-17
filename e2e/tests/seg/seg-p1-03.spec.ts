@@ -622,7 +622,7 @@ test('SEG-169 a push step sends to the person’s devices and carries the journe
   const campaigns = await campaignsOf(pid);
   expect(campaigns).toHaveLength(1);
   expect(campaigns[0]).toMatchObject({ channel: 'push', title: 'Hi', target_type: 'devices' });
-  expect(sortIds(campaigns[0].target_device_ids)).toEqual(sortIds([phone.id, tablet.id]));
+  expect(sortIds(campaigns[0].recipients)).toEqual(sortIds([phone.id, tablet.id]));
   expect(campaigns[0].data).toEqual({ journey_id: journey.id, journey_run_id: run.id, journey_step: '0' });
 });
 
@@ -667,7 +667,7 @@ test('SEG-170 a push step is skipped for someone who cannot be reached', async (
   // Only the reachable person was sent anything.
   const campaigns = (await campaignsOf(pid)).filter((campaign) => campaign.id !== earlier.id);
   expect(campaigns).toHaveLength(1);
-  expect(campaigns[0].target_device_ids).toEqual([reachable.id]);
+  expect(campaigns[0].recipients).toEqual([reachable.id]);
   expect(campaigns[0].data?.journey_id).toBe(journey.id);
   const stats = await raw('GET', `${journeysPath(p)}/${journey.id}/stats`, undefined, as(p, clientIp));
   expect(stats.body.data).toEqual({ active: 0, completed: 0, exited: 4, failed: 0 });
@@ -1100,7 +1100,7 @@ test('SEG-205 runs keep advancing after archiving or moving back to draft', asyn
     const runs = await runsOf(journey.id);
     expect(runs.map((run) => [run.person_key, run.status])).toEqual([[alice, 'exited']]);
     const campaign = campaigns.find((c) => c.data?.journey_id === journey.id)!;
-    expect(campaign).toMatchObject({ title: 'Hi', target_device_ids: [aliceDevice.id] });
+    expect(campaign).toMatchObject({ title: 'Hi', recipients: [aliceDevice.id] });
     expect(campaign.data).toEqual({ journey_id: journey.id, journey_run_id: runs[0].id, journey_step: '1' });
   }
   expect((await journeyRow(archived.id))?.status).toBe('archived');

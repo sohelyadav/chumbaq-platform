@@ -60,6 +60,25 @@ const INVALID = 'Invalid email or password';
 const isApi = (path: string) => (response: Response) => new URL(response.url()).pathname === path;
 const isApiRequest = (path: string) => (request: Request) => new URL(request.url()).pathname === path;
 
+/**
+ * The JSON body of the next answer from `path`, read as it arrives: an answer that lands
+ * while the next page loads loses its body once that page replaces the one that asked.
+ */
+function nextBodyOf<T>(page: Page, path: string): Promise<T> {
+  let body: T | undefined;
+  return page
+    .waitForResponse(async (response) => {
+      if (!isApi(path)(response)) return false;
+      try {
+        body = (await response.json()) as T;
+        return true;
+      } catch {
+        return false;
+      }
+    })
+    .then(() => body as T);
+}
+
 /** Every request the page sends to `path`, as it happens. */
 function recordRequests(page: Page, path: string): Request[] {
   const seen: Request[] = [];
@@ -646,10 +665,10 @@ test('AUTH-077 autofill is off while tenants cannot have passkeys', async ({ pag
 
     // The sign-in page against that API: no ceremony starts, and the button still works.
     await forwardToApi(page, off.url, '/api/auth/passkey/');
-    const offered = page.waitForResponse(isApi('/api/auth/passkey/autofill-options'));
+    const offered = nextBodyOf<{ data: unknown }>(page, '/api/auth/passkey/autofill-options');
     await page.getByRole('button', { name: account.name }).click();
     await page.getByRole('menuitem', { name: 'Log out' }).click();
-    expect(((await (await offered).json()) as { data: unknown }).data).toEqual({ available: false });
+    expect((await offered).data).toEqual({ available: false });
     await expect(page.getByRole('heading', { name: 'Login to your account' })).toBeVisible();
     await expect(page).toHaveURL(/\/login$/);
 
@@ -705,10 +724,10 @@ test('AUTH-080 the button stops the waiting autofill request first', async ({ pa
   await signIn(page, account);
   await enrolTenantPasskey(page, account);
 
-  const armed = page.waitForResponse(isApi('/api/auth/passkey/autofill-options'));
+  const armed = nextBodyOf<{ data: { flowId: string } }>(page, '/api/auth/passkey/autofill-options');
   await page.getByRole('button', { name: account.name }).click();
   await page.getByRole('menuitem', { name: 'Log out' }).click();
-  const autofillFlow = ((await (await armed).json()) as { data: { flowId: string } }).data.flowId;
+  const autofillFlow = (await armed).data.flowId;
   await expect(page.getByRole('heading', { name: 'Login to your account' })).toBeVisible();
   await expect.poll(async () => (await credentialGets(page)).map((c) => [c.conditional, c.settled])).toEqual([[true, 'pending']]);
 

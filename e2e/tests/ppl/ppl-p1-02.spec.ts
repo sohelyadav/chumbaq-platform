@@ -604,17 +604,22 @@ test('PPL-142 Erasure removes the person from campaign records', async ({ client
   expect(erased.status).toBe(200);
   expect(erased.body.data).toMatchObject({
     result: 'erased',
-    counts: { push_notification_logs: 1, in_app_message_impressions: 1, journey_runs: 1, segment_members: 1, monthly_active_devices: 2 },
+    counts: {
+      campaign_recipients: 3,
+      push_notification_logs: 1,
+      in_app_message_impressions: 1,
+      journey_runs: 1,
+      segment_members: 1,
+      monthly_active_devices: 2,
+    },
   });
 
-  expect(await sql(`SELECT target_device_ids, control_device_ids, failure_details, success_count, failure_count FROM push_notification_logs WHERE id = $1`, [campaign])).toEqual([
-    {
-      target_device_ids: [bob.id],
-      control_device_ids: [bob.id],
-      failure_details: [{ token: bobToken, error: 'quota' }],
-      success_count: 5,
-      failure_count: 2,
-    },
+  expect(await sql(`SELECT role, device_identity_id FROM campaign_recipients WHERE campaign_id = $1 ORDER BY role`, [campaign])).toEqual([
+    { role: 'control', device_identity_id: bob.id },
+    { role: 'target', device_identity_id: bob.id },
+  ]);
+  expect(await sql(`SELECT failure_details, success_count, failure_count FROM push_notification_logs WHERE id = $1`, [campaign])).toEqual([
+    { failure_details: [{ token: bobToken, error: 'quota' }], success_count: 5, failure_count: 2 },
   ]);
   expect((await sql(`SELECT id FROM in_app_message_impressions WHERE project_id = $1`, [p.project.id])).map((r) => r.id)).toEqual([bobImpression]);
   expect(await sql(`SELECT id FROM in_app_message_impressions WHERE id = $1`, [ashaImpression])).toEqual([]);

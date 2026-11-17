@@ -882,14 +882,19 @@ export interface CampaignRow {
   channel: string;
   title: string;
   target_type: string;
-  target_device_ids: string[] | null;
+  /** Its stored target recipients (`campaign_recipients`), sorted; empty for the whole project. */
+  recipients: string[];
   data: Record<string, string> | null;
 }
 
 /** The project's push campaign rows, oldest first. */
 export async function campaignsOf(projectId: string): Promise<CampaignRow[]> {
   return sql<CampaignRow>(
-    `SELECT id, channel, title, target_type, target_device_ids, data FROM push_notification_logs WHERE project_id = $1 ORDER BY sent_at, id`,
+    `SELECT l.id, l.channel, l.title, l.target_type, l.data,
+            COALESCE((SELECT array_agg(cr.device_identity_id::text ORDER BY cr.device_identity_id)
+                        FROM campaign_recipients cr
+                       WHERE cr.campaign_id = l.id AND cr.role = 'target'), '{}') AS recipients
+       FROM push_notification_logs l WHERE l.project_id = $1 ORDER BY l.sent_at, l.id`,
     [projectId],
   );
 }

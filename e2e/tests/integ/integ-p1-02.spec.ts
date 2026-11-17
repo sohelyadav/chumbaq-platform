@@ -4,6 +4,7 @@ import { api, newClientIp } from '../../support/api';
 import { seedFcmConfig } from '../../support/channels';
 import { expect, signIn, test } from '../../support/fixtures';
 import { mailsTo } from '../../support/mailbox';
+import { campaignRecipients } from '../../support/seed';
 import { stubCalls } from '../../support/provider-stub';
 import {
   READ_ONLY,
@@ -316,15 +317,30 @@ test('INTEG-101 sync a cohort from the list', async ({ page }) => {
   const p = await sdkProject(await ownerWithProject());
   const mixpanelProjectId = ownMixpanelProjectId();
   await configureMixpanel(p.owner, p.project.id, mixpanelProjectId);
-  const known = await identifyDevice(p, { distinctId: `anon-sync-${randomUUID().slice(0, 8)}` });
-  const [knownRow] = await sql(`SELECT distinct_id FROM device_identities WHERE id = $1`, [known.id]);
+  const tag = randomUUID().slice(0, 8);
+  // One profile per way a member may or may not match: a verified external id, a device's
+  // distinct id, and an address no confirmation link was opened for.
+  const verifiedId = `buyer-${tag}`;
+  const known = await identifyPerson(p, verifiedId);
+  const anonymousId = `anon-sync-${tag}`;
+  const anonymous = await identifyDevice(p, { distinctId: anonymousId });
+  const unconfirmedEmail = `unconfirmed-${tag}@example.com`;
+  const unconfirmed = await identifyDevice(p, { email: unconfirmedEmail });
+  const [anonymousRow] = await sql(`SELECT distinct_id, external_user_id FROM device_identities WHERE id = $1`, [anonymous.id]);
+  expect(anonymousRow).toEqual({ distinct_id: anonymousId, external_user_id: null });
+  const [unconfirmedRow] = await sql(`SELECT email, email_confirmed_at, external_user_id FROM device_identities WHERE id = $1`, [unconfirmed.id]);
+  expect(unconfirmedRow).toEqual({ email: unconfirmedEmail, email_confirmed_at: null, external_user_id: null });
   const cohort = await seedCohortWith(p.project.id, {
     name: 'Weekly buyers',
     counts: { mixpanel: 1500, resolved: 1200, unresolved: 300 },
     lastSyncedAt: new Date(Date.now() - DAY_MS),
   });
   await stubMixpanelCohortList(mixpanelProjectId, [{ id: cohort.mixpanelCohortId, name: 'Weekly buyers', count: 3 }]);
-  await stubMixpanelMembers(mixpanelProjectId, [{ distinctId: knownRow.distinct_id }, { distinctId: 'nobody-a' }, { distinctId: 'nobody-b' }]);
+  await stubMixpanelMembers(mixpanelProjectId, [
+    { distinctId: verifiedId },
+    { distinctId: anonymousId },
+    { distinctId: `mp-${tag}`, properties: { $email: unconfirmedEmail } },
+  ]);
   const activityBefore = (await allActivity(p.project.id)).length;
 
   // 1. Mixpanel answers: the sync starts, then finishes with fresh counts.
@@ -343,11 +359,11 @@ test('INTEG-101 sync a cohort from the list', async ({ page }) => {
   await expect(cohortRow(page, 'Weekly buyers').locator('td').nth(3)).toHaveText('1');
   await expect(cohortRow(page, 'Weekly buyers').locator('td').nth(4)).toHaveText('2');
   const afterSync = await cohortSnapshot(cohort.id);
-  expect(afterSync.members.map((m) => [m.mixpanelDistinctId, m.isResolved]).sort()).toEqual(
+  expect(afterSync.members.map((m) => [m.mixpanelDistinctId, m.deviceIdentityId, m.resolvedBy, m.isResolved]).sort()).toEqual(
     [
-      [knownRow.distinct_id, true],
-      ['nobody-a', false],
-      ['nobody-b', false],
+      [verifiedId, known.id, 'external_user_id', true],
+      [anonymousId, null, null, false],
+      [`mp-${tag}`, null, null, false],
     ].sort(),
   );
 
@@ -785,7 +801,7 @@ test('INTEG-120 platform choice', async ({ page }) => {
   expect(androidOnly.data).toMatchObject({ devicesTargeted: 1, tokensTargeted: 1 });
   await expect(toast(page, 'Push campaign queued')).toContainText('Sending to 1 device(s).');
   const [first] = await campaignRows(p.project.id);
-  expect(first.target_device_ids).toEqual([d1.id]);
+  expect(await campaignRecipients(first.id)).toEqual([d1.id]);
 
   // 2. Both unticked: the request names no platform, and the API uses Android and iOS.
   // (Asserts today's behaviour as the case is written.)
@@ -796,7 +812,7 @@ test('INTEG-120 platform choice', async ({ page }) => {
   expect(neither.body).not.toHaveProperty('platforms');
   expect(neither.data).toMatchObject({ devicesTargeted: 2, tokensTargeted: 2 });
   const second = (await campaignRows(p.project.id)).find((c) => c.title === 'No platform ticked')!;
-  expect([...second.target_device_ids].sort()).toEqual([d1.id, d2.id].sort());
+  expect(await campaignRecipients(second.id)).toEqual([d1.id, d2.id].sort());
 });
 
 test('INTEG-122 push: request validation', async () => {

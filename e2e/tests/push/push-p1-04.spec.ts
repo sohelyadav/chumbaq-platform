@@ -33,6 +33,7 @@ import {
   runPushJob,
   sdkCall,
   seedLogRow,
+  seedRecipients,
   seedSentCampaign,
   sql,
   statusValue,
@@ -435,7 +436,8 @@ test('PUSH-252 event for a device outside the campaign’s audience is counted',
   const inside = await addDevice(p, p.owner.ip);
   const outside = await addDevice(p, p.owner.ip);
   const title = `Only D1 ${hex()}`;
-  const campaignId = await seedLogRow(p.project.id, { title, status: 'sent', target_type: 'devices', target_device_ids: [inside.id] });
+  const campaignId = await seedLogRow(p.project.id, { title, status: 'sent', target_type: 'devices' });
+  await seedRecipients(campaignId, [inside.id]);
 
   // Current behaviour as the case states it.
   for (const type of ['delivered', 'click']) {
