@@ -10,6 +10,7 @@ import { FcmProvider } from './services/fcm.provider';
 import { PushAnalyticsService } from './push-analytics.service';
 import { PushTemplatesService } from './push-templates.service';
 import { ChannelCredentialsService } from './channel-credentials.service';
+import { ChannelProviderRegistry } from './services/channel-provider.registry';
 import { PushTokensService } from '../push-tokens/push-tokens.service';
 import { IdentityService } from '../identity/identity.service';
 import { SegmentsService } from '../segments/segments.service';
@@ -74,8 +75,17 @@ describe('PushNotificationsService', () => {
   };
 
   const fcmProvider = {
-    send: jest.fn(),
+    sendToRecipients: jest.fn(),
     validateCredentials: jest.fn(),
+  };
+  const apnsProvider = { sendToRecipients: jest.fn() };
+  // The real registry hands back one provider per channel; so does this.
+  const channelRegistry = {
+    get: jest.fn((provider: string) => {
+      if (provider === 'fcm') return fcmProvider;
+      if (provider === 'apns') return apnsProvider;
+      throw new BadRequestException(`No provider is registered for the "${provider}" channel.`);
+    }),
   };
 
   const pushAnalytics = {
@@ -99,6 +109,8 @@ describe('PushNotificationsService', () => {
     countTokensByDeviceIdentityIds: jest.fn(),
     markTokenInvalid: jest.fn(),
     isTokenOptedOut: jest.fn(async (_projectId: string, _token: string) => false),
+    // A token this project's SDK never registered, unless a test says otherwise.
+    providerOfToken: jest.fn(async (_projectId: string, _token: string): Promise<string | null> => null),
   };
 
   const identityService = {
@@ -142,6 +154,7 @@ describe('PushNotificationsService', () => {
         { provide: PushAnalyticsService, useValue: pushAnalytics },
         { provide: PushTemplatesService, useValue: pushTemplates },
         { provide: ChannelCredentialsService, useValue: channelCredentials },
+        { provide: ChannelProviderRegistry, useValue: channelRegistry },
         { provide: PushTokensService, useValue: pushTokensService },
         { provide: IdentityService, useValue: identityService },
         { provide: SegmentsService, useValue: segmentsService },
@@ -369,6 +382,18 @@ describe('PushNotificationsService', () => {
       expect(JSON.stringify(status)).not.toContain('private_key');
     });
 
+    it('reports an APNs-only project as configured, with no Firebase account and no warning', async () => {
+      const warn = jest.spyOn((service as unknown as { logger: { warn: (m: string) => void } }).logger, 'warn');
+      configRepo.findOne.mockResolvedValueOnce(storedConfig);
+      channelCredentials.getPlaintext.mockResolvedValueOnce(null);
+
+      const status = await service.getConfigStatus('proj-1');
+
+      expect(status).toMatchObject({ configured: true, isActive: true, firebaseProjectId: null, clientEmail: null });
+      // No FCM credentials is an ordinary state there, not a fault worth a log line per poll.
+      expect(warn).not.toHaveBeenCalled();
+    });
+
     it('still reports configured when the stored credentials cannot be read', async () => {
       configRepo.findOne.mockResolvedValueOnce(storedConfig);
       channelCredentials.getPlaintext.mockImplementationOnce(() => {
@@ -570,7 +595,7 @@ describe('PushNotificationsService', () => {
         { logId: 'log-1', projectId: 'proj-1' },
         { jobId: 'log-1' },
       );
-      expect(fcmProvider.send).not.toHaveBeenCalled();
+      expect(fcmProvider.sendToRecipients).not.toHaveBeenCalled();
       expect(cryptoService.decrypt).not.toHaveBeenCalled();
       expect(result.status).toBe('queued');
     });
@@ -725,7 +750,7 @@ describe('PushNotificationsService', () => {
       expect(stored.params).toMatchObject({ ...SEGMENT_QUERY.params, storeCampaignId: 'log-1' });
       // No member list is ever walked into memory, so a segment has no size limit.
       expect(segmentEvaluation.enumerate).not.toHaveBeenCalled();
-      expect(fcmProvider.send).not.toHaveBeenCalled();
+      expect(fcmProvider.sendToRecipients).not.toHaveBeenCalled();
     });
 
     it('rejects a segment with no members before enqueueing', async () => {
@@ -778,27 +803,28 @@ describe('PushNotificationsService', () => {
       expect(result).toEqual({
         delivered: false,
         dryRun: false,
+        provider: 'fcm',
         error: 'This device has opted out of push notifications.',
         errorCode: 'opted_out',
       });
-      expect(fcmProvider.send).not.toHaveBeenCalled();
+      expect(fcmProvider.sendToRecipients).not.toHaveBeenCalled();
     });
 
     it('still runs a dry run against an opted-out device, which delivers nothing', async () => {
       configRepo.findOne.mockResolvedValueOnce(activeConfig);
       channelCredentials.getPlaintext.mockResolvedValueOnce(JSON.stringify(credentials));
-      fcmProvider.send.mockResolvedValueOnce({ successCount: 1, failureCount: 0, failures: [] });
+      fcmProvider.sendToRecipients.mockResolvedValueOnce({ successCount: 1, failureCount: 0, failures: [] });
 
       const result = await service.testSend({ projectId: 'proj-1', token: 'tok', dryRun: true });
 
       expect(pushTokensService.isTokenOptedOut).not.toHaveBeenCalled();
-      expect(result).toEqual({ delivered: true, dryRun: true });
+      expect(result).toEqual({ delivered: true, dryRun: true, provider: 'fcm' });
     });
 
     it('reports a delivered test send', async () => {
       configRepo.findOne.mockResolvedValueOnce(activeConfig);
       channelCredentials.getPlaintext.mockResolvedValueOnce(JSON.stringify(credentials));
-      fcmProvider.send.mockResolvedValueOnce({
+      fcmProvider.sendToRecipients.mockResolvedValueOnce({
         successCount: 1,
         failureCount: 0,
         failures: [],
@@ -808,13 +834,13 @@ describe('PushNotificationsService', () => {
 
       await expect(
         service.testSend({ projectId: 'proj-1', token: 'tok' }),
-      ).resolves.toEqual({ delivered: true, dryRun: false });
+      ).resolves.toEqual({ delivered: true, dryRun: false, provider: 'fcm' });
     });
 
     it('passes dryRun through so FCM validates without delivering', async () => {
       configRepo.findOne.mockResolvedValueOnce(activeConfig);
       channelCredentials.getPlaintext.mockResolvedValueOnce(JSON.stringify(credentials));
-      fcmProvider.send.mockResolvedValueOnce({
+      fcmProvider.sendToRecipients.mockResolvedValueOnce({
         successCount: 1,
         failureCount: 0,
         failures: [],
@@ -828,19 +854,18 @@ describe('PushNotificationsService', () => {
         dryRun: true,
       });
 
-      expect(fcmProvider.send).toHaveBeenCalledWith(
+      expect(fcmProvider.sendToRecipients).toHaveBeenCalledWith(
         credentials,
-        ['tok'],
-        expect.any(Object),
+        [{ token: 'tok', message: expect.objectContaining({ title: 'Chumbaq test' }) }],
         { dryRun: true },
       );
-      expect(result).toEqual({ delivered: true, dryRun: true });
+      expect(result).toEqual({ delivered: true, dryRun: true, provider: 'fcm' });
     });
 
     it('surfaces the FCM error code for a permanently bad token', async () => {
       configRepo.findOne.mockResolvedValueOnce(activeConfig);
       channelCredentials.getPlaintext.mockResolvedValueOnce(JSON.stringify(credentials));
-      fcmProvider.send.mockResolvedValueOnce({
+      fcmProvider.sendToRecipients.mockResolvedValueOnce({
         successCount: 0,
         failureCount: 1,
         failures: [
@@ -866,7 +891,7 @@ describe('PushNotificationsService', () => {
     it('reports a rejected service account instead of raising a 500', async () => {
       configRepo.findOne.mockResolvedValueOnce(activeConfig);
       channelCredentials.getPlaintext.mockResolvedValueOnce(JSON.stringify(credentials));
-      fcmProvider.send.mockRejectedValueOnce(
+      fcmProvider.sendToRecipients.mockRejectedValueOnce(
         new Error('Token exchange failed: {"error":"invalid_grant"}'),
       );
 
@@ -881,7 +906,7 @@ describe('PushNotificationsService', () => {
     it('reports a still-retrying failure, which never lands in failures[]', async () => {
       configRepo.findOne.mockResolvedValueOnce(activeConfig);
       channelCredentials.getPlaintext.mockResolvedValueOnce(JSON.stringify(credentials));
-      fcmProvider.send.mockResolvedValueOnce({
+      fcmProvider.sendToRecipients.mockResolvedValueOnce({
         successCount: 0,
         failureCount: 0,
         failures: [],
@@ -895,6 +920,149 @@ describe('PushNotificationsService', () => {
         delivered: false,
         error: 'FCM error 429: slow down',
       });
+    });
+
+    const DELIVERED = { successCount: 1, failureCount: 0, failures: [], resolvedCount: 1, retryReason: null };
+    const apnsCredentials = { keyId: 'K', teamId: 'T', privateKey: 'pem', bundleId: 'com.example.app' };
+    /** What each channel has stored, as the credentials table would answer. */
+    const storedCredentials = (stored: Record<string, object>) =>
+      channelCredentials.getPlaintext.mockImplementation(async (_projectId: string, provider: string) =>
+        stored[provider] ? JSON.stringify(stored[provider]) : null,
+      );
+    afterEach(() => {
+      channelCredentials.getPlaintext.mockReset();
+      pushTokensService.providerOfToken.mockReset().mockResolvedValue(null);
+    });
+
+    it('sends a token the SDK registered under APNs through APNs, with the APNs key', async () => {
+      configRepo.findOne.mockResolvedValueOnce(activeConfig);
+      pushTokensService.providerOfToken.mockResolvedValueOnce('apns');
+      storedCredentials({ fcm: credentials, apns: apnsCredentials });
+      apnsProvider.sendToRecipients.mockResolvedValueOnce(DELIVERED);
+
+      const result = await service.testSend({ projectId: 'proj-1', token: 'apns-device-token' });
+
+      expect(pushTokensService.providerOfToken).toHaveBeenCalledWith('proj-1', 'apns-device-token');
+      expect(apnsProvider.sendToRecipients).toHaveBeenCalledWith(
+        apnsCredentials,
+        [{ token: 'apns-device-token', message: expect.any(Object) }],
+        { dryRun: false },
+      );
+      // An APNs device token handed to Firebase is a guaranteed INVALID_ARGUMENT.
+      expect(fcmProvider.sendToRecipients).not.toHaveBeenCalled();
+      expect(result).toEqual({ delivered: true, dryRun: false, provider: 'apns' });
+    });
+
+    it('uses the only push channel a project has for a token it has never seen', async () => {
+      // An iOS app with no Firebase in it: an APNs key and nothing else.
+      configRepo.findOne.mockResolvedValueOnce(activeConfig);
+      channelCredentials.configuredPushProviders.mockResolvedValueOnce(['apns']);
+      storedCredentials({ apns: apnsCredentials });
+      apnsProvider.sendToRecipients.mockResolvedValueOnce(DELIVERED);
+
+      const result = await service.testSend({ projectId: 'proj-1', token: 'pasted' });
+
+      expect(result).toEqual({ delivered: true, dryRun: false, provider: 'apns' });
+      expect(fcmProvider.sendToRecipients).not.toHaveBeenCalled();
+    });
+
+    it('keeps FCM for a pasted token when the project has several channels', async () => {
+      configRepo.findOne.mockResolvedValueOnce(activeConfig);
+      channelCredentials.configuredPushProviders.mockResolvedValueOnce(['fcm', 'apns']);
+      storedCredentials({ fcm: credentials, apns: apnsCredentials });
+      fcmProvider.sendToRecipients.mockResolvedValueOnce(DELIVERED);
+
+      const result = await service.testSend({ projectId: 'proj-1', token: 'pasted' });
+
+      expect(result.provider).toBe('fcm');
+      expect(apnsProvider.sendToRecipients).not.toHaveBeenCalled();
+    });
+
+    it('does not guess FCM for a project with several channels and no FCM among them', async () => {
+      configRepo.findOne.mockResolvedValueOnce(activeConfig);
+      channelCredentials.configuredPushProviders.mockResolvedValueOnce(['apns', 'mi_push']);
+      storedCredentials({ apns: apnsCredentials });
+      apnsProvider.sendToRecipients.mockResolvedValueOnce(DELIVERED);
+
+      const result = await service.testSend({ projectId: 'proj-1', token: 'pasted' });
+
+      expect(result).toEqual({ delivered: true, dryRun: false, provider: 'apns' });
+    });
+
+    it('lets the caller name the channel, over what the token was registered under', async () => {
+      configRepo.findOne.mockResolvedValueOnce(activeConfig);
+      pushTokensService.providerOfToken.mockResolvedValue('fcm');
+      storedCredentials({ fcm: credentials, apns: apnsCredentials });
+      apnsProvider.sendToRecipients.mockResolvedValueOnce(DELIVERED);
+
+      const result = await service.testSend({ projectId: 'proj-1', token: 'tok', provider: 'apns' });
+
+      expect(result.provider).toBe('apns');
+      expect(pushTokensService.providerOfToken).not.toHaveBeenCalled();
+      expect(fcmProvider.sendToRecipients).not.toHaveBeenCalled();
+    });
+
+    it('says which channel has no credentials, and sends nothing', async () => {
+      configRepo.findOne.mockResolvedValueOnce(activeConfig);
+      pushTokensService.providerOfToken.mockResolvedValueOnce('apns');
+      storedCredentials({ fcm: credentials });
+
+      const result = await service.testSend({ projectId: 'proj-1', token: 'apns-device-token' });
+
+      expect(result).toEqual({
+        delivered: false,
+        dryRun: false,
+        provider: 'apns',
+        error: 'No Apple Push Notification service credentials are set up for this project.',
+        errorCode: 'not_configured',
+      });
+      expect(apnsProvider.sendToRecipients).not.toHaveBeenCalled();
+      expect(fcmProvider.sendToRecipients).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('storeChannelCredentials', () => {
+    const APNS = JSON.stringify({ keyId: 'K', teamId: 'T', privateKey: 'pem', bundleId: 'com.example.app' });
+
+    it('switches push on for a project whose first credentials are an APNs key', async () => {
+      // Without the config row a test send, a campaign and the worker all refuse, and
+      // only the FCM upload used to create it: an iOS-only project could never send.
+      configRepo.findOne.mockResolvedValueOnce(null);
+      configRepo.create.mockImplementation((obj) => ({ ...obj }));
+      configRepo.save.mockImplementation(async (obj) => ({ id: 'cfg-1', ...obj }));
+
+      await service.storeChannelCredentials('proj-1', 'apns', APNS, 'user-1', CTX);
+
+      expect(channelCredentials.replace).toHaveBeenCalledWith(expect.anything(), 'proj-1', 'apns', APNS);
+      expect(configRepo.save).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'proj-1', isActive: true }));
+      expect(activity.record).toHaveBeenCalledTimes(1);
+      expect(activity.record).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'channel.credentials_uploaded', projectId: 'proj-1' }),
+        CTX,
+        expect.anything(),
+      );
+    });
+
+    it('leaves the sending policy of a project that already sends as it is', async () => {
+      const existing = { id: 'cfg-1', projectId: 'proj-1', isActive: true, frequencyCapPerDay: 3 };
+      configRepo.findOne.mockResolvedValueOnce(existing);
+
+      await service.storeChannelCredentials('proj-1', 'apns', APNS, 'user-1', CTX);
+
+      expect(configRepo.save).not.toHaveBeenCalled();
+      expect(configRepo.create).not.toHaveBeenCalled();
+      expect(existing).toEqual({ id: 'cfg-1', projectId: 'proj-1', isActive: true, frequencyCapPerDay: 3 });
+      expect(activity.record).toHaveBeenCalledTimes(1);
+    });
+
+    it('writes and logs nothing when the same credentials are uploaded again', async () => {
+      configRepo.findOne.mockResolvedValueOnce({ id: 'cfg-1', projectId: 'proj-1', isActive: true });
+      channelCredentials.replace.mockResolvedValueOnce(false);
+
+      await service.storeChannelCredentials('proj-1', 'apns', APNS, 'user-1', CTX);
+
+      expect(configRepo.save).not.toHaveBeenCalled();
+      expect(activity.record).not.toHaveBeenCalled();
     });
   });
 

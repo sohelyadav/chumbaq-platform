@@ -5,6 +5,7 @@ import {
   UpdatePushTemplateDto,
   SendPushNotificationDto,
   SendToUserDto,
+  TestSendPushDto,
 } from './push-notification.dto';
 
 /**
@@ -124,6 +125,27 @@ describe('push DTO validation through the global pipe', () => {
 
     it('needs a user at all', async () => {
       await expect(pipe.transform(base, meta(SendToUserDto))).rejects.toThrow();
+    });
+  });
+
+  describe('TestSendPushDto', () => {
+    const base = { projectId: '11111111-1111-4111-8111-111111111111', token: 'device-token' };
+
+    it('keeps the channel the caller named', async () => {
+      const dto = await pipe.transform({ ...base, provider: 'apns' }, meta(TestSendPushDto));
+      expect(dto.provider).toBe('apns');
+    });
+
+    it('needs no channel: the server works it out from the token', async () => {
+      const dto = await pipe.transform(base, meta(TestSendPushDto));
+      expect(dto.provider).toBeUndefined();
+    });
+
+    it('refuses a channel that is not a push provider', async () => {
+      // The value picks whose credentials are read and which provider is called.
+      await expect(pipe.transform({ ...base, provider: 'email' }, meta(TestSendPushDto))).rejects.toMatchObject({
+        response: { message: [expect.stringContaining('provider must be one of')] },
+      });
     });
   });
 

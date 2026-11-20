@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { useProjectDashboardStats } from '@/hooks/use-analytics';
+import { GetStartedCard } from '@/components/get-started-card';
 
 export default function DashboardPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -74,6 +75,9 @@ export default function DashboardPage() {
           <Link to={`/projects/${projectId}/links/new`}>Create Link</Link>
         </Button>
       </div>
+
+      {/* Keyed by project, so switching projects starts from that project's own state. */}
+      <GetStartedCard key={projectId} projectId={projectId!} />
 
       {/* Stats cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">

@@ -329,6 +329,14 @@ export class TestSendPushDto {
   @IsString()
   token: string;
 
+  /**
+   * The channel the token belongs to. Left out, the server uses the one the SDK
+   * registered the token under, or the project's only push channel.
+   */
+  @IsIn(PUSH_PROVIDERS as unknown as string[])
+  @IsOptional()
+  provider?: PushProvider;
+
   @IsString()
   @MaxLength(255)
   @IsOptional()

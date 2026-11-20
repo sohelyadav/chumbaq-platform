@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 import { MixpanelCohortMemberEntity } from './entities/mixpanel-cohort-member.entity';
 import { PushTokenEntity } from '../push-tokens/entities/push-token.entity';
-import { PushNotificationsService } from '../push-notifications/push-notifications.service';
+import { PushNotificationsService, PUSH_NOT_SET_UP } from '../push-notifications/push-notifications.service';
 import { PushCohortDto } from './dto/push-cohort.dto';
 import { MessageDeliveryService } from '../in-app-messages/message-delivery.service';
 import { DeviceIdentityEntity } from '../identity/entities/device-identity.entity';
@@ -203,9 +203,7 @@ export class MixpanelCampaignService {
     // request half-sent; a cohort nobody in which can be reached is refused.
     const config = await this.pushConfigRepo.findOne({ where: { projectId, isActive: true } });
     if (!config) {
-      throw new NotFoundException(
-        'Push notifications not configured for this project. Call configure first.',
-      );
+      throw new NotFoundException(PUSH_NOT_SET_UP);
     }
     const reachable: string[][] = [];
     for (const batch of batches) {

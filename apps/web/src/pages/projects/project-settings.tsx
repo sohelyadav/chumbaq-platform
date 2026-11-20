@@ -29,7 +29,7 @@ import { toast } from '@/components/ui/use-toast';
 
 const projectSchema = z.object({
   name: z.string().min(1, 'Name is required'),
-  domain: z.string().min(1, 'Domain is required'),
+  domain: z.string().trim().max(255).optional(),
   webFallbackUrl: z.string().url().optional().or(z.literal('')),
   iosBundleId: z.string().optional(),
   iosAppStoreUrl: z.string().url().optional().or(z.literal('')),
@@ -134,7 +134,7 @@ export default function ProjectSettingsPage() {
     if (project) {
       reset({
         name: project.name,
-        domain: project.domain,
+        domain: project.domain ?? '',
         webFallbackUrl: project.webFallbackUrl || '',
         iosBundleId: project.iosBundleId || '',
         iosAppStoreUrl: project.iosAppStoreUrl || '',
@@ -151,7 +151,7 @@ export default function ProjectSettingsPage() {
     try {
       await updateProject.mutateAsync({
         name: data.name,
-        domain: data.domain,
+        domain: data.domain || null,
         webFallbackUrl: data.webFallbackUrl || null,
         iosBundleId: data.iosBundleId || null,
         iosAppStoreUrl: data.iosAppStoreUrl || null,
@@ -233,8 +233,9 @@ export default function ProjectSettingsPage() {
                 {errors.name && <p className="text-sm text-destructive">{errors.name.message}</p>}
               </div>
               <div className="space-y-2">
-                <Label>Domain</Label>
-                <Input {...register('domain')} />
+                <Label htmlFor="project-domain">Domain (optional)</Label>
+                <Input id="project-domain" placeholder="example.com" {...register('domain')} />
+                <p className="text-xs text-muted-foreground">Only needed for app links.</p>
                 {errors.domain && <p className="text-sm text-destructive">{errors.domain.message}</p>}
               </div>
             </div>

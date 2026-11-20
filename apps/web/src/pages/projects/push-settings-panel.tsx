@@ -7,6 +7,7 @@ import {
   FlaskConical,
   KeyRound,
   Radio,
+  Smartphone,
 } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { Button } from '@/components/ui/button';
@@ -40,6 +41,7 @@ import {
   type TestSendResult,
   type PushChannel,
   type MiPushRegion,
+  type ApnsEnvironment,
 } from '@/hooks/use-push-notifications';
 import { toast } from '@/components/ui/use-toast';
 import { format } from 'date-fns';
@@ -77,6 +79,36 @@ const MI_PUSH_REGIONS: Array<{ value: MiPushRegion; label: string }> = [
   { value: 'eea', label: 'EEA & UK' },
   { value: 'russia', label: 'Russia' },
 ];
+
+/** Who answered a test send, in the words the result is shown in. */
+function providerName(result: TestSendResult): string {
+  if (result.provider === 'apns') return 'Apple';
+  if (result.provider === 'mi_push') return 'Mi Push';
+  if (result.provider && result.provider !== 'fcm') return CHANNEL_LABELS[result.provider];
+  return 'Firebase';
+}
+
+/** What a successful test send proved. A dry run proves less on APNs than on FCM. */
+function testOutcome(result: TestSendResult): string {
+  const name = providerName(result);
+  if (!result.dryRun) return `${name} accepted the message for delivery to that device.`;
+  if (result.provider === 'apns') {
+    return 'The message is valid. Apple has no validate-only mode, so the key and token were not checked.';
+  }
+  return `${name} accepted the credentials and message. Nothing was delivered.`;
+}
+
+// A development build's token only exists in the sandbox, so sending it to
+// production is BadDeviceToken for everyone — the one APNs field that fails
+// for every recipient at once when it is wrong.
+const APNS_ENVIRONMENTS: Array<{ value: ApnsEnvironment; label: string }> = [
+  { value: 'production', label: 'Production (App Store and TestFlight)' },
+  { value: 'sandbox', label: 'Sandbox (development builds)' },
+];
+
+// "Detect" lets the server pick: the channel the SDK registered the token
+// under, or the project's only channel. Named so the Select has a value for it.
+const DETECT_CHANNEL = 'detect';
 
 interface PushSettingsPanelProps {
   projectId: string;
@@ -124,17 +156,36 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
   const [miPushTouched, setMiPushTouched] = useState(false);
   const [miPushError, setMiPushError] = useState<string | null>(null);
 
+  // Like the Mi Push secret, the stored key is never returned, so these start
+  // blank whether or not APNs is set up. The bundle id is the exception: the
+  // project may already name one, and retyping it is where typos come from.
+  const [apnsKeyId, setApnsKeyId] = useState('');
+  const [apnsTeamId, setApnsTeamId] = useState('');
+  const [apnsBundleId, setApnsBundleId] = useState('');
+  const [apnsBundleTouched, setApnsBundleTouched] = useState(false);
+  const [apnsPrivateKey, setApnsPrivateKey] = useState('');
+  const [apnsEnvironment, setApnsEnvironment] = useState<ApnsEnvironment>('production');
+  const [apnsError, setApnsError] = useState<string | null>(null);
+
   const [testToken, setTestToken] = useState('');
+  const [testChannel, setTestChannel] = useState<string>(DETECT_CHANNEL);
   const [testResult, setTestResult] = useState<TestSendResult | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
+
+  const supportedChannels = channels?.supported ?? [];
+  const configuredChannels = channels?.configured ?? [];
+  const fcmConfigured = configuredChannels.includes('fcm');
+  const apnsSupported = supportedChannels.includes('apns');
+  const apnsConfigured = configuredChannels.includes('apns');
 
   const isConfigured = !!configStatus?.configured;
   const isActive = isConfigured && !!configStatus?.isActive;
   // The server encrypts the service account at rest; if it can no longer be
-  // decrypted, `configured` can still be true (a row exists) while
-  // firebaseProjectId comes back null. That is a different, more actionable
-  // problem than "nothing set up" and must not be reported as the same thing.
-  const isUnreadable = isConfigured && !configStatus?.firebaseProjectId;
+  // decrypted, FCM still has a credentials row while firebaseProjectId comes
+  // back null. That is a different, more actionable problem than "nothing set
+  // up" and must not be reported as the same thing. A project with no FCM row
+  // at all (an iOS app sending through APNs alone) is not this.
+  const isUnreadable = isConfigured && fcmConfigured && !configStatus?.firebaseProjectId;
 
   const reachabilityChartData = (reachability?.daily ?? []).map((point) => ({
     ...point,
@@ -165,8 +216,6 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
     maxSendsValue.trim() !== '' &&
     !(Number.isInteger(Number(maxSendsValue)) && Number(maxSendsValue) >= 1);
 
-  const supportedChannels = channels?.supported ?? [];
-  const configuredChannels = channels?.configured ?? [];
   const miPushSupported = supportedChannels.includes('mi_push');
   const miPushConfigured = configuredChannels.includes('mi_push');
   // Same "don't yell at an untouched field" idea as quiet hours above, just
@@ -257,23 +306,66 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
     }
   };
 
+  const apnsBundleValue = apnsBundleTouched ? apnsBundleId : (project?.iosBundleId ?? '');
+  const apnsComplete =
+    apnsKeyId.trim() !== '' &&
+    apnsTeamId.trim() !== '' &&
+    apnsBundleValue.trim() !== '' &&
+    apnsPrivateKey.trim() !== '';
+
+  const handleApnsKeyFile = async (file: File | undefined) => {
+    if (!file) return;
+    // A .p8 is a few hundred bytes of PEM. Anything large is the wrong file,
+    // and reading it into a textarea would only freeze the page.
+    if (file.size > 16 * 1024) {
+      setApnsError('That file is too large to be an APNs key. Choose the .p8 file Apple gave you.');
+      return;
+    }
+    setApnsError(null);
+    setApnsPrivateKey(await file.text());
+  };
+
+  const handleConfigureApns = async () => {
+    if (!apnsComplete) return;
+    setApnsError(null);
+    try {
+      await configureChannel.mutateAsync({
+        provider: 'apns',
+        credentials: {
+          keyId: apnsKeyId.trim(),
+          teamId: apnsTeamId.trim(),
+          bundleId: apnsBundleValue.trim(),
+          privateKey: apnsPrivateKey.trim(),
+          environment: apnsEnvironment,
+        },
+      });
+      toast({ title: 'APNs key saved', description: 'iOS devices can now receive push from this project.' });
+      // The API never hands the key back, so nothing is kept in state either.
+      setApnsKeyId('');
+      setApnsTeamId('');
+      setApnsPrivateKey('');
+    } catch (err: any) {
+      // The server's reason, as for FCM: which field Apple's key format refused.
+      setApnsError(err?.response?.data?.message || 'Failed to save the APNs key');
+    }
+  };
+
   const handleTestSend = async (dryRun: boolean) => {
     if (!testToken.trim()) return;
     setTestError(null);
     setTestResult(null);
     try {
-      const result = await testSend.mutateAsync({ token: testToken.trim(), dryRun });
+      const result = await testSend.mutateAsync({
+        token: testToken.trim(),
+        dryRun,
+        ...(testChannel === DETECT_CHANNEL ? {} : { provider: testChannel as PushChannel }),
+      });
       setTestResult(result);
       if (result.delivered) {
-        toast({
-          title: dryRun ? 'Validated' : 'Delivered',
-          description: dryRun
-            ? 'Firebase accepted the credentials and message. Nothing was delivered.'
-            : 'Firebase accepted the message for delivery to that device.',
-        });
+        toast({ title: dryRun ? 'Validated' : 'Delivered', description: testOutcome(result) });
       } else {
         toast({
-          title: result.errorCode ?? 'Rejected by Firebase',
+          title: result.errorCode ?? `Rejected by ${providerName(result)}`,
           description: result.error ?? 'Unknown error',
           variant: 'destructive',
         });
@@ -292,7 +384,7 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
         <CardHeader>
           <CardTitle>Connection status</CardTitle>
           <CardDescription>
-            The Firebase project this app is currently sending push through.
+            What this app is currently sending push through.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -315,12 +407,22 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
               <div className={`flex items-center gap-2 ${isActive ? 'text-green-600' : 'text-muted-foreground'}`}>
                 {isActive ? <CheckCircle2 className="h-5 w-5" /> : <XCircle className="h-5 w-5" />}
                 <span className="font-medium">
-                  {isActive ? 'FCM is configured and active' : 'FCM is configured but not active'}
+                  {isActive ? 'Push is set up and active' : 'Push is set up but not active'}
                 </span>
               </div>
               <dl className="grid gap-x-6 gap-y-1 text-sm sm:grid-cols-[auto_1fr]">
-                <dt className="text-muted-foreground">Firebase project</dt>
-                <dd className="font-mono">{configStatus?.firebaseProjectId}</dd>
+                {configStatus?.firebaseProjectId && (
+                  <>
+                    <dt className="text-muted-foreground">Firebase project</dt>
+                    <dd className="font-mono">{configStatus.firebaseProjectId}</dd>
+                  </>
+                )}
+                {apnsConfigured && (
+                  <>
+                    <dt className="text-muted-foreground">Apple Push</dt>
+                    <dd>APNs key on file</dd>
+                  </>
+                )}
                 {configStatus?.clientEmail && (
                   <>
                     <dt className="text-muted-foreground">Service account</dt>
@@ -338,16 +440,18 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
           ) : (
             <div className="flex items-center gap-2 text-muted-foreground">
               <XCircle className="h-5 w-5" />
-              <span>FCM not configured. Upload your Firebase service account JSON below to enable push notifications.</span>
+              <span>
+                Push is not set up yet. Add your Firebase service account for Android, or your
+                APNs key for iOS, below.
+              </span>
             </div>
           )}
         </CardContent>
       </Card>
 
-      {/* Delivery channels beyond FCM. Only meaningful once FCM is set up —
-          this project has no push provider at all otherwise. */}
-      {isConfigured && (
-        <Card>
+      {/* Every channel, set up or not: before anything is configured this list
+          is how someone finds out an iOS app needs an APNs key and not Firebase. */}
+      <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Radio className="h-5 w-5" />
@@ -388,7 +492,9 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
                   ))}
                 </ul>
 
-                {manages && miPushSupported && (
+                {/* Mi Push stands in for FCM on Xiaomi devices, so it is only
+                    offered once there is an FCM to stand in for. */}
+                {manages && miPushSupported && fcmConfigured && (
                   <>
                     <Separator />
                     <div className="space-y-4">
@@ -505,10 +611,9 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
               </>
             )}
           </CardContent>
-        </Card>
-      )}
+      </Card>
 
-      {/* Delivery guardrails. Only meaningful once FCM is set up. */}
+      {/* Delivery guardrails. Only meaningful once push is set up. */}
       {isConfigured && (
         <Card>
           <CardHeader>
@@ -618,8 +723,8 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
               )}
               <p className="text-xs text-muted-foreground">
                 Throttles how fast a campaign is sent out, to stay under your
-                provider's rate quota. Leave empty to send as fast as
-                Firebase allows.
+                provider's rate quota. Leave empty to send as fast as the
+                provider allows.
               </p>
             </div>
 
@@ -768,7 +873,7 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Upload className="h-5 w-5" />
-            {isConfigured ? 'Replace credentials' : 'Upload credentials'}
+            Firebase service account (Android and web)
           </CardTitle>
           <CardDescription>
             Paste the Firebase service account JSON from Project Settings &gt;
@@ -802,10 +907,134 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
             </div>
           )}
           <Button onClick={handleConfigure} disabled={configurePush.isPending || !fcmJson.trim()}>
-            {configurePush.isPending ? 'Validating…' : isConfigured ? 'Save and replace' : 'Save configuration'}
+            {configurePush.isPending ? 'Validating…' : fcmConfigured ? 'Save and replace' : 'Save service account'}
           </Button>
         </CardContent>
       </Card>
+      )}
+
+      {/* The APNs key. Owners and admins only. An iOS app built on the Chumbaq
+          SDK registers its token under APNs, so without this it has tokens and
+          nothing that can deliver to them. */}
+      {manages && apnsSupported && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Smartphone className="h-5 w-5" />
+              Apple Push key (iOS)
+            </CardTitle>
+            <CardDescription>
+              In Apple Developer, open Certificates, Identifiers &amp; Profiles &gt; Keys, create a
+              key with Apple Push Notifications service enabled, and download its .p8 file. Apple
+              lets you download it once.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="apns-key-id">Key ID</Label>
+                <Input
+                  id="apns-key-id"
+                  autoComplete="off"
+                  placeholder={apnsConfigured ? '••••••••••' : 'ABC123DEFG'}
+                  value={apnsKeyId}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setApnsKeyId(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">Shown next to the key in Apple's list. 10 characters.</p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="apns-team-id">Team ID</Label>
+                <Input
+                  id="apns-team-id"
+                  autoComplete="off"
+                  placeholder={apnsConfigured ? '••••••••••' : 'ABCDE12345'}
+                  value={apnsTeamId}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setApnsTeamId(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">Under Membership details in your Apple account.</p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="apns-bundle-id">Bundle ID</Label>
+              <Input
+                id="apns-bundle-id"
+                autoComplete="off"
+                placeholder="com.example.app"
+                value={apnsBundleValue}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                  setApnsBundleTouched(true);
+                  setApnsBundleId(e.target.value);
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                Your app's bundle identifier, exactly as in Xcode. Apple rejects a push whose bundle
+                ID does not match the app that owns the token.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="apns-environment">Environment</Label>
+              <Select value={apnsEnvironment} onValueChange={(v) => setApnsEnvironment(v as ApnsEnvironment)}>
+                <SelectTrigger id="apns-environment" className="max-w-[24rem]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {APNS_ENVIRONMENTS.map((env) => (
+                    <SelectItem key={env.value} value={env.value}>
+                      {env.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                A build run from Xcode gets a sandbox token; App Store and TestFlight builds get
+                production ones. The wrong choice fails every send with BadDeviceToken.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="apns-private-key">Key file (.p8)</Label>
+              <Input
+                type="file"
+                accept=".p8,.pem,text/plain"
+                className="max-w-[24rem]"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                  void handleApnsKeyFile(e.target.files?.[0]);
+                  // So choosing the same file again after an error still fires.
+                  e.target.value = '';
+                }}
+              />
+              <Textarea
+                id="apns-private-key"
+                value={apnsPrivateKey}
+                onChange={(e) => {
+                  setApnsPrivateKey(e.target.value);
+                  if (apnsError) setApnsError(null);
+                }}
+                placeholder="-----BEGIN PRIVATE KEY-----"
+                rows={5}
+                spellCheck={false}
+                className="max-h-[30vh] resize-y overflow-y-auto font-mono text-xs"
+              />
+              <p className="text-xs text-muted-foreground">
+                Choose the file or paste its contents. It is checked before it is stored, encrypted,
+                and never shown again.
+              </p>
+            </div>
+
+            {apnsError && (
+              <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span className="break-words">{apnsError}</span>
+              </div>
+            )}
+
+            <Button onClick={handleConfigureApns} disabled={configureChannel.isPending || !apnsComplete}>
+              {configureChannel.isPending ? 'Checking…' : apnsConfigured ? 'Replace APNs key' : 'Save APNs key'}
+            </Button>
+          </CardContent>
+        </Card>
       )}
 
       {/* Test send — the panel's most useful output is a failed test, so its
@@ -817,13 +1046,40 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
             Test send
           </CardTitle>
           <CardDescription>
-            Check this project's Firebase setup against one device without
+            Check this project's push setup against one device without
             creating a campaign.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label>Device registration token</Label>
+            <Label htmlFor="test-send-channel">Channel</Label>
+            <Select
+              value={testChannel}
+              onValueChange={(value) => {
+                setTestChannel(value);
+                setTestResult(null);
+                setTestError(null);
+              }}
+            >
+              <SelectTrigger id="test-send-channel" className="max-w-[22rem]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={DETECT_CHANNEL}>Detect from the token</SelectItem>
+                {configuredChannels.map((channel) => (
+                  <SelectItem key={channel} value={channel}>
+                    {CHANNEL_LABELS[channel]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Detect uses the channel your app registered the token under. Pick one when
+              the token came from somewhere else, such as Xcode's console.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="test-send-token">Device token</Label>
             <Textarea
               value={testToken}
               onChange={(e) => {
@@ -833,14 +1089,16 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
                   setTestError(null);
                 }
               }}
-              placeholder="Paste an FCM registration token from a device running your app"
+              id="test-send-token"
+              placeholder="An FCM registration token (Android, web) or an APNs device token (iOS)"
               rows={3}
               className="max-h-[30vh] resize-y overflow-y-auto font-mono text-xs"
             />
             <p className="flex items-start gap-1 text-xs text-muted-foreground">
               <KeyRound className="mt-0.5 h-3 w-3 shrink-0" />
-              Validate only asks Firebase to check the credentials and message
-              without delivering anything to the device. Deliver actually sends it.
+              Validate only checks the credentials and message without delivering
+              anything. Apple has no such mode, so for APNs it checks the message alone.
+              Deliver actually sends it.
             </p>
           </div>
 
@@ -871,17 +1129,13 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
               ) : testResult?.delivered ? (
                 <div className="flex items-center gap-2 rounded-lg border border-green-600/30 bg-green-600/5 p-3 text-sm text-green-700">
                   <CheckCircle2 className="h-4 w-4 shrink-0" />
-                  <span>
-                    {testResult.dryRun
-                      ? 'Firebase accepted the credentials and message. Nothing was delivered.'
-                      : 'Firebase accepted the message for delivery to that device.'}
-                  </span>
+                  <span>{testOutcome(testResult)}</span>
                 </div>
               ) : (
                 <div className="space-y-1 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
                   <div className="flex items-center gap-2 font-medium">
                     <XCircle className="h-4 w-4 shrink-0" />
-                    Rejected by Firebase
+                    Rejected by {testResult ? providerName(testResult) : 'the provider'}
                     {testResult?.errorCode && (
                       <code className="rounded bg-destructive/10 px-1.5 py-0.5 font-mono text-xs">
                         {testResult.errorCode}

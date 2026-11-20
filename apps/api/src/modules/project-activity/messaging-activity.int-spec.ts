@@ -27,7 +27,7 @@ import { PendingMessageEntity } from '../in-app-messages/entities/pending-messag
 import { EmailSettingsService } from '../email/email-settings.service';
 import { SmsSettingsService } from '../sms/sms-settings.service';
 import { WhatsAppSettingsService } from '../whatsapp/whatsapp-settings.service';
-import { PushNotificationsService } from '../push-notifications/push-notifications.service';
+import { PushNotificationsService, PUSH_NOT_SET_UP } from '../push-notifications/push-notifications.service';
 import { EmailCampaignsService } from '../email/email-campaigns.service';
 import { SmsCampaignsService } from '../sms/sms-campaigns.service';
 import { WhatsAppCampaignsService } from '../whatsapp/whatsapp-campaigns.service';
@@ -584,10 +584,7 @@ describe('Messaging activity (integration)', () => {
       const { p, cohortId } = await cohortProject();
       await ds.getRepository(PushConfigEntity).update({ projectId: p }, { isActive: false });
       const res = await call('POST', `/projects/${p}/mixpanel/cohorts/${cohortId}/push`, owner, { title: 'x' });
-      expect([res.status, res.json?.message]).toEqual([
-        404,
-        'Push notifications not configured for this project. Call configure first.',
-      ]);
+      expect([res.status, res.json?.message]).toEqual([404, PUSH_NOT_SET_UP]);
       await nothingMade(p);
     });
 

@@ -5,7 +5,8 @@ import type { ProjectListMeta, ProjectPermission, ProjectRole } from '@chumbaq/s
 export interface Project {
   id: string;
   name: string;
-  domain: string;
+  /** Only app links need one, so a project may have none. */
+  domain: string | null;
   iosBundleId: string | null;
   iosAppStoreUrl: string | null;
   iosTeamId: string | null;
@@ -32,7 +33,7 @@ export interface Project {
 
 export interface CreateProjectDto {
   name: string;
-  domain: string;
+  domain?: string | null;
   iosBundleId?: string | null;
   iosAppStoreUrl?: string | null;
   iosTeamId?: string | null;

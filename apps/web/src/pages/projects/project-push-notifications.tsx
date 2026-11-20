@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Bell, Send, CheckCircle2, XCircle, AlertTriangle, Clock, Loader2,
   CalendarClock, Ban, Plus,
@@ -49,6 +49,9 @@ const audienceLabel = (targetType?: string) => {
 
 export default function ProjectPushNotificationsPage() {
   const { projectId } = useParams<{ projectId: string }>();
+  const [searchParams] = useSearchParams();
+  const requestedTab = searchParams.get('tab');
+  const initialTab = requestedTab === 'settings' || requestedTab === 'templates' ? requestedTab : 'campaigns';
   const navigate = useNavigate();
   const { data: configStatus, isLoading: configLoading } = usePushConfigStatus(projectId);
   const { data: logsResponse, isLoading: logsLoading } = usePushLogs(projectId);
@@ -78,7 +81,8 @@ export default function ProjectPushNotificationsPage() {
         </Button>
       </div>
 
-      <Tabs defaultValue="campaigns">
+      {/* `?tab=settings` is how the get-started steps link straight to credentials and test send. */}
+      <Tabs defaultValue={initialTab}>
         <TabsList>
           <TabsTrigger value="campaigns">Campaigns</TabsTrigger>
           <TabsTrigger value="templates">Templates</TabsTrigger>
@@ -90,8 +94,8 @@ export default function ProjectPushNotificationsPage() {
             <Card className="border-destructive/40">
               <CardContent className="flex items-center gap-2 pt-6 text-sm">
                 <XCircle className="h-4 w-4 text-destructive" />
-                FCM is not configured, so nothing can be sent. Set it up under
-                Settings.
+                Push is not set up, so nothing can be sent. Add your Firebase
+                or Apple credentials under Settings.
               </CardContent>
             </Card>
           )}
