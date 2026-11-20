@@ -312,6 +312,36 @@ describe('API key and channel activity (integration)', () => {
       await noneNew(p, 3);
     });
 
+    it('switches push on for a project whose only credentials are an APNs key', async () => {
+      // An iOS app with no Firebase in it. Only the FCM upload used to make the
+      // push_configs row, so such a project could store its key and then send nothing.
+      const p = await project();
+      expect(await ok('GET', `/push-notifications/config-status/${p}`)).toMatchObject({ configured: false });
+      const refused = await call('POST', '/push-notifications/settings', { projectId: p, frequencyCapPerDay: 2 });
+      expect(refused.status).toBe(404);
+
+      const apns = JSON.stringify({ keyId: 'K', teamId: 'T', bundleId: 'b', privateKey: S('apns-only') });
+      await ok('POST', '/push-notifications/channels/credentials', { projectId: p, provider: 'apns', credentials: apns });
+      expect(await onlyNew(p, 0)).toMatchObject({ action: 'channel.credentials_uploaded', target_id: 'apns' });
+
+      expect(await ok('GET', `/push-notifications/config-status/${p}`)).toMatchObject({
+        configured: true,
+        isActive: true,
+        firebaseProjectId: null,
+      });
+      expect(await ok('GET', `/push-notifications/channels/${p}`)).toMatchObject({ configured: ['apns'] });
+      expect(await ds.query(`SELECT is_active FROM push_configs WHERE project_id = $1`, [p])).toEqual([{ is_active: true }]);
+
+      // What the row gates: a campaign now gets as far as finding nobody to send to.
+      const campaign = await call('POST', '/push-notifications/send', { projectId: p, title: 'Hello', body: 'World' });
+      expect([campaign.status, campaign.json?.message]).toEqual([400, expect.stringContaining('No reachable push tokens')]);
+
+      // The same key again is neither a second row nor a second entry.
+      await ok('POST', '/push-notifications/channels/credentials', { projectId: p, provider: 'apns', credentials: apns });
+      await noneNew(p, 1);
+      expect(await ds.query(`SELECT count(*)::int AS n FROM push_configs WHERE project_id = $1`, [p])).toEqual([{ n: 1 }]);
+    });
+
     it('logs the policy fields a save changes, and nothing for a save that changes none', async () => {
       const p = await project();
       await ok('POST', '/push-notifications/configure', { projectId: p, fcmServiceAccountJson: fcmJson(S('fcm')) });

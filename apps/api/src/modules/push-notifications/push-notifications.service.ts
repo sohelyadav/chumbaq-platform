@@ -8,7 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { PushConfigEntity } from './entities/push-config.entity';
 import type { PushProvider } from '../push-tokens/entities/push-token.entity';
 import type { ActivityContext } from '../project-activity/activity-context';
@@ -34,6 +34,8 @@ import { validateRecurrence, nextOccurrence } from './recurrence';
 import { validateCarousel, validateTimer } from './rich-content';
 import { PushTemplatesService } from './push-templates.service';
 import { ChannelCredentialsService } from './channel-credentials.service';
+import { ChannelProviderRegistry } from './services/channel-provider.registry';
+import type { ChannelSendResult } from './services/channel-provider';
 import {
   FcmProvider,
   ServiceAccountCredentials,
@@ -58,6 +60,10 @@ import {
   JOB_DISPATCH_CAMPAIGN,
   PushCampaignJobData,
 } from '../../queue/queue.constants';
+
+/** Shown in the dashboard as it is, so it says what to do there, not which route to call. */
+export const PUSH_NOT_SET_UP =
+  'Push is not set up for this project yet. Add your Firebase or Apple credentials first.';
 
 /** How the activity log names a push provider. */
 const PUSH_PROVIDER_LABELS: Record<PushProvider, string> = {
@@ -88,6 +94,7 @@ export class PushNotificationsService {
     private readonly pushAnalytics: PushAnalyticsService,
     private readonly pushTemplates: PushTemplatesService,
     private readonly channelCredentials: ChannelCredentialsService,
+    private readonly channelRegistry: ChannelProviderRegistry,
     @InjectQueue(QUEUE_PUSH_CAMPAIGN)
     private readonly pushQueue: Queue<PushCampaignJobData>,
     private readonly activity: ProjectActivityService,
@@ -98,6 +105,10 @@ export class PushNotificationsService {
    * `channel.credentials_uploaded` in the same transaction, naming the provider and the
    * field `credentials`, never what they hold. Credentials the channel already holds,
    * compared decrypted, are neither written nor logged.
+   *
+   * It also switches push on (`ensurePushConfig`), as the FCM upload does: an iOS app
+   * with no Firebase in it has an APNs key and nothing else, and must still be able to
+   * send a test and a campaign.
    */
   async storeChannelCredentials(
     projectId: string,
@@ -110,7 +121,8 @@ export class PushNotificationsService {
       // The projects row first, as every project transaction takes it (lock order).
       await manager.query('SELECT 1 FROM projects WHERE id = $1 FOR NO KEY UPDATE', [projectId]);
       const changed = await this.channelCredentials.replace(manager, projectId, provider, plaintext);
-      if (!changed) return;
+      const { switchedOn } = await this.ensurePushConfig(manager, projectId);
+      if (!changed && !switchedOn) return;
       await this.activity.record(
         {
           projectId,
@@ -123,6 +135,34 @@ export class PushNotificationsService {
         manager,
       );
     });
+  }
+
+  /**
+   * The project's `push_configs` row is what says push is on: a test send, a campaign
+   * and the worker all refuse without an active one. It carries only sending policy
+   * (frequency cap, quiet hours, rate limit), so it is created empty the first time any
+   * push channel gets credentials and left alone afterwards, which must not reset those
+   * settings. Call it inside the transaction that stores the credentials, after the
+   * `projects` row is locked.
+   */
+  private async ensurePushConfig(
+    manager: EntityManager,
+    projectId: string,
+  ): Promise<{ row: PushConfigEntity; switchedOn: boolean }> {
+    const configs = manager.getRepository(PushConfigEntity);
+    const existing = await configs.findOne({
+      where: { projectId },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (existing?.isActive) return { row: existing, switchedOn: false };
+    if (existing) {
+      existing.isActive = true;
+      return { row: await configs.save(existing), switchedOn: true };
+    }
+    const row = await configs.save(
+      configs.create({ projectId, isActive: true } as Partial<PushConfigEntity>) as PushConfigEntity,
+    );
+    return { row, switchedOn: true };
   }
 
   /**
@@ -168,9 +208,6 @@ export class PushNotificationsService {
       );
     }
 
-    // The config row now carries only sending policy — frequency cap, quiet
-    // hours, rate limit — so it is created empty on first configure and left
-    // alone on re-upload, which must not reset those settings.
     const config = await this.configRepository.manager.transaction(async (manager) => {
       // The projects row first, as every project transaction takes it (lock order).
       await manager.query('SELECT 1 FROM projects WHERE id = $1 FOR NO KEY UPDATE', [dto.projectId]);
@@ -180,30 +217,13 @@ export class PushNotificationsService {
         'fcm',
         dto.fcmServiceAccountJson,
       );
-      const configs = manager.getRepository(PushConfigEntity);
-      let row = await configs.findOne({
-        where: { projectId: dto.projectId },
-        lock: { mode: 'pessimistic_write' },
-      });
-      const switchedOn = !row?.isActive;
-      if (row) {
-        if (!row.isActive) {
-          row.isActive = true;
-          row = await configs.save(row);
-        } else if (changed) {
-          // The dashboard shows this row's updated_at as when the service account was
-          // last replaced, and the credentials live in another table. Only this
-          // column, so the sending policy on the row is left as it is.
-          row.updatedAt = new Date();
-          await configs.update({ id: row.id }, { updatedAt: row.updatedAt });
-        }
-      } else {
-        row = await configs.save(
-          configs.create({
-            projectId: dto.projectId,
-            isActive: true,
-          } as Partial<PushConfigEntity>) as PushConfigEntity,
-        );
+      const { row, switchedOn } = await this.ensurePushConfig(manager, dto.projectId);
+      if (changed && !switchedOn) {
+        // The dashboard shows this row's updated_at as when the service account was
+        // last replaced, and the credentials live in another table. Only this
+        // column, so the sending policy on the row is left as it is.
+        row.updatedAt = new Date();
+        await manager.getRepository(PushConfigEntity).update({ id: row.id }, { updatedAt: row.updatedAt });
       }
       if (changed || switchedOn) {
         await this.activity.record(
@@ -233,10 +253,15 @@ export class PushNotificationsService {
   /**
    * Sends one notification to one token and reports the outcome inline, rather
    * than queueing a campaign and leaving the caller to read logs.
+   *
+   * It goes out on the token's own channel (`testSendProvider`), with that channel's
+   * credentials, so an APNs device token is never handed to Firebase. `provider` in the
+   * answer says which one was asked.
    */
   async testSend(dto: TestSendPushDto): Promise<{
     delivered: boolean;
     dryRun: boolean;
+    provider: PushProvider;
     error?: string;
     errorCode?: string;
   }> {
@@ -246,7 +271,7 @@ export class PushNotificationsService {
 
     if (!config) {
       throw new NotFoundException(
-        'Push notifications not configured for this project. Call configure first.',
+        PUSH_NOT_SET_UP,
       );
     }
 
@@ -256,6 +281,8 @@ export class PushNotificationsService {
     // explicit opt-out holds here too. A dry run is left alone: the provider
     // validates it and delivers nothing, and it is how credentials are
     // checked against whatever token is to hand.
+    const provider = await this.testSendProvider(dto);
+
     if (
       !dryRun &&
       (await this.pushTokensService.isTokenOptedOut(dto.projectId, dto.token))
@@ -263,36 +290,52 @@ export class PushNotificationsService {
       return {
         delivered: false,
         dryRun,
+        provider,
         error: 'This device has opted out of push notifications.',
         errorCode: 'opted_out',
       };
     }
 
-    // Reporting rather than throwing: a stored service account that Google
-    // rejects makes `send` throw before any token is attempted, and a 500 is
+    // Reporting rather than throwing: stored credentials that the provider
+    // rejects make the send throw before any token is attempted, and a 500 is
     // the wrong answer from the endpoint whose entire job is to tell you what
     // is wrong with your setup.
-    let result: Awaited<ReturnType<FcmProvider['send']>>;
+    let result: ChannelSendResult;
     try {
-      result = await this.fcmProvider.send(
-        await this.decryptCredentials(dto.projectId),
-        [dto.token],
-        {
-          title: dto.title ?? 'Chumbaq test',
-          body: dto.body ?? 'Push notifications are configured correctly.',
-        },
+      const credentials = await this.channelCredentialsFor(dto.projectId, provider);
+      if (credentials === null) {
+        return {
+          delivered: false,
+          dryRun,
+          provider,
+          error: `No ${PUSH_PROVIDER_LABELS[provider]} credentials are set up for this project.`,
+          errorCode: 'not_configured',
+        };
+      }
+      result = await this.channelRegistry.get(provider).sendToRecipients(
+        credentials,
+        [
+          {
+            token: dto.token,
+            message: {
+              title: dto.title ?? 'Chumbaq test',
+              body: dto.body ?? 'Push notifications are configured correctly.',
+            },
+          },
+        ],
         { dryRun },
       );
     } catch (error) {
       return {
         delivered: false,
         dryRun,
+        provider,
         error: error instanceof Error ? error.message : 'Unknown error',
       };
     }
 
     if (result.successCount === 1) {
-      return { delivered: true, dryRun };
+      return { delivered: true, dryRun, provider };
     }
 
     // A failure that is still retryable never reaches `failures` — the
@@ -301,28 +344,36 @@ export class PushNotificationsService {
     return {
       delivered: false,
       dryRun,
+      provider,
       error: failure?.error ?? result.retryReason ?? 'Unknown error',
       errorCode: failure?.errorCode,
     };
   }
 
-  private async decryptCredentials(
-    projectId: string,
-  ): Promise<ServiceAccountCredentials> {
-    const plaintext = await this.channelCredentials.getPlaintext(
-      projectId,
-      'fcm',
-    );
-    if (plaintext === null) {
-      throw new NotFoundException(
-        'Push notifications are not configured for this project.',
-      );
-    }
+  /**
+   * Which channel a test send goes out on: the one the caller named; else the one this
+   * project's SDK registered the token under; else the project's only push channel;
+   * else FCM, which is what a pasted token has always meant here, unless the project
+   * has channels and FCM is not one of them.
+   */
+  private async testSendProvider(dto: TestSendPushDto): Promise<PushProvider> {
+    if (dto.provider) return dto.provider;
+    const registered = await this.pushTokensService.providerOfToken(dto.projectId, dto.token);
+    if (registered) return registered;
+    const configured = await this.channelCredentials.configuredPushProviders(dto.projectId);
+    if (configured.length === 0 || configured.includes('fcm')) return configured.length === 1 ? configured[0] : 'fcm';
+    return configured[0];
+  }
+
+  /** One push channel's stored credentials, parsed; null when the project has none. */
+  private async channelCredentialsFor(projectId: string, provider: PushProvider): Promise<unknown | null> {
+    const plaintext = await this.channelCredentials.getPlaintext(projectId, provider);
+    if (plaintext === null) return null;
     try {
-      return JSON.parse(plaintext) as ServiceAccountCredentials;
+      return JSON.parse(plaintext);
     } catch {
       throw new BadRequestException(
-        'Stored FCM credentials could not be decrypted. Re-upload the service account JSON.',
+        `Stored ${PUSH_PROVIDER_LABELS[provider]} credentials could not be read. Upload them again.`,
       );
     }
   }
@@ -479,7 +530,7 @@ export class PushNotificationsService {
       });
       if (!config) {
         throw new NotFoundException(
-          'Push notifications not configured for this project. Call configure first.',
+          PUSH_NOT_SET_UP,
         );
       }
       // Both ends or neither: a half-configured window would silently do
@@ -550,9 +601,11 @@ export class PushNotificationsService {
     let firebaseProjectId: string | null = null;
     let clientEmail: string | null = null;
     try {
-      const credentials = await this.decryptCredentials(projectId);
-      firebaseProjectId = credentials.project_id ?? null;
-      clientEmail = credentials.client_email ?? null;
+      // No FCM credentials at all is an ordinary state, not a fault: an iOS app with
+      // no Firebase in it sends through APNs alone.
+      const credentials = (await this.channelCredentialsFor(projectId, 'fcm')) as ServiceAccountCredentials | null;
+      firebaseProjectId = credentials?.project_id ?? null;
+      clientEmail = credentials?.client_email ?? null;
     } catch {
       // Undecryptable credentials are still worth reporting as "configured" so
       // the dashboard can show that something is stored but unreadable, rather
@@ -608,7 +661,7 @@ export class PushNotificationsService {
 
     if (!config) {
       throw new NotFoundException(
-        'Push notifications not configured for this project. Call configure first.',
+        PUSH_NOT_SET_UP,
       );
     }
 

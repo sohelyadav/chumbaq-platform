@@ -36,7 +36,8 @@ export type ProjectPermission =
 export interface Project {
   id: string;
   name: string;
-  domain: string;
+  /** The host for app links. Null until the project sets one: push and in-app need none. */
+  domain: string | null;
   iosBundleId?: string;
   iosAppStoreUrl?: string;
   iosTeamId?: string;
@@ -273,7 +274,8 @@ export interface CancelStaffLinkResponse {
 
 export interface CreateProjectDto {
   name: string;
-  domain: string;
+  /** Only app links need it; null clears it on an update. */
+  domain?: string | null;
   iosBundleId?: string;
   iosAppStoreUrl?: string;
   iosTeamId?: string;

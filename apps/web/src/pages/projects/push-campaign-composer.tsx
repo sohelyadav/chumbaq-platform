@@ -1532,8 +1532,9 @@ export default function PushCampaignComposerPage() {
       {!isConfigured && (
         <Card className="border-destructive/40">
           <CardContent className="pt-6 text-sm">
-            FCM is not configured for this project, so nothing can be sent yet.
-            Set it up under Settings on the push notifications page.
+            Push is not set up for this project, so nothing can be sent yet.
+            Add your Firebase or Apple credentials under Settings on the push
+            notifications page.
           </CardContent>
         </Card>
       )}

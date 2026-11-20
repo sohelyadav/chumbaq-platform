@@ -113,6 +113,8 @@ export type PushTranslations = Record<string, { title?: string; body?: string }>
 export interface TestSendResult {
   delivered: boolean;
   dryRun: boolean;
+  /** The channel the token was sent on, which the server works out when none is named. */
+  provider?: PushChannel;
   error?: string;
   errorCode?: string;
 }
@@ -238,6 +240,9 @@ export function useConfigurePush(projectId: string) {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['push-config-status', projectId] });
+      // The settings panel reads which channels are configured from this list, so an
+      // FCM upload that left it stale would still say "Not configured" beside its own toast.
+      queryClient.invalidateQueries({ queryKey: ['push-channels', projectId] });
     },
   });
 }
@@ -377,6 +382,8 @@ export function useTestSendPush(projectId: string) {
   return useMutation({
     mutationFn: (input: {
       token: string;
+      /** Left out, the server uses the channel the SDK registered the token under. */
+      provider?: PushChannel;
       title?: string;
       body?: string;
       dryRun?: boolean;
@@ -629,6 +636,20 @@ export interface MiPushCredentialsInput {
   region: MiPushRegion;
 }
 
+/** Apple's two push environments; a token from one does not exist in the other. */
+export type ApnsEnvironment = 'production' | 'sandbox';
+
+export interface ApnsCredentialsInput {
+  /** The 10-character id shown next to the .p8 key in Apple's console. */
+  keyId: string;
+  teamId: string;
+  /** The app's bundle id, sent as the APNs topic. */
+  bundleId: string;
+  /** The contents of the .p8 file. */
+  privateKey: string;
+  environment: ApnsEnvironment;
+}
+
 export interface ProjectChannels {
   /** Channels this project has credentials for. */
   configured: PushChannel[];
@@ -674,6 +695,8 @@ export function useConfigureChannel(projectId: string) {
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['push-channels', projectId] });
+      // A project's first credentials, on any channel, are what switch push on.
+      queryClient.invalidateQueries({ queryKey: ['push-config-status', projectId] });
     },
   });
 }

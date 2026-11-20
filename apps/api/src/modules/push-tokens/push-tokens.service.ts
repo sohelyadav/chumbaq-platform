@@ -91,6 +91,18 @@ export class PushTokensService {
   }
 
   /**
+   * The channel this project's SDK registered a token under, or null when the project
+   * holds no such token. By project and token together, never by token alone.
+   */
+  async providerOfToken(projectId: string, token: string): Promise<PushProvider | null> {
+    const row = await this.tokenRepository.findOne({
+      where: { projectId, token },
+      select: { id: true, provider: true },
+    });
+    return row?.provider ?? null;
+  }
+
+  /**
    * True when this token is registered in the project to a device that said
    * no to push (`push_opt_in = false`). A token the project has never seen
    * is not opted out: there is no device to ask, and the test-send box

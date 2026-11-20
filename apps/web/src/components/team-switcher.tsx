@@ -42,9 +42,7 @@ export function ProjectSwitcher() {
                 <span className="truncate font-semibold">{project?.name ?? "Select Project"}</span>
                 <span className="truncate text-xs opacity-60">
                   {project
-                    ? project.role
-                      ? `${roleLabel(project.role)} · ${project.domain}`
-                      : project.domain
+                    ? [project.role ? roleLabel(project.role) : null, project.domain].filter(Boolean).join(' · ') || "chumbaq"
                     : "chumbaq"}
                 </span>
               </div>

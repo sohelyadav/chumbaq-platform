@@ -26,7 +26,8 @@ function serverMessage(err: unknown): string | null {
 
 const createProjectSchema = z.object({
   name: z.string().min(1, 'Name is required'),
-  domain: z.string().min(1, 'Domain is required'),
+  // Only app links need a domain, so a project can start without one.
+  domain: z.string().trim().max(255).optional(),
 });
 
 type CreateProjectForm = z.infer<typeof createProjectSchema>;
@@ -76,11 +77,12 @@ export default function ProjectSelectorPage() {
 
   const onSubmit = async (data: CreateProjectForm) => {
     try {
-      const project = await createProject.mutateAsync(data);
+      const project = await createProject.mutateAsync({ name: data.name, ...(data.domain ? { domain: data.domain } : {}) });
       toast({ title: 'Project created', description: project.name });
       setShowCreate(false);
       reset();
-      navigate(`/projects/${project.id}/settings`);
+      // The dashboard, where the get-started steps are: settings has nothing a new project needs first.
+      navigate(`/projects/${project.id}`);
     } catch (err) {
       // The limit may have been reached in another tab since the list loaded.
       const message = serverMessage(err) ?? 'Failed to create project';
@@ -136,7 +138,7 @@ export default function ProjectSelectorPage() {
               <Plus className="size-8" />
             </div>
             <h2 className="text-xl font-semibold mb-2">No projects yet</h2>
-            <p className="text-muted-foreground mb-6">Create your first project to start managing dynamic links.</p>
+            <p className="text-muted-foreground mb-6">A project is one app. Create it, add the SDK, and send your first push.</p>
             <Button onClick={openCreate} size="lg" disabled={!canCreate}>
               <Plus className="mr-2 h-4 w-4" /> Create Project
             </Button>
@@ -160,10 +162,12 @@ export default function ProjectSelectorPage() {
                     <ArrowRight className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                   </div>
                 </div>
-                <CardDescription className="flex items-center gap-1">
-                  <Globe className="h-3 w-3" />
-                  {project.domain}
-                </CardDescription>
+                {project.domain && (
+                  <CardDescription className="flex items-center gap-1">
+                    <Globe className="h-3 w-3" />
+                    {project.domain}
+                  </CardDescription>
+                )}
               </CardHeader>
               <CardContent>
                 <div className="flex items-center gap-4 text-sm text-muted-foreground">
@@ -205,8 +209,9 @@ export default function ProjectSelectorPage() {
                 {errors.name && <p className="text-sm text-destructive">{errors.name.message}</p>}
               </div>
               <div className="space-y-2">
-                <Label>Domain</Label>
-                <Input placeholder="example.com" {...register('domain')} />
+                <Label htmlFor="new-project-domain">Domain (optional)</Label>
+                <Input id="new-project-domain" placeholder="example.com" {...register('domain')} />
+                <p className="text-xs text-muted-foreground">Only needed for app links. You can add it later in Settings.</p>
                 {errors.domain && <p className="text-sm text-destructive">{errors.domain.message}</p>}
               </div>
               {createError && (
