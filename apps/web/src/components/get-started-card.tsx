@@ -187,6 +187,7 @@ export function GetStartedCard({ projectId }: { projectId: string }) {
         {platformTabs}
         <Snippet where={snippets.installWhere} code={snippets.install} />
         <Snippet where="At app start" code={snippets.init} />
+        {snippets.setupNote && <p className="text-xs text-muted-foreground">{snippets.setupNote}</p>}
         <p className="text-xs text-muted-foreground">
           Run the app once. This step ticks itself when the first device connects; reload the page to check.{' '}
           <a
