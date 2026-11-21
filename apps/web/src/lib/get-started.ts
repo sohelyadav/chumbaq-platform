@@ -103,6 +103,8 @@ export interface SdkSnippets {
   push: string;
   /** What the push snippet leaves to the app. */
   pushNote: string;
+  /** Setup the SDK does not do for the app, shown with the install step. */
+  setupNote?: string;
 }
 
 export const API_KEY_PLACEHOLDER = '<your API key>';
@@ -112,6 +114,16 @@ export const API_KEY_PLACEHOLDER = '<your API key>';
  * API needs before it takes an external user id. One place to raise it.
  */
 export const SDK_MIN_VERSION = '0.2.0';
+
+/**
+ * The SDKs read the FCM token from Firebase but never start Firebase themselves, so an
+ * Android app with no Firebase setup gets no token and no push.
+ */
+export const FIREBASE_SETUP_NOTE =
+  'The SDK does not set up Firebase for you. Add the Android app to a Firebase project, put its google-services.json in app/, and apply the com.google.gms.google-services Gradle plugin.';
+
+const FLUTTER_FIREBASE_SETUP_NOTE =
+  'The plugin does not set up Firebase for you. Add the Android app to a Firebase project, put its google-services.json in android/app/, and apply the com.google.gms.google-services Gradle plugin.';
 
 /** The host the SDK talks to: the page's own origin, with no path and no trailing slash. */
 export function sdkBaseUrl(origin: string): string {
@@ -160,7 +172,8 @@ await Chumbaq.instance.init(config);`,
 // hand \`hex\` to Dart, then:
 await ChumbaqPush.instance.registerToken(hex);`,
         pushNote:
-          'On Android the plugin registers the FCM token itself. On iOS nothing is registered until your app passes the APNs token on, as above.',
+          'On Android the plugin registers the FCM token itself, once the app is set up with Firebase. On iOS nothing is registered until your app passes the APNs token on, as above.',
+        setupNote: FLUTTER_FIREBASE_SETUP_NOTE,
       };
     case 'ios':
       return {
@@ -199,7 +212,9 @@ try await ChumbaqPush.shared.registerToken(deviceToken)`,
 
 Chumbaq.init(context, config)`,
         push: `ChumbaqPush.init(context)`,
-        pushNote: 'The SDK fetches the FCM token and registers it. Android 13 and later also need the notification permission.',
+        pushNote:
+          'The SDK fetches the FCM token and registers it, once the app is set up with Firebase (see Add the SDK). Android 13 and later also need the notification permission.',
+        setupNote: FIREBASE_SETUP_NOTE,
       };
     case 'web':
       return {

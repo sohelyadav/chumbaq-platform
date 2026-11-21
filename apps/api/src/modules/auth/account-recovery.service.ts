@@ -12,6 +12,7 @@ import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import type { EntityManager } from 'typeorm';
 import type { ResendVerificationStatus } from '@chumbaq/shared';
+import { logValue } from '../../common/log-value';
 import { AuthEventsService, RequestContext } from '../auth-events/auth-events.service';
 import {
   accountLink,
@@ -108,9 +109,25 @@ export class AccountRecoveryService {
         return;
       }
       const token = signSignupToken(signupKey(this.config.getOrThrow<string>('jwt.secret')), { email, name });
-      const sent = await this.email.send(signupLinkEmail({ email, name }, this.link('/complete-signup', token)));
-      if (!sent.sent) this.logger.warn('Sign-up link not sent');
+      const link = this.link('/complete-signup', token);
+      const sent = await this.email.send(signupLinkEmail({ email, name }, link));
+      if (sent.sent) return;
+      if (sent.reason === 'not_configured' && this.mayLogSignupLink()) {
+        this.logger.warn(`No platform email is set up, so the sign-up link for ${logValue(email)} is shown here instead: ${link}`);
+      } else {
+        this.logger.warn('Sign-up link not sent');
+      }
     });
+  }
+
+  /**
+   * With no platform email, a sign-up on a local install could never finish, so the link
+   * goes to the console instead. Only in development and test: anyone who reads the log
+   * could finish the sign-up, so never in production or anywhere else.
+   */
+  private mayLogSignupLink(): boolean {
+    const nodeEnv = this.config.get<string>('app.nodeEnv');
+    return (nodeEnv === 'development' || nodeEnv === 'test') && process.env.NODE_ENV !== 'production';
   }
 
   /** After registering. Whatever goes wrong here, the new account stands. */

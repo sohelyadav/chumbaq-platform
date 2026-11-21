@@ -33,6 +33,9 @@ npm run build:shared
 npm run dev:all           # API, worker, admin API, dashboard and admin app
 ```
 
+Without `PLATFORM_BREVO_API_KEY` and `PLATFORM_EMAIL_FROM` no account email goes out. In development the
+API prints the sign-up link to its console instead, so you can finish signing up; it never does this in production.
+
 Optional demo data (drops and recreates the local database; refuses `NODE_ENV=production`):
 `npm run seed`.
 
