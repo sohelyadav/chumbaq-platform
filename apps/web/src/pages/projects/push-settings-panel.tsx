@@ -265,6 +265,8 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
       await configurePush.mutateAsync(fcmJson);
       toast({ title: 'FCM configured', description: 'Push notifications are now active.' });
       setFcmJson('');
+      // React Query keeps a mutation's variables until it is reset: drop the key from there too.
+      configurePush.reset();
     } catch (err: any) {
       // Firebase's own rejection reason is the useful part of this error —
       // surface it rather than a generic "failed to configure" message.
@@ -300,6 +302,7 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
       setMiPushPackageName('');
       setMiPushRegion('global');
       setMiPushTouched(false);
+      configureChannel.reset();
     } catch (err: any) {
       const msg = err?.response?.data?.message || 'Failed to configure Mi Push';
       setMiPushError(msg);
@@ -340,10 +343,12 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
         },
       });
       toast({ title: 'APNs key saved', description: 'iOS devices can now receive push from this project.' });
-      // The API never hands the key back, so nothing is kept in state either.
+      // The API never hands the key back, so nothing is kept in state either,
+      // nor in the mutation's variables, which React Query keeps until a reset.
       setApnsKeyId('');
       setApnsTeamId('');
       setApnsPrivateKey('');
+      configureChannel.reset();
     } catch (err: any) {
       // The server's reason, as for FCM: which field Apple's key format refused.
       setApnsError(err?.response?.data?.message || 'Failed to save the APNs key');

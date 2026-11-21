@@ -257,8 +257,12 @@ export class PushNotificationsService {
    * It goes out on the token's own channel (`testSendProvider`), with that channel's
    * credentials, so an APNs device token is never handed to Firebase. `provider` in the
    * answer says which one was asked.
+   *
+   * A real send (not a dry run) is logged as `push.test_sent` once it is checked and
+   * before the provider is called, naming the provider only: never the token or the text,
+   * since any member can send any text to any token the project holds.
    */
-  async testSend(dto: TestSendPushDto): Promise<{
+  async testSend(dto: TestSendPushDto, requester: ActivityRequester): Promise<{
     delivered: boolean;
     dryRun: boolean;
     provider: PushProvider;
@@ -300,18 +304,39 @@ export class PushNotificationsService {
     // rejects make the send throw before any token is attempted, and a 500 is
     // the wrong answer from the endpoint whose entire job is to tell you what
     // is wrong with your setup.
+    let credentials: unknown | null;
+    try {
+      credentials = await this.channelCredentialsFor(dto.projectId, provider);
+    } catch (error) {
+      return {
+        delivered: false,
+        dryRun,
+        provider,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
+    }
+    if (credentials === null) {
+      return {
+        delivered: false,
+        dryRun,
+        provider,
+        error: `No ${PUSH_PROVIDER_LABELS[provider]} credentials are set up for this project.`,
+        errorCode: 'not_configured',
+      };
+    }
+
+    // Outside the try below, so a failed log write fails the request and sends nothing.
+    if (!dryRun) {
+      await recordBy(this.activity, requester, {
+        projectId: dto.projectId,
+        action: 'push.test_sent',
+        target: providerTarget(provider, PUSH_PROVIDER_LABELS[provider]),
+        details: { channel: 'push' },
+      });
+    }
+
     let result: ChannelSendResult;
     try {
-      const credentials = await this.channelCredentialsFor(dto.projectId, provider);
-      if (credentials === null) {
-        return {
-          delivered: false,
-          dryRun,
-          provider,
-          error: `No ${PUSH_PROVIDER_LABELS[provider]} credentials are set up for this project.`,
-          errorCode: 'not_configured',
-        };
-      }
       result = await this.channelRegistry.get(provider).sendToRecipients(
         credentials,
         [

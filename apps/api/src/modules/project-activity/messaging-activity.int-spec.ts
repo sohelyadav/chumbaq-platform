@@ -31,15 +31,18 @@ import { PushNotificationsService, PUSH_NOT_SET_UP } from '../push-notifications
 import { EmailCampaignsService } from '../email/email-campaigns.service';
 import { SmsCampaignsService } from '../sms/sms-campaigns.service';
 import { WhatsAppCampaignsService } from '../whatsapp/whatsapp-campaigns.service';
+import { ChannelCredentialsService } from '../push-notifications/channel-credentials.service';
+import { ChannelProviderRegistry } from '../push-notifications/services/channel-provider.registry';
 import { ProjectActivityService } from './project-activity.service';
 
 /**
  * The Messaging group of the activity log, written by the real routes against the real
  * database: each send, schedule, cancel, trigger, status change and delete writes
  * exactly one entry with the right actor, target, address and details (the audience
- * size where the send path counted one); test sends, previews, draft edits and no-ops
- * write none; a failed log write takes the action down with it; and
- * `push.sent_to_person` names the person by internal id only.
+ * size where the send path counted one); dry runs, previews, draft edits and no-ops
+ * write none; a failed log write takes the action down with it;
+ * `push.sent_to_person` names the person by internal id only; and a real push test send
+ * logs `push.test_sent` with its provider, never the token or the text.
  *
  * Channel settings are stubbed as connected (so no provider is called) and the
  * campaign queue's `add` is stubbed, so nothing is delivered.
@@ -408,7 +411,7 @@ describe('Messaging activity (integration)', () => {
       await noneNew(p, 0);
     });
 
-    it('writes nothing for a test send, an audience preview or a refused send', async () => {
+    it('writes nothing for a dry run test send, an audience preview or a refused send', async () => {
       const p = await project();
       const a = await audience(p);
       await ok('POST', '/push-notifications/test-send', owner, { projectId: p, token: a.pushToken, dryRun: true });
@@ -518,6 +521,55 @@ describe('Messaging activity (integration)', () => {
       }
       // And it is that entry alone, not a campaign.sent beside it.
       expect((await rows(p)).map((r) => r.action)).toEqual(['push.sent_to_person']);
+    });
+  });
+
+  describe('push test sends', () => {
+    /** FCM credentials that read as stored, and a provider that delivers without a network. */
+    const fakeFcm = () => {
+      jest.spyOn(app.get(ChannelCredentialsService), 'getPlaintext').mockResolvedValue('{"project_id":"int"}');
+      const sendToRecipients = jest
+        .fn()
+        .mockResolvedValue({ successCount: 1, failureCount: 0, failures: [], resolvedCount: 1, retryReason: null });
+      jest.spyOn(app.get(ChannelProviderRegistry), 'get').mockReturnValue({ sendToRecipients } as never);
+      return sendToRecipients;
+    };
+
+    it('logs a real test send naming the provider only: no token or message text', async () => {
+      const p = await project();
+      const a = await audience(p);
+      fakeFcm();
+      const sent = await ok('POST', '/push-notifications/test-send', member, {
+        projectId: p,
+        token: a.pushToken,
+        title: 'Private title',
+        body: 'Private body',
+      });
+      expect(sent).toMatchObject({ delivered: true, dryRun: false, provider: 'fcm' });
+      const row = await onlyNew(p, 0);
+      expect(row).toEqual({
+        action: 'push.test_sent',
+        ...by(member),
+        target_type: 'channel_provider',
+        target_id: 'fcm',
+        target_label: 'Firebase Cloud Messaging',
+        details: { channel: 'push' },
+      });
+      const stored = JSON.stringify(row);
+      for (const value of [a.pushToken, 'Private title', 'Private body', a.identityId]) {
+        expect(stored).not.toContain(value);
+      }
+    });
+
+    it('sends nothing when the entry cannot be written', async () => {
+      const p = await project();
+      const a = await audience(p);
+      const send = fakeFcm();
+      jest.spyOn(activity, 'record').mockRejectedValueOnce(new Error('log down'));
+      const res = await call('POST', '/push-notifications/test-send', owner, { projectId: p, token: a.pushToken });
+      expect(res.status).toBe(500);
+      expect(send).not.toHaveBeenCalled();
+      await noneNew(p, 0);
     });
   });
 
