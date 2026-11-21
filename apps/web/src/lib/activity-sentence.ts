@@ -224,6 +224,8 @@ function predicate(e: ProjectActivityEntry): string | null {
     }
     case 'push.sent_to_person':
       return 'sent a push to one person';
+    case 'push.test_sent':
+      return label ? `sent a test push through ${label}` : 'sent a test push';
     case 'cohort.push_sent':
       return label ? `sent a push to the Mixpanel cohort ${quoted(label)}` : 'sent a push to a Mixpanel cohort';
     case 'cohort.in_app_triggered':

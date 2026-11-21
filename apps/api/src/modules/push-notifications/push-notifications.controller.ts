@@ -92,11 +92,13 @@ export class PushNotificationsController {
   @RequireProjectPermission('messaging.write', { body: 'projectId' })
   async testSend(
     @Body() dto: TestSendPushDto,
+    @CurrentUser('userId') userId: string,
+    @Req() req: Request,
   ) {
     if (await this.suspension.isSuspended(dto.projectId)) {
       throw new ForbiddenException(TEST_SEND_SUSPENDED);
     }
-    return this.pushNotificationsService.testSend(dto);
+    return this.pushNotificationsService.testSend(dto, requesterOf(userId, req));
   }
 
   @Post('settings')

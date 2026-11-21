@@ -157,6 +157,10 @@ const CASES = {
     `${PRIYA} cancelled the WhatsApp campaign "Reminder"`,
   ],
   'push.sent_to_person': [entry('push.sent_to_person'), `${PRIYA} sent a push to one person`],
+  'push.test_sent': [
+    entry('push.test_sent', { targetLabel: 'Firebase Cloud Messaging', details: { channel: 'push' } }),
+    `${PRIYA} sent a test push through Firebase Cloud Messaging`,
+  ],
   'cohort.push_sent': [
     entry('cohort.push_sent', { targetLabel: 'Power users' }),
     `${PRIYA} sent a push to the Mixpanel cohort "Power users"`,

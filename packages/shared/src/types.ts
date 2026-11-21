@@ -1172,6 +1172,7 @@ export type ProjectActivityAction =
   | 'campaign.scheduled'
   | 'campaign.cancelled'
   | 'push.sent_to_person'
+  | 'push.test_sent'
   | 'cohort.push_sent'
   | 'cohort.in_app_triggered'
   | 'in_app.triggered'
@@ -1240,6 +1241,7 @@ export const ACTIVITY_ACTION_GROUP: Record<ProjectActivityAction, ProjectActivit
   'campaign.scheduled': 'messaging',
   'campaign.cancelled': 'messaging',
   'push.sent_to_person': 'messaging',
+  'push.test_sent': 'messaging',
   'cohort.push_sent': 'messaging',
   'cohort.in_app_triggered': 'messaging',
   'in_app.triggered': 'messaging',
