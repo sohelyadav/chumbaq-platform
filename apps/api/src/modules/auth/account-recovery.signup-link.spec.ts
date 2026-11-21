@@ -19,7 +19,8 @@ describe('AccountRecoveryService.startSignup without platform email', () => {
 
   afterEach(() => {
     warn.mockRestore();
-    process.env.NODE_ENV = originalNodeEnv;
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
   });
 
   function build(nodeEnv: string, result: PlatformEmailResult = { sent: false, reason: 'not_configured' }) {
@@ -63,6 +64,14 @@ describe('AccountRecoveryService.startSignup without platform email', () => {
 
   it('never logs the link when the process runs in production, whatever the app config says', async () => {
     process.env.NODE_ENV = 'production';
+    const recovery = build('development');
+    recovery.startSignup(EMAIL, 'New');
+    await recovery.settled();
+    expect(linkLines()).toHaveLength(0);
+  });
+
+  it('never logs the link when NODE_ENV is not set, though the app config reads that as development', async () => {
+    delete process.env.NODE_ENV;
     const recovery = build('development');
     recovery.startSignup(EMAIL, 'New');
     await recovery.settled();

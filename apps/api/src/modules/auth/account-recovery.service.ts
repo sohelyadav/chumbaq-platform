@@ -123,11 +123,13 @@ export class AccountRecoveryService {
   /**
    * With no platform email, a sign-up on a local install could never finish, so the link
    * goes to the console instead. Only in development and test: anyone who reads the log
-   * could finish the sign-up, so never in production or anywhere else.
+   * could finish the sign-up, so never in production or anywhere else. `NODE_ENV` must be
+   * set to one of them: the app config reads an unset one as development, but a server
+   * started with no `NODE_ENV` may well be a real one.
    */
   private mayLogSignupLink(): boolean {
-    const nodeEnv = this.config.get<string>('app.nodeEnv');
-    return (nodeEnv === 'development' || nodeEnv === 'test') && process.env.NODE_ENV !== 'production';
+    const nodeEnv = process.env.NODE_ENV;
+    return (nodeEnv === 'development' || nodeEnv === 'test') && this.config.get<string>('app.nodeEnv') === nodeEnv;
   }
 
   /** After registering. Whatever goes wrong here, the new account stands. */
