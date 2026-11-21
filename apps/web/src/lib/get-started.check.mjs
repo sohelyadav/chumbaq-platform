@@ -119,6 +119,13 @@ for (const platform of SDK_PLATFORMS) {
   check('Flutter says the iOS token must be passed on by the app',
     flutter.push.includes('registerToken(hex)') && flutter.push.includes('didRegisterForRemoteNotificationsWithDeviceToken'));
 }
+for (const platform of ['android', 'flutter']) {
+  const s = sdkSnippets(platform, VALUES);
+  check(`${platform}: says the app must be set up with Firebase`,
+    !!s.setupNote && s.setupNote.includes('google-services.json') && s.setupNote.includes('com.google.gms.google-services')
+      && s.pushNote.includes('Firebase'));
+}
+check('iOS and web have no Firebase app setup line', !sdkSnippets('ios', VALUES).setupNote && !sdkSnippets('web', VALUES).setupNote);
 check('the iOS package asks for the minimum SDK version', sdkSnippets('ios', VALUES).install.includes(`from: "${SDK_MIN_VERSION}"`));
 check('the Android BOM asks for the minimum SDK version', sdkSnippets('android', VALUES).install.includes(`chumbaq-bom:${SDK_MIN_VERSION}"`));
 check('a trailing slash on the origin is dropped', sdkBaseUrl('https://app.example.com/') === 'https://app.example.com');
