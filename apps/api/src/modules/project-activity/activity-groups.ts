@@ -53,6 +53,7 @@ export const ACTIVITY_ACTION_GROUPS = Object.freeze({
   'campaign.scheduled': 'messaging',
   'campaign.cancelled': 'messaging',
   'push.sent_to_person': 'messaging',
+  'push.test_sent': 'messaging',
   'cohort.push_sent': 'messaging',
   'cohort.in_app_triggered': 'messaging',
   'in_app.triggered': 'messaging',

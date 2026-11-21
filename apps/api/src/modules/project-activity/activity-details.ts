@@ -46,6 +46,8 @@ export const ACTIVITY_DETAIL_KEYS: Readonly<Record<ProjectActivityAction, readon
   'campaign.scheduled': ['channel', 'audienceSize'],
   'campaign.cancelled': ['channel', 'audienceSize'],
   'push.sent_to_person': [],
+  // A test send names its provider in the target; never the token or the message text.
+  'push.test_sent': ['channel'],
   'cohort.push_sent': [],
   'cohort.in_app_triggered': [],
   'in_app.triggered': [],

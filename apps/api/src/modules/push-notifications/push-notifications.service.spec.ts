@@ -789,7 +789,7 @@ describe('PushNotificationsService', () => {
       configRepo.findOne.mockResolvedValueOnce(null);
 
       await expect(
-        service.testSend({ projectId: 'proj-1', token: 'tok' }),
+        service.testSend({ projectId: 'proj-1', token: 'tok' }, REQUESTER),
       ).rejects.toThrow(NotFoundException);
     });
 
@@ -797,7 +797,7 @@ describe('PushNotificationsService', () => {
       configRepo.findOne.mockResolvedValueOnce(activeConfig);
       pushTokensService.isTokenOptedOut.mockResolvedValueOnce(true);
 
-      const result = await service.testSend({ projectId: 'proj-1', token: 'tok' });
+      const result = await service.testSend({ projectId: 'proj-1', token: 'tok' }, REQUESTER);
 
       expect(pushTokensService.isTokenOptedOut).toHaveBeenCalledWith('proj-1', 'tok');
       expect(result).toEqual({
@@ -815,7 +815,7 @@ describe('PushNotificationsService', () => {
       channelCredentials.getPlaintext.mockResolvedValueOnce(JSON.stringify(credentials));
       fcmProvider.sendToRecipients.mockResolvedValueOnce({ successCount: 1, failureCount: 0, failures: [] });
 
-      const result = await service.testSend({ projectId: 'proj-1', token: 'tok', dryRun: true });
+      const result = await service.testSend({ projectId: 'proj-1', token: 'tok', dryRun: true }, REQUESTER);
 
       expect(pushTokensService.isTokenOptedOut).not.toHaveBeenCalled();
       expect(result).toEqual({ delivered: true, dryRun: true, provider: 'fcm' });
@@ -833,8 +833,44 @@ describe('PushNotificationsService', () => {
       });
 
       await expect(
-        service.testSend({ projectId: 'proj-1', token: 'tok' }),
+        service.testSend({ projectId: 'proj-1', token: 'tok', title: 'Secret', body: 'Text' }, REQUESTER),
       ).resolves.toEqual({ delivered: true, dryRun: false, provider: 'fcm' });
+
+      // Logged once, naming the provider only: no token and no message text.
+      expect(activity.record).toHaveBeenCalledTimes(1);
+      expect(activity.record).toHaveBeenCalledWith(
+        {
+          projectId: 'proj-1',
+          actor: { kind: 'user', userId: 'user-1' },
+          action: 'push.test_sent',
+          target: { type: 'channel_provider', id: 'fcm', label: 'Firebase Cloud Messaging' },
+          details: { channel: 'push' },
+        },
+        REQUESTER.context,
+        undefined,
+      );
+      expect(JSON.stringify(activity.record.mock.calls)).not.toMatch(/tok"|Secret|Text/);
+    });
+
+    it('sends nothing when the activity entry cannot be written', async () => {
+      configRepo.findOne.mockResolvedValueOnce(activeConfig);
+      channelCredentials.getPlaintext.mockResolvedValueOnce(JSON.stringify(credentials));
+      activity.record.mockRejectedValueOnce(new Error('db down'));
+
+      await expect(
+        service.testSend({ projectId: 'proj-1', token: 'tok' }, REQUESTER),
+      ).rejects.toThrow('db down');
+      expect(fcmProvider.sendToRecipients).not.toHaveBeenCalled();
+    });
+
+    it('logs nothing when the project has no credentials for the channel', async () => {
+      configRepo.findOne.mockResolvedValueOnce(activeConfig);
+      channelCredentials.getPlaintext.mockResolvedValueOnce(null);
+
+      const result = await service.testSend({ projectId: 'proj-1', token: 'tok' }, REQUESTER);
+
+      expect(result).toMatchObject({ delivered: false, errorCode: 'not_configured' });
+      expect(activity.record).not.toHaveBeenCalled();
     });
 
     it('passes dryRun through so FCM validates without delivering', async () => {
@@ -848,11 +884,7 @@ describe('PushNotificationsService', () => {
         retryReason: null,
       });
 
-      const result = await service.testSend({
-        projectId: 'proj-1',
-        token: 'tok',
-        dryRun: true,
-      });
+      const result = await service.testSend({ projectId: 'proj-1', token: 'tok', dryRun: true }, REQUESTER);
 
       expect(fcmProvider.sendToRecipients).toHaveBeenCalledWith(
         credentials,
@@ -860,6 +892,8 @@ describe('PushNotificationsService', () => {
         { dryRun: true },
       );
       expect(result).toEqual({ delivered: true, dryRun: true, provider: 'fcm' });
+      // A dry run delivers nothing, so it is not logged.
+      expect(activity.record).not.toHaveBeenCalled();
     });
 
     it('surfaces the FCM error code for a permanently bad token', async () => {
@@ -881,7 +915,7 @@ describe('PushNotificationsService', () => {
       });
 
       await expect(
-        service.testSend({ projectId: 'proj-1', token: 'tok' }),
+        service.testSend({ projectId: 'proj-1', token: 'tok' }, REQUESTER),
       ).resolves.toMatchObject({
         delivered: false,
         errorCode: 'UNREGISTERED',
@@ -896,7 +930,7 @@ describe('PushNotificationsService', () => {
       );
 
       await expect(
-        service.testSend({ projectId: 'proj-1', token: 'tok' }),
+        service.testSend({ projectId: 'proj-1', token: 'tok' }, REQUESTER),
       ).resolves.toMatchObject({
         delivered: false,
         error: expect.stringContaining('invalid_grant'),
@@ -915,7 +949,7 @@ describe('PushNotificationsService', () => {
       });
 
       await expect(
-        service.testSend({ projectId: 'proj-1', token: 'tok' }),
+        service.testSend({ projectId: 'proj-1', token: 'tok' }, REQUESTER),
       ).resolves.toMatchObject({
         delivered: false,
         error: 'FCM error 429: slow down',
@@ -940,7 +974,7 @@ describe('PushNotificationsService', () => {
       storedCredentials({ fcm: credentials, apns: apnsCredentials });
       apnsProvider.sendToRecipients.mockResolvedValueOnce(DELIVERED);
 
-      const result = await service.testSend({ projectId: 'proj-1', token: 'apns-device-token' });
+      const result = await service.testSend({ projectId: 'proj-1', token: 'apns-device-token' }, REQUESTER);
 
       expect(pushTokensService.providerOfToken).toHaveBeenCalledWith('proj-1', 'apns-device-token');
       expect(apnsProvider.sendToRecipients).toHaveBeenCalledWith(
@@ -960,7 +994,7 @@ describe('PushNotificationsService', () => {
       storedCredentials({ apns: apnsCredentials });
       apnsProvider.sendToRecipients.mockResolvedValueOnce(DELIVERED);
 
-      const result = await service.testSend({ projectId: 'proj-1', token: 'pasted' });
+      const result = await service.testSend({ projectId: 'proj-1', token: 'pasted' }, REQUESTER);
 
       expect(result).toEqual({ delivered: true, dryRun: false, provider: 'apns' });
       expect(fcmProvider.sendToRecipients).not.toHaveBeenCalled();
@@ -972,7 +1006,7 @@ describe('PushNotificationsService', () => {
       storedCredentials({ fcm: credentials, apns: apnsCredentials });
       fcmProvider.sendToRecipients.mockResolvedValueOnce(DELIVERED);
 
-      const result = await service.testSend({ projectId: 'proj-1', token: 'pasted' });
+      const result = await service.testSend({ projectId: 'proj-1', token: 'pasted' }, REQUESTER);
 
       expect(result.provider).toBe('fcm');
       expect(apnsProvider.sendToRecipients).not.toHaveBeenCalled();
@@ -984,7 +1018,7 @@ describe('PushNotificationsService', () => {
       storedCredentials({ apns: apnsCredentials });
       apnsProvider.sendToRecipients.mockResolvedValueOnce(DELIVERED);
 
-      const result = await service.testSend({ projectId: 'proj-1', token: 'pasted' });
+      const result = await service.testSend({ projectId: 'proj-1', token: 'pasted' }, REQUESTER);
 
       expect(result).toEqual({ delivered: true, dryRun: false, provider: 'apns' });
     });
@@ -995,7 +1029,7 @@ describe('PushNotificationsService', () => {
       storedCredentials({ fcm: credentials, apns: apnsCredentials });
       apnsProvider.sendToRecipients.mockResolvedValueOnce(DELIVERED);
 
-      const result = await service.testSend({ projectId: 'proj-1', token: 'tok', provider: 'apns' });
+      const result = await service.testSend({ projectId: 'proj-1', token: 'tok', provider: 'apns' }, REQUESTER);
 
       expect(result.provider).toBe('apns');
       expect(pushTokensService.providerOfToken).not.toHaveBeenCalled();
@@ -1007,7 +1041,7 @@ describe('PushNotificationsService', () => {
       pushTokensService.providerOfToken.mockResolvedValueOnce('apns');
       storedCredentials({ fcm: credentials });
 
-      const result = await service.testSend({ projectId: 'proj-1', token: 'apns-device-token' });
+      const result = await service.testSend({ projectId: 'proj-1', token: 'apns-device-token' }, REQUESTER);
 
       expect(result).toEqual({
         delivered: false,
