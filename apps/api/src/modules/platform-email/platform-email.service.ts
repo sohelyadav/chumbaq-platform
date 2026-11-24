@@ -85,8 +85,8 @@ export class PlatformEmailService {
     });
 
     try {
-      // Brevo rewrites links for click tracking unless that is turned off in the account's
-      // settings: its API has no documented way to turn it off for one message.
+      // Brevo rewrites every link for click tracking and its API cannot turn that off, so
+      // `compose()` also shows the real address under the button as plain text.
       const response = await fetch(url, {
         method: 'POST',
         headers: {

@@ -25,7 +25,9 @@ export function accountLink(appUrl: string, path: string, token?: string): strin
 const BRAND = '#1447e6';
 const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
 const P = `margin:0 0 16px;font-size:16px;line-height:24px;color:#111827;`;
-const SMALL = `margin:0 0 12px;font-size:13px;line-height:20px;color:#6b7280;`;
+/** #4b5563, not a lighter grey: the footer sits on #f3f4f6 and must stay above 4.5:1. */
+const SMALL = `margin:0 0 12px;font-size:13px;line-height:20px;color:#4b5563;`;
+const MONO = `font-family:Menlo,Consolas,'Courier New',monospace;font-size:13px;color:#111827;word-break:break-all;`;
 
 /** Where `withFooter` puts the footer. Only the sender knows the app URL and reply-to. */
 const FOOTER_HTML = '<!--chumbaq:footer-->';
@@ -63,8 +65,10 @@ function compose(
           `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 24px;"><tr><td bgcolor="${BRAND}" style="border-radius:6px;background-color:${BRAND};">` +
             `<a href="${escapeHtml(action.url)}" style="display:inline-block;padding:12px 24px;font-family:${FONT};font-size:16px;font-weight:600;line-height:20px;color:#ffffff;text-decoration:none;border-radius:6px;">${escapeHtml(action.label)}</a>` +
             '</td></tr></table>',
+          // Plain text, not a link: the sender rewrites every href to its click-tracking
+          // domain, so this is where the reader sees our own address.
           `<p style="${SMALL}margin-bottom:24px;">If the button does not work, copy this link into your browser:<br>` +
-            `<a href="${escapeHtml(action.url)}" style="color:${BRAND};word-break:break-all;">${escapeHtml(action.url)}</a></p>`,
+            `<span style="${MONO}">${escapeHtml(action.url)}</span></p>`,
         ]
       : []),
     ...(extras.after ?? []).map((paragraph) => p(paragraph)),
@@ -156,7 +160,7 @@ export function signupLinkEmail(to: Recipient, link: string): PlatformEmail {
     {
       preheader: 'One step left: choose a password.',
       after: [
-        'Next, you create your first project and send a test push from the dashboard.',
+        'After that, you can create your first project and send a test push from the dashboard.',
         'This link works once and expires in 24 hours.',
       ],
       note: 'Did not sign up? Ignore this email. No account is made unless the link is opened.',

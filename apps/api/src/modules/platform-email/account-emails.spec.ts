@@ -232,12 +232,14 @@ describe('the layout of account mail', () => {
   const user = { email: 'sam@example.com', name: 'Sam <i>' };
   const link = accountLink('https://app.example', '/complete-signup', 'tok_-123');
 
-  it('has the action as a button, and the full URL under it to copy', () => {
+  it('has the action as a button, and the full URL under it as plain text to copy', () => {
     const { html } = signupLinkEmail(user, link);
 
     expect(html).toMatch(/<td bgcolor="#1447e6"[^>]*><a href="https:\/\/app\.example\/complete-signup#token=tok_-123"[^>]*>Choose a password<\/a><\/td>/);
     expect(html).toContain('If the button does not work, copy this link into your browser:');
-    expect(html).toContain('>https://app.example/complete-signup#token=tok_-123</a>');
+    expect(html).toMatch(/your browser:<br><span style="[^"]*word-break:break-all;[^"]*">https:\/\/app\.example\/complete-signup#token=tok_-123<\/span><\/p>/);
+    // Only the button is a link, so the copyable address is not rewritten by the sender.
+    expect(html.match(/<a\b/g)).toHaveLength(1);
   });
 
   it('keeps the full link in the plain-text part, which has no HTML', () => {
@@ -267,7 +269,7 @@ describe('the layout of account mail', () => {
     const { text } = signupLinkEmail(user, link);
 
     expect(text).toContain('Thanks for signing up for Chumbaq. Choose a password to finish creating your account.');
-    expect(text).toContain('Next, you create your first project and send a test push from the dashboard.');
+    expect(text).toContain('After that, you can create your first project and send a test push from the dashboard.');
     expect(text).toContain('This link works once and expires in 24 hours.');
     expect(text).toContain('No account is made unless the link is opened.');
     expect(text).not.toContain('Someone asked');
