@@ -248,11 +248,150 @@ describe('scripts/server-security.sh', () => {
       expect(run('fail2ban_action').out).toMatch(/actionban = .*chumbaq-security-alert server\.ssh_banned <ip>/);
     });
 
-    it('the daily file check raises server.files_changed with the changed paths', () => {
+    it('the daily file check raises server.files_changed with the changed paths, at idle priority', () => {
       const check = run('aide_check_script').out;
-      expect(check).toContain('aide --check');
+      expect(check).toContain('report=$(nice -n 19 ionice -c3 aide --check --config /etc/chumbaq/aide.conf 2>&1)');
       expect(check).toContain('server.files_changed');
       expect(check).toContain('head -20');
+    });
+  });
+
+  describe('the file check config', () => {
+    const distro = '# groups\nChecksums = H\ndatabase_attrs = Checksums\nFull = p+Checksums\n@@x_include /etc/aide/aide.conf.d ^[a-zA-Z0-9_-]+$\n';
+
+    it('is the distribution config with one hash in place of all of them, then the exclusions', () => {
+      const res = run(`aide_config <<'EOF'\n${distro}EOF`);
+      expect(res.ok).toBe(true);
+      const lines = res.out.split('\n');
+      // Replaced where it stood, before the groups built on it (a group is fixed where it is defined).
+      expect(lines.indexOf('Checksums = sha512')).toBeLessThan(lines.indexOf('Full = p+Checksums'));
+      expect(res.out).not.toMatch(/^Checksums = H$/m);
+      expect(res.out).toContain('@@x_include /etc/aide/aide.conf.d');
+      expect(lines.indexOf('!/var/log(/|$)')).toBeGreaterThan(lines.findIndex((l) => l.startsWith('@@x_include')));
+      // Then this server's own rules, last.
+      expect(lines.filter(Boolean).pop()).toBe('@@x_include /etc/chumbaq/aide.conf.d ^[a-zA-Z0-9_-]+$');
+    });
+
+    it('stops when the distribution config no longer has the line it replaces', () => {
+      const res = run(`aide_config <<'EOF'\nChecksums = sha256\nFull = p+Checksums\nEOF`);
+      expect(res.ok).toBe(false);
+      expect(res.out).toBe('');
+      expect(res.err).toContain("no 'Checksums = H' line to replace");
+    });
+
+    // AIDE matches each rule from the start of the path; a directory left out takes its children with it.
+    const excluded = (p: string) =>
+      run('aide_exclusions')
+        .out.split('\n')
+        .filter((l) => l.startsWith('!'))
+        .some((l) => new RegExp(`^${l.slice(1)}`).test(p));
+
+    it('leaves out what changes while the server runs', () => {
+      for (const p of [
+        '/var/log/syslog',
+        '/var/log/nginx/access.log',
+        '/run/docker/containerd/x',
+        '/var/cache/apt/archives/x.deb',
+        '/var/lib/postgresql/16/main/base/1/1',
+        '/var/lib/postgresql/16/main/pg_wal/000000010000000000000001',
+        '/var/lib/postgresql/16/main/global/pg_control',
+        '/var/lib/postgresql/16/main/postmaster.pid',
+        '/var/lib/redis/dump.rdb',
+        '/var/lib/redis-stage/dump.rdb',
+        '/var/lib/snapd/state.json',
+        '/var/lib/nginx/proxy/1/00/0000000001',
+        '/var/lib/docker/volumes/some_volume/_data/x',
+        '/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/x',
+        '/var/lib/apt/lists/x_InRelease',
+        '/var/lib/apt/periodic/upgrade-stamp',
+        '/etc/letsencrypt/live/app.chumbaq.com/privkey.pem',
+        '/etc/letsencrypt/archive/app.chumbaq.com/cert3.pem',
+        '/home/ubuntu/.npm/_cacache/index-v5/x',
+        '/home/ubuntu/.pm2/logs/chumbaq-api-out.log',
+        '/home/ubuntu/.pm2/pids/chumbaq-api-0.pid',
+        '/home/ubuntu/.pm2/pm2.log',
+        '/home/ubuntu/.pm2/rpc.sock',
+      ]) {
+        expect([p, excluded(p)]).toEqual([p, true]);
+      }
+    });
+
+    it('still checks code, programs, settings and keys', () => {
+      for (const p of [
+        '/usr/bin/sudo',
+        '/usr/lib/node_modules/pm2/index.js',
+        '/etc/passwd',
+        '/etc/sudoers',
+        '/etc/cron.daily/chumbaq-aide',
+        '/etc/nginx/sites-available/chumbaq',
+        '/etc/letsencrypt/renewal/app.chumbaq.com.conf',
+        '/etc/letsencrypt/renewal-hooks/deploy/x',
+        '/home/ubuntu/chumbaq/apps/api/dist/main.js',
+        '/home/ubuntu/chumbaq/node_modules/express/index.js',
+        '/home/ubuntu/chumbaq/.env',
+        '/home/ubuntu/chumbaq-stage/apps/api/dist/main.js',
+        '/var/lib/chumbaq/log-bundles/x',
+        '/home/ubuntu/.pm2/dump.pm2',
+        '/home/ubuntu/.pm2/modules/pm2-logrotate/package.json',
+        '/home/ubuntu/.ssh/authorized_keys',
+        '/var/lib/postgresql/.ssh/authorized_keys',
+        '/var/lib/postgresql/.bashrc',
+        '/var/lib/postgresql/16/main/postgresql.auto.conf',
+        '/var/lib/redis/planted.so',
+        '/var/lib/snapd/snaps/core22_1.snap',
+        '/var/logs',
+      ]) {
+        expect([p, excluded(p)]).toEqual([p, false]);
+      }
+    });
+
+    it('keeps owner and mode, not times, of the directories whose files are left out', () => {
+      const rules = run('aide_exclusions').out.split('\n');
+      for (const dir of ['/var/lib/postgresql/[0-9]+/main$', '/var/lib/redis[^/]*$', '/var/lib/snapd$']) {
+        expect(rules).toContain(`${dir} d VarDir`);
+      }
+    });
+  });
+
+  describe('the file baseline helper', () => {
+    // The helper run for real, with /var/lib/aide moved to a scratch directory and aide stubbed.
+    function baseline(opts: { db: boolean; status: number }) {
+      const dir = mkdtempSync(path.join(tmpdir(), 'aide-baseline-'));
+      try {
+        const bin = path.join(dir, 'bin');
+        const lib = path.join(dir, 'aide');
+        execFileSync('mkdir', ['-p', bin, lib]);
+        const stub = (name: string, body: string) => writeFileSync(path.join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
+        stub('nice', 'shift 2; exec "$@"');
+        stub('ionice', 'shift; exec "$@"');
+        stub('aide', `echo "aide $*" >> "${dir}/log"; echo "new from $1" > "${lib}/aide.db.new"; exit ${opts.status}`);
+        if (opts.db) writeFileSync(path.join(lib, 'aide.db'), 'old\n');
+        const script = run('aide_baseline_script').out.split('/var/lib/aide').join(lib);
+        writeFileSync(path.join(dir, 'helper'), script, { mode: 0o755 });
+        const res = spawnSync(path.join(dir, 'helper'), { env: { PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8' });
+        const read = (f: string) => readFileSync(path.join(dir, f), 'utf8');
+        return { ok: res.status === 0, err: res.stderr, log: read('log'), db: readdirSync(lib).includes('aide.db') ? read('aide/aide.db') : null };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it('takes the first baseline with --init', () => {
+      expect(baseline({ db: false, status: 0 })).toEqual(
+        expect.objectContaining({ ok: true, log: 'aide --init --config /etc/chumbaq/aide.conf\n', db: 'new from --init\n' }),
+      );
+    });
+
+    it('moves an existing one on with --update, whose status says what differed', () => {
+      expect(baseline({ db: true, status: 5 })).toEqual(
+        expect.objectContaining({ ok: true, log: 'aide --update --config /etc/chumbaq/aide.conf\n', db: 'new from --update\n' }),
+      );
+    });
+
+    it('keeps the old baseline and fails when aide fails', () => {
+      const res = baseline({ db: true, status: 17 });
+      expect(res).toEqual(expect.objectContaining({ ok: false, db: 'old\n' }));
+      expect(res.err).toContain('aide --update failed with 17');
     });
   });
 
