@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { CheckCircle2, ChevronDown, Circle, Copy, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,7 @@ import { useUserStats } from '@/hooks/use-users';
 import { copyText } from '@/lib/clipboard';
 import { can } from '@/lib/project-role';
 import {
+  DEVICE_POLL_MS,
   SDK_PLATFORMS,
   SDK_PLATFORM_LABELS,
   usableBySdk,
@@ -22,6 +23,7 @@ import {
   sdkBaseUrl,
   sdkSnippets,
   showGetStarted,
+  waitsForDevice,
   type GetStartedFacts,
   type GetStartedStepId,
   type SdkPlatform,
@@ -91,7 +93,9 @@ export function GetStartedCard({ projectId }: { projectId: string }) {
   const managesKeys = can(project, 'keys.manage');
   const managesChannels = can(project, 'channels.manage');
   const keys = useApiKeys(projectId, managesKeys);
-  const stats = useUserStats(projectId);
+  // Nothing tells the dashboard a device connected, so while a step waits on one, ask.
+  const [polling, setPolling] = useState(false);
+  const stats = useUserStats(projectId, polling ? DEVICE_POLL_MS : false);
   const channels = useProjectChannels(projectId);
   const campaigns = usePushLogs(projectId);
   const createKey = useCreateApiKey(projectId);
@@ -112,9 +116,12 @@ export function GetStartedCard({ projectId }: { projectId: string }) {
   const steps = getStartedSteps(facts);
   // A key just made is shown once and cannot be read back, so while one is held the
   // card stays, even when making it was the last step or the card was meant to hide.
-  if (!newKey && !showGetStarted(steps, hidden)) return null;
-
+  const visible = !!newKey || showGetStarted(steps, hidden);
   const open = chosen ?? nextStep(steps);
+  const waiting = visible && waitsForDevice(steps, open);
+  useEffect(() => setPolling(waiting), [waiting]);
+  if (!visible) return null;
+
   const snippets = sdkSnippets(platform, { baseUrl: sdkBaseUrl(window.location.origin), projectId, apiKey: newKey });
   const pushSettings = `/projects/${projectId}/push-notifications?tab=settings`;
 
@@ -189,7 +196,7 @@ export function GetStartedCard({ projectId }: { projectId: string }) {
         <Snippet where="At app start" code={snippets.init} />
         {snippets.setupNote && <p className="text-xs text-muted-foreground">{snippets.setupNote}</p>}
         <p className="text-xs text-muted-foreground">
-          Run the app once. This step ticks itself when the first device connects; reload the page to check.{' '}
+          Run the app once. This step ticks itself when the first device connects.{' '}
           <a
             href={`https://chumbaq.com/docs/quick-start/${platform}`}
             target="_blank"

@@ -135,11 +135,12 @@ export function useUsers(
   });
 }
 
-export function useUserStats(projectId: string | undefined) {
+export function useUserStats(projectId: string | undefined, refetchInterval: number | false = false) {
   return useQuery<UserStats>({
     queryKey: ['user-stats', projectId],
     queryFn: () => apiGet<UserStats>(`/api/projects/${projectId}/users/stats`),
     enabled: !!projectId,
+    refetchInterval,
   });
 }
 

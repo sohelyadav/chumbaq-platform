@@ -454,6 +454,176 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
         </CardContent>
       </Card>
 
+      {/* Upload / replace credentials — inline, not a dialog. Owners and admins only. */}
+      {manages && (
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Upload className="h-5 w-5" />
+            Firebase service account (Android and web)
+          </CardTitle>
+          <CardDescription>
+            Paste the Firebase service account JSON from Project Settings &gt;
+            Service Accounts &gt; Generate new private key. It is validated
+            against Firebase before it is stored.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>Service account JSON</Label>
+            <Textarea
+              value={fcmJson}
+              onChange={(e) => {
+                setFcmJson(e.target.value);
+                if (configureError) setConfigureError(null);
+              }}
+              placeholder='{"project_id": "...", "private_key": "...", "client_email": "..."}'
+              rows={8}
+              // The pasted file is ~2.4KB with a single unbreakable ~1670-char
+              // private-key line. Capping the height and scrolling inside the
+              // field keeps that one paste from stretching the whole panel.
+              className="max-h-[45vh] resize-y overflow-y-auto font-mono text-xs"
+            />
+          </div>
+          {configureError && (
+            <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              {/* Firebase's rejection reason, verbatim — this is the point of
+                  server-side validation, so don't flatten it to a generic message. */}
+              <span className="break-words">{configureError}</span>
+            </div>
+          )}
+          <Button onClick={handleConfigure} disabled={configurePush.isPending || !fcmJson.trim()}>
+            {configurePush.isPending ? 'Validating…' : fcmConfigured ? 'Save and replace' : 'Save service account'}
+          </Button>
+        </CardContent>
+      </Card>
+      )}
+
+      {/* The APNs key. Owners and admins only. An iOS app built on the Chumbaq
+          SDK registers its token under APNs, so without this it has tokens and
+          nothing that can deliver to them. */}
+      {manages && apnsSupported && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Smartphone className="h-5 w-5" />
+              Apple Push key (iOS)
+            </CardTitle>
+            <CardDescription>
+              In Apple Developer, open Certificates, Identifiers &amp; Profiles &gt; Keys, create a
+              key with Apple Push Notifications service enabled, and download its .p8 file. Apple
+              lets you download it once.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="apns-key-id">Key ID</Label>
+                <Input
+                  id="apns-key-id"
+                  autoComplete="off"
+                  placeholder={apnsConfigured ? '••••••••••' : 'ABC123DEFG'}
+                  value={apnsKeyId}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setApnsKeyId(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">Shown next to the key in Apple's list. 10 characters.</p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="apns-team-id">Team ID</Label>
+                <Input
+                  id="apns-team-id"
+                  autoComplete="off"
+                  placeholder={apnsConfigured ? '••••••••••' : 'ABCDE12345'}
+                  value={apnsTeamId}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setApnsTeamId(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">Under Membership details in your Apple account.</p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="apns-bundle-id">Bundle ID</Label>
+              <Input
+                id="apns-bundle-id"
+                autoComplete="off"
+                placeholder="com.example.app"
+                value={apnsBundleValue}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                  setApnsBundleTouched(true);
+                  setApnsBundleId(e.target.value);
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                Your app's bundle identifier, exactly as in Xcode. Apple rejects a push whose bundle
+                ID does not match the app that owns the token.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="apns-environment">Environment</Label>
+              <Select value={apnsEnvironment} onValueChange={(v) => setApnsEnvironment(v as ApnsEnvironment)}>
+                <SelectTrigger id="apns-environment" className="max-w-[24rem]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {APNS_ENVIRONMENTS.map((env) => (
+                    <SelectItem key={env.value} value={env.value}>
+                      {env.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                A build run from Xcode gets a sandbox token; App Store and TestFlight builds get
+                production ones. The wrong choice fails every send with BadDeviceToken.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="apns-private-key">Key file (.p8)</Label>
+              <Input
+                type="file"
+                accept=".p8,.pem,text/plain"
+                className="max-w-[24rem]"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                  void handleApnsKeyFile(e.target.files?.[0]);
+                  // So choosing the same file again after an error still fires.
+                  e.target.value = '';
+                }}
+              />
+              <Textarea
+                id="apns-private-key"
+                value={apnsPrivateKey}
+                onChange={(e) => {
+                  setApnsPrivateKey(e.target.value);
+                  if (apnsError) setApnsError(null);
+                }}
+                placeholder="-----BEGIN PRIVATE KEY-----"
+                rows={5}
+                spellCheck={false}
+                className="max-h-[30vh] resize-y overflow-y-auto font-mono text-xs"
+              />
+              <p className="text-xs text-muted-foreground">
+                Choose the file or paste its contents. It is checked before it is stored, encrypted,
+                and never shown again.
+              </p>
+            </div>
+
+            {apnsError && (
+              <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span className="break-words">{apnsError}</span>
+              </div>
+            )}
+
+            <Button onClick={handleConfigureApns} disabled={configureChannel.isPending || !apnsComplete}>
+              {configureChannel.isPending ? 'Checking…' : apnsConfigured ? 'Replace APNs key' : 'Save APNs key'}
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Every channel, set up or not: before anything is configured this list
           is how someone finds out an iOS app needs an APNs key and not Firebase. */}
       <Card>
@@ -616,6 +786,119 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
               </>
             )}
           </CardContent>
+      </Card>
+
+      {/* Test send — the panel's most useful output is a failed test, so its
+          result is rendered inline rather than only as a toast. */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <FlaskConical className="h-5 w-5" />
+            Test send
+          </CardTitle>
+          <CardDescription>
+            Check this project's push setup against one device without
+            creating a campaign.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="test-send-channel">Channel</Label>
+            <Select
+              value={testChannel}
+              onValueChange={(value) => {
+                setTestChannel(value);
+                setTestResult(null);
+                setTestError(null);
+              }}
+            >
+              <SelectTrigger id="test-send-channel" className="max-w-[22rem]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={DETECT_CHANNEL}>Detect from the token</SelectItem>
+                {configuredChannels.map((channel) => (
+                  <SelectItem key={channel} value={channel}>
+                    {CHANNEL_LABELS[channel]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Detect uses the channel your app registered the token under. Pick one when
+              the token came from somewhere else, such as Xcode's console.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="test-send-token">Device token</Label>
+            <Textarea
+              value={testToken}
+              onChange={(e) => {
+                setTestToken(e.target.value);
+                if (testResult || testError) {
+                  setTestResult(null);
+                  setTestError(null);
+                }
+              }}
+              id="test-send-token"
+              placeholder="An FCM registration token (Android, web) or an APNs device token (iOS)"
+              rows={3}
+              className="max-h-[30vh] resize-y overflow-y-auto font-mono text-xs"
+            />
+            <p className="flex items-start gap-1 text-xs text-muted-foreground">
+              <KeyRound className="mt-0.5 h-3 w-3 shrink-0" />
+              Validate only checks the credentials and message without delivering
+              anything. Apple has no such mode, so for APNs it checks the message alone.
+              Deliver actually sends it.
+            </p>
+          </div>
+
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              onClick={() => handleTestSend(true)}
+              disabled={testSend.isPending || !testToken.trim()}
+            >
+              Validate only
+            </Button>
+            <Button
+              onClick={() => handleTestSend(false)}
+              disabled={testSend.isPending || !testToken.trim()}
+            >
+              {testSend.isPending ? 'Sending…' : 'Deliver'}
+            </Button>
+          </div>
+
+          {(testResult || testError) && (
+            <>
+              <Separator />
+              {testError ? (
+                <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span className="break-words">{testError}</span>
+                </div>
+              ) : testResult?.delivered ? (
+                <div className="flex items-center gap-2 rounded-lg border border-green-600/30 bg-green-600/5 p-3 text-sm text-green-700">
+                  <CheckCircle2 className="h-4 w-4 shrink-0" />
+                  <span>{testOutcome(testResult)}</span>
+                </div>
+              ) : (
+                <div className="space-y-1 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+                  <div className="flex items-center gap-2 font-medium">
+                    <XCircle className="h-4 w-4 shrink-0" />
+                    Rejected by {testResult ? providerName(testResult) : 'the provider'}
+                    {testResult?.errorCode && (
+                      <code className="rounded bg-destructive/10 px-1.5 py-0.5 font-mono text-xs">
+                        {testResult.errorCode}
+                      </code>
+                    )}
+                  </div>
+                  {testResult?.error && <p className="break-words">{testResult.error}</p>}
+                </div>
+              )}
+            </>
+          )}
+        </CardContent>
       </Card>
 
       {/* Delivery guardrails. Only meaningful once push is set up. */}
@@ -871,289 +1154,6 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
           </CardContent>
         </Card>
       )}
-
-      {/* Upload / replace credentials — inline, not a dialog. Owners and admins only. */}
-      {manages && (
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Upload className="h-5 w-5" />
-            Firebase service account (Android and web)
-          </CardTitle>
-          <CardDescription>
-            Paste the Firebase service account JSON from Project Settings &gt;
-            Service Accounts &gt; Generate new private key. It is validated
-            against Firebase before it is stored.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label>Service account JSON</Label>
-            <Textarea
-              value={fcmJson}
-              onChange={(e) => {
-                setFcmJson(e.target.value);
-                if (configureError) setConfigureError(null);
-              }}
-              placeholder='{"project_id": "...", "private_key": "...", "client_email": "..."}'
-              rows={8}
-              // The pasted file is ~2.4KB with a single unbreakable ~1670-char
-              // private-key line. Capping the height and scrolling inside the
-              // field keeps that one paste from stretching the whole panel.
-              className="max-h-[45vh] resize-y overflow-y-auto font-mono text-xs"
-            />
-          </div>
-          {configureError && (
-            <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              {/* Firebase's rejection reason, verbatim — this is the point of
-                  server-side validation, so don't flatten it to a generic message. */}
-              <span className="break-words">{configureError}</span>
-            </div>
-          )}
-          <Button onClick={handleConfigure} disabled={configurePush.isPending || !fcmJson.trim()}>
-            {configurePush.isPending ? 'Validating…' : fcmConfigured ? 'Save and replace' : 'Save service account'}
-          </Button>
-        </CardContent>
-      </Card>
-      )}
-
-      {/* The APNs key. Owners and admins only. An iOS app built on the Chumbaq
-          SDK registers its token under APNs, so without this it has tokens and
-          nothing that can deliver to them. */}
-      {manages && apnsSupported && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Smartphone className="h-5 w-5" />
-              Apple Push key (iOS)
-            </CardTitle>
-            <CardDescription>
-              In Apple Developer, open Certificates, Identifiers &amp; Profiles &gt; Keys, create a
-              key with Apple Push Notifications service enabled, and download its .p8 file. Apple
-              lets you download it once.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="apns-key-id">Key ID</Label>
-                <Input
-                  id="apns-key-id"
-                  autoComplete="off"
-                  placeholder={apnsConfigured ? '••••••••••' : 'ABC123DEFG'}
-                  value={apnsKeyId}
-                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setApnsKeyId(e.target.value)}
-                />
-                <p className="text-xs text-muted-foreground">Shown next to the key in Apple's list. 10 characters.</p>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="apns-team-id">Team ID</Label>
-                <Input
-                  id="apns-team-id"
-                  autoComplete="off"
-                  placeholder={apnsConfigured ? '••••••••••' : 'ABCDE12345'}
-                  value={apnsTeamId}
-                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setApnsTeamId(e.target.value)}
-                />
-                <p className="text-xs text-muted-foreground">Under Membership details in your Apple account.</p>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="apns-bundle-id">Bundle ID</Label>
-              <Input
-                id="apns-bundle-id"
-                autoComplete="off"
-                placeholder="com.example.app"
-                value={apnsBundleValue}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                  setApnsBundleTouched(true);
-                  setApnsBundleId(e.target.value);
-                }}
-              />
-              <p className="text-xs text-muted-foreground">
-                Your app's bundle identifier, exactly as in Xcode. Apple rejects a push whose bundle
-                ID does not match the app that owns the token.
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="apns-environment">Environment</Label>
-              <Select value={apnsEnvironment} onValueChange={(v) => setApnsEnvironment(v as ApnsEnvironment)}>
-                <SelectTrigger id="apns-environment" className="max-w-[24rem]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {APNS_ENVIRONMENTS.map((env) => (
-                    <SelectItem key={env.value} value={env.value}>
-                      {env.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                A build run from Xcode gets a sandbox token; App Store and TestFlight builds get
-                production ones. The wrong choice fails every send with BadDeviceToken.
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="apns-private-key">Key file (.p8)</Label>
-              <Input
-                type="file"
-                accept=".p8,.pem,text/plain"
-                className="max-w-[24rem]"
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
-                  void handleApnsKeyFile(e.target.files?.[0]);
-                  // So choosing the same file again after an error still fires.
-                  e.target.value = '';
-                }}
-              />
-              <Textarea
-                id="apns-private-key"
-                value={apnsPrivateKey}
-                onChange={(e) => {
-                  setApnsPrivateKey(e.target.value);
-                  if (apnsError) setApnsError(null);
-                }}
-                placeholder="-----BEGIN PRIVATE KEY-----"
-                rows={5}
-                spellCheck={false}
-                className="max-h-[30vh] resize-y overflow-y-auto font-mono text-xs"
-              />
-              <p className="text-xs text-muted-foreground">
-                Choose the file or paste its contents. It is checked before it is stored, encrypted,
-                and never shown again.
-              </p>
-            </div>
-
-            {apnsError && (
-              <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                <span className="break-words">{apnsError}</span>
-              </div>
-            )}
-
-            <Button onClick={handleConfigureApns} disabled={configureChannel.isPending || !apnsComplete}>
-              {configureChannel.isPending ? 'Checking…' : apnsConfigured ? 'Replace APNs key' : 'Save APNs key'}
-            </Button>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Test send — the panel's most useful output is a failed test, so its
-          result is rendered inline rather than only as a toast. */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <FlaskConical className="h-5 w-5" />
-            Test send
-          </CardTitle>
-          <CardDescription>
-            Check this project's push setup against one device without
-            creating a campaign.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="test-send-channel">Channel</Label>
-            <Select
-              value={testChannel}
-              onValueChange={(value) => {
-                setTestChannel(value);
-                setTestResult(null);
-                setTestError(null);
-              }}
-            >
-              <SelectTrigger id="test-send-channel" className="max-w-[22rem]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={DETECT_CHANNEL}>Detect from the token</SelectItem>
-                {configuredChannels.map((channel) => (
-                  <SelectItem key={channel} value={channel}>
-                    {CHANNEL_LABELS[channel]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              Detect uses the channel your app registered the token under. Pick one when
-              the token came from somewhere else, such as Xcode's console.
-            </p>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="test-send-token">Device token</Label>
-            <Textarea
-              value={testToken}
-              onChange={(e) => {
-                setTestToken(e.target.value);
-                if (testResult || testError) {
-                  setTestResult(null);
-                  setTestError(null);
-                }
-              }}
-              id="test-send-token"
-              placeholder="An FCM registration token (Android, web) or an APNs device token (iOS)"
-              rows={3}
-              className="max-h-[30vh] resize-y overflow-y-auto font-mono text-xs"
-            />
-            <p className="flex items-start gap-1 text-xs text-muted-foreground">
-              <KeyRound className="mt-0.5 h-3 w-3 shrink-0" />
-              Validate only checks the credentials and message without delivering
-              anything. Apple has no such mode, so for APNs it checks the message alone.
-              Deliver actually sends it.
-            </p>
-          </div>
-
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              onClick={() => handleTestSend(true)}
-              disabled={testSend.isPending || !testToken.trim()}
-            >
-              Validate only
-            </Button>
-            <Button
-              onClick={() => handleTestSend(false)}
-              disabled={testSend.isPending || !testToken.trim()}
-            >
-              {testSend.isPending ? 'Sending…' : 'Deliver'}
-            </Button>
-          </div>
-
-          {(testResult || testError) && (
-            <>
-              <Separator />
-              {testError ? (
-                <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span className="break-words">{testError}</span>
-                </div>
-              ) : testResult?.delivered ? (
-                <div className="flex items-center gap-2 rounded-lg border border-green-600/30 bg-green-600/5 p-3 text-sm text-green-700">
-                  <CheckCircle2 className="h-4 w-4 shrink-0" />
-                  <span>{testOutcome(testResult)}</span>
-                </div>
-              ) : (
-                <div className="space-y-1 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-                  <div className="flex items-center gap-2 font-medium">
-                    <XCircle className="h-4 w-4 shrink-0" />
-                    Rejected by {testResult ? providerName(testResult) : 'the provider'}
-                    {testResult?.errorCode && (
-                      <code className="rounded bg-destructive/10 px-1.5 py-0.5 font-mono text-xs">
-                        {testResult.errorCode}
-                      </code>
-                    )}
-                  </div>
-                  {testResult?.error && <p className="break-words">{testResult.error}</p>}
-                </div>
-              )}
-            </>
-          )}
-        </CardContent>
-      </Card>
     </div>
   );
 }
