@@ -35,7 +35,8 @@ npm run dev:all           # API, worker, admin API, dashboard and admin app
 
 Without `PLATFORM_BREVO_API_KEY` and `PLATFORM_EMAIL_FROM` no account email goes out. When `NODE_ENV` is
 set to `development` (as in `.env.example`), the API prints the sign-up link to its console instead, so you can finish
-signing up. With `NODE_ENV` unset or set to anything else, it does not.
+signing up. With `NODE_ENV` unset or set to anything else, it does not. Set the optional `PLATFORM_EMAIL_REPLY_TO` to
+let people reply to account emails; without it they have no reply-to.
 
 Optional demo data (drops and recreates the local database; refuses `NODE_ENV=production`):
 `npm run seed`.

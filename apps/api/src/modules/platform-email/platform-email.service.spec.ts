@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { verificationEmail } from './account-emails';
 import { PlatformEmailService } from './platform-email.service';
 
 const KEY = 'xkeysib-secret-value';
@@ -55,6 +56,49 @@ describe('PlatformEmailService', () => {
       htmlContent: EMAIL.html,
       textContent: EMAIL.text,
     });
+  });
+
+  it('sends no reply-to when none is set, or when it is unusable', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 201 }));
+    const unusable = build({
+      PLATFORM_BREVO_API_KEY: KEY,
+      PLATFORM_EMAIL_FROM: 'a@example.com',
+      PLATFORM_EMAIL_REPLY_TO: 'not an address',
+    });
+
+    await configured().send(EMAIL);
+    await unusable.send(EMAIL);
+
+    for (const [, init] of fetchMock.mock.calls) expect(JSON.parse(init.body)).not.toHaveProperty('replyTo');
+  });
+
+  it('sends the reply-to when one is set', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 201 }));
+    const service = build({
+      PLATFORM_BREVO_API_KEY: KEY,
+      PLATFORM_EMAIL_FROM: 'a@example.com',
+      PLATFORM_EMAIL_REPLY_TO: 'Support <help@example.com>',
+    });
+
+    await service.send(EMAIL);
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).replyTo).toEqual({ name: 'Support', email: 'help@example.com' });
+  });
+
+  it('fills in the footer of an account email, with the reply line only when replies go somewhere', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 201 }));
+    const env = { PLATFORM_BREVO_API_KEY: KEY, PLATFORM_EMAIL_FROM: 'a@example.com', 'app.appUrl': 'https://app.example' };
+    const email = verificationEmail({ email: 'person@example.com', name: 'Sam' }, 'https://app.example/verify-email#token=t');
+
+    await build(env).send(email);
+    await build({ ...env, PLATFORM_EMAIL_REPLY_TO: 'help@example.com' }).send(email);
+
+    const [plain, replies] = fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body));
+    expect(plain.htmlContent).toContain('Chumbaq · app.example');
+    expect(plain.textContent).toContain('Chumbaq · app.example');
+    expect(plain.htmlContent).not.toContain('Reply to this email');
+    expect(replies.htmlContent).toContain('Questions? Reply to this email.');
+    expect(replies.textContent).toContain('Questions? Reply to this email.');
   });
 
   it('accepts a bare address as the sender', () => {

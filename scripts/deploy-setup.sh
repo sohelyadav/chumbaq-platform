@@ -176,6 +176,8 @@ API_DOWNLOAD_ALERT_REQUESTS=2000
 # Optional: without it the platform runs and those emails are not sent.
 # PLATFORM_BREVO_API_KEY=xkeysib-...
 # PLATFORM_EMAIL_FROM=Chumbaq <noreply@chumbaq.com>
+# Optional: where replies to account email go. Without it there is no reply-to.
+# PLATFORM_EMAIL_REPLY_TO=Support <support@example.com>
 
 # Paid plans through Razorpay Subscriptions. Billing stays off unless all three keys are set.
 # RAZORPAY_KEY_ID=

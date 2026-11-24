@@ -1,6 +1,12 @@
 import {
   accountLink,
+  alreadyRegisteredEmail,
   mauNoticeEmail,
+  passwordResetEmail,
+  signupLinkEmail,
+  staffEnrolmentStartedEmail,
+  verificationEmail,
+  withFooter,
   passwordChangedEmail,
   paymentHaltedEmail,
   projectInviteEmail,
@@ -203,7 +209,7 @@ describe('billing emails', () => {
 
     it('escapes the name in the HTML part', () => {
       expect(email.html).not.toContain('<b>');
-      expect(email.html.startsWith('<p>Hi Asha &lt;b&gt;Rao,</p>')).toBe(true);
+      expect(email.html).toContain('>Hi Asha &lt;b&gt;Rao,</p>');
     });
   });
 });
@@ -219,5 +225,90 @@ describe('the greeting in account mail', () => {
     expect(email.text).not.toContain('evil.example');
     expect(email.html).not.toContain('evil.example');
     expect(email.text.startsWith('Hi Claim your prize at now,')).toBe(true);
+  });
+});
+
+describe('the layout of account mail', () => {
+  const user = { email: 'sam@example.com', name: 'Sam <i>' };
+  const link = accountLink('https://app.example', '/complete-signup', 'tok_-123');
+
+  it('has the action as a button, and the full URL under it to copy', () => {
+    const { html } = signupLinkEmail(user, link);
+
+    expect(html).toMatch(/<td bgcolor="#1447e6"[^>]*><a href="https:\/\/app\.example\/complete-signup#token=tok_-123"[^>]*>Choose a password<\/a><\/td>/);
+    expect(html).toContain('If the button does not work, copy this link into your browser:');
+    expect(html).toContain('>https://app.example/complete-signup#token=tok_-123</a>');
+  });
+
+  it('keeps the full link in the plain-text part, which has no HTML', () => {
+    const { text } = signupLinkEmail(user, link);
+
+    expect(text).toContain('Choose a password: https://app.example/complete-signup#token=tok_-123');
+    expect(text).not.toMatch(/<\/?(p|a|table|td|div)\b/);
+  });
+
+  it('escapes the name and the link in the HTML part', () => {
+    const email = signupLinkEmail(user, 'https://app.example/complete-signup#token="><script>');
+
+    expect(email.html).not.toContain('<i>');
+    expect(email.html).not.toContain('<script>');
+    expect(email.html).toContain('Hi Sam &lt;i&gt;,');
+    expect(email.html).toContain('#token=&quot;&gt;&lt;script&gt;');
+  });
+
+  it('hides a preheader at the top of the body', () => {
+    expect(signupLinkEmail(user, link).html).toMatch(
+      /<body[^>]*>\n<div style="display:none;[^"]*">One step left: choose a password\.<\/div>/,
+    );
+    expect(staffEnrolmentStartedEmail(user, null).html).not.toContain('display:none');
+  });
+
+  it('leads the sign-up email with what happens next, and keeps the security lines', () => {
+    const { text } = signupLinkEmail(user, link);
+
+    expect(text).toContain('Thanks for signing up for Chumbaq. Choose a password to finish creating your account.');
+    expect(text).toContain('Next, you create your first project and send a test push from the dashboard.');
+    expect(text).toContain('This link works once and expires in 24 hours.');
+    expect(text).toContain('No account is made unless the link is opened.');
+    expect(text).not.toContain('Someone asked');
+  });
+
+  it('words verification and reset plainly, with their expiry', () => {
+    const verify = verificationEmail(user, link);
+    const reset = passwordResetEmail(user, link);
+
+    expect(verify.html).toContain('>Confirm email address</a>');
+    expect(verify.text).toContain('expires in 24 hours');
+    expect(reset.html).toContain('>Reset password</a>');
+    expect(reset.text).toContain('expires in 30 minutes');
+    expect(reset.text).toContain('Your password stays the same.');
+  });
+
+  it('gives the forgot-password link as its own plain link, not a URL inside a sentence', () => {
+    const email = alreadyRegisteredEmail(user, 'https://app.example/login', 'https://app.example/forgot-password');
+
+    expect(email.html).toContain('Forgot your password? <a href="https://app.example/forgot-password"');
+    expect(email.html).toContain('>Reset it</a>');
+    expect(email.html).not.toContain('reset it here');
+    expect(email.text).toContain('Forgot your password? Reset it: https://app.example/forgot-password');
+  });
+
+  it('gets its footer from the sender: the app host, and the reply line only with a reply-to', () => {
+    const plain = withFooter(signupLinkEmail(user, link), { appUrl: 'https://app.example/', replyTo: false });
+    const replies = withFooter(signupLinkEmail(user, link), { appUrl: 'https://app.example/', replyTo: true });
+
+    for (const part of [plain.html, plain.text]) {
+      expect(part).toContain('Chumbaq · app.example');
+      expect(part).not.toContain('Reply to this email');
+      expect(part).not.toContain('chumbaq:footer');
+    }
+    expect(replies.html).toContain('Questions? Reply to this email.');
+    expect(replies.text).toContain('Questions? Reply to this email.');
+  });
+
+  it('leaves mail it did not build alone', () => {
+    const other = { to: 'a@example.com', subject: 's', html: '<p>x</p>', text: 'x' };
+
+    expect(withFooter(other, { appUrl: 'https://app.example', replyTo: true })).toEqual(other);
   });
 });
