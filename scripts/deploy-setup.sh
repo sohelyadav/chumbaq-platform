@@ -560,7 +560,8 @@ enable_site() {
   sudo ln -s "$target" "$entry"
 }
 
-# Node 22 or later (the repo's engines field), from NodeSource when the system's is older.
+# Node 22 or later (the repo's engines field). A server with an older one, or none, gets the
+# current LTS line, Node 26, from NodeSource.
 install_node() {
   local major
   major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
@@ -568,7 +569,7 @@ install_node() {
     echo "  Node $(node -v) is already installed."
     return 0
   fi
-  curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
+  curl -fsSL https://deb.nodesource.com/setup_26.x -o /tmp/nodesource_setup.sh
   sudo bash /tmp/nodesource_setup.sh
   sudo apt install -y nodejs
   rm -f /tmp/nodesource_setup.sh
