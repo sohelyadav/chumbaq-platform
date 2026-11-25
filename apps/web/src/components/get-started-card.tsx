@@ -235,11 +235,11 @@ export function GetStartedCard({ projectId }: { projectId: string }) {
     campaign: (
       <div className="space-y-3">
         <p className="text-sm text-muted-foreground">
-          Send one notification to your own device first, then a campaign to everyone.
+          Send a test push to your own device first. This step ticks itself when you send your first campaign.
         </p>
         <div className="flex flex-wrap gap-2">
           <Button asChild size="sm" variant="outline">
-            <Link to={pushSettings}>Send a test push</Link>
+            <Link to={`${pushSettings}#test-send`}>Send a test push</Link>
           </Button>
           <Button asChild size="sm">
             <Link to={`/projects/${projectId}/push-notifications/new`}>Create a campaign</Link>

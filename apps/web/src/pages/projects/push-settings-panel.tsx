@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   CheckCircle2,
   XCircle,
@@ -136,6 +137,14 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
     isError: channelsIsError,
   } = useProjectChannels(projectId);
   const configureChannel = useConfigureChannel(projectId);
+
+  // The get-started card's "Send a test push" links to `#test-send`. The key forms sit
+  // above that card, so scroll to it once the loaded cards have settled their height.
+  const { hash } = useLocation();
+  const settled = !configLoading && !channelsLoading;
+  useEffect(() => {
+    if (settled && hash === '#test-send') document.getElementById('test-send')?.scrollIntoView();
+  }, [settled, hash]);
 
   const [reachabilityDays, setReachabilityDays] = useState<number>(30);
   const {
@@ -790,7 +799,7 @@ export function PushSettingsPanel({ projectId }: PushSettingsPanelProps) {
 
       {/* Test send — the panel's most useful output is a failed test, so its
           result is rendered inline rather than only as a toast. */}
-      <Card>
+      <Card id="test-send">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <FlaskConical className="h-5 w-5" />
