@@ -261,17 +261,118 @@ actionunban =
 EOF
 }
 
-# /etc/cron.daily/chumbaq-aide: AIDE compares the system with the baseline taken after
-# the last deploy; any change is an alarm naming the first 20 paths.
-aide_check_script() {
+# The daily file check (AIDE) runs with its own config, /etc/chumbaq/aide.conf: the
+# distribution's, with two changes.
+#   - One hash, sha512, instead of every hash AIDE has (Checksums = H, about a dozen),
+#     which cost half an hour of both cores a day. One strong hash finds any change.
+#   - Paths that change by design and hold no code are left out (aide_exclusions), so
+#     an alarm means a file changed that only a deploy, a package or a person changes.
+# A group is fixed where it is defined, so Checksums is replaced in place, before the
+# groups built on it; setting it again in a later file would change nothing.
+AIDE_CONFIG=/etc/chumbaq/aide.conf
+# This server's own rules, for software it runs beside the platform (a monitoring agent,
+# say): one file per program, named with letters, digits, _ and -, not executable (AIDE
+# runs executable ones). Deploys create the directory and never write in it.
+AIDE_LOCAL_RULES=/etc/chumbaq/aide.conf.d
+
+# What changes while the server runs: logs (rotated daily; keep them off the server too,
+# which is their record), /run (in memory, gone at every boot, so nothing there persists),
+# databases, caches, Docker's data and the timestamps of periodic jobs. Certificates renew
+# on their own every two months; certbot's settings and hooks stay checked. Narrow where
+# the rest of a directory could hide something: Postgres's data files but not its home or
+# postgresql.auto.conf (which can name a command to run), Redis's dump but not other files
+# beside it, snapd's state but not the snaps. Directories that hold such files keep their
+# owner and mode checked, not their times (VarDir).
+aide_exclusions() {
   cat << 'EOF'
+!/var/log(/|$)
+!/run(/|$)
+!/var/cache(/|$)
+!/var/lib/postgresql/[0-9]+/main/(base|global|pg_[a-z_]+)(/|$)
+!/var/lib/postgresql/[0-9]+/main/postmaster\.(pid|opts)$
+/var/lib/postgresql/[0-9]+/main$ d VarDir
+!/var/lib/redis[^/]*/(dump\.rdb|temp-[0-9]+\.rdb)$
+/var/lib/redis[^/]*$ d VarDir
+!/var/lib/nginx(/|$)
+!/var/lib/docker(/|$)
+!/var/lib/containerd(/|$)
+!/var/lib/apt/lists(/|$)
+!/var/lib/apt/periodic(/|$)
+!/var/lib/systemd/timers(/|$)
+!/var/lib/snapd/(state\.json|cache)(/|$)
+/var/lib/snapd$ d VarDir
+!/var/lib/fwupd(/|$)
+!/var/lib/PackageKit(/|$)
+!/var/lib/landscape(/|$)
+!/var/lib/update-notifier(/|$)
+!/var/lib/update-manager(/|$)
+!/var/lib/ubuntu-release-upgrader(/|$)
+!/var/lib/ubuntu-advantage(/|$)
+!/var/lib/swcatalog(/|$)
+!/var/lib/letsencrypt(/|$)
+!/etc/letsencrypt/(archive|live|csr|keys)(/|$)
+!/home/ubuntu/\.npm(/|$)
+!/home/ubuntu/\.pm2/(logs|pids)(/|$)
+!/home/ubuntu/\.pm2/pm2\.log$
+!/home/ubuntu/\.pm2/[^/]*\.sock$
+EOF
+}
+
+# stdin = the distribution's aide.conf. Stops unless it has the Checksums line replaced.
+aide_config() {
+  local distro
+  distro=$(cat)
+  if ! grep -qx 'Checksums = H' <<< "$distro"; then
+    echo "The distribution's aide.conf has no 'Checksums = H' line to replace. See /etc/aide/aide.conf." >&2
+    return 1
+  fi
+  echo "# Written by Chumbaq's deploy scripts from /etc/aide/aide.conf; see server-security.sh."
+  sed 's/^Checksums = H$/Checksums = sha512/' <<< "$distro"
+  echo
+  echo "# Chumbaq: paths that change while the server runs and hold no code."
+  aide_exclusions
+  echo
+  echo "# This server's own rules (see AIDE_LOCAL_RULES in server-security.sh)."
+  echo "@@x_include $AIDE_LOCAL_RULES ^[a-zA-Z0-9_-]+\$"
+}
+
+# /etc/cron.daily/chumbaq-aide: AIDE compares the system with the baseline taken after
+# the last deploy; any change is an alarm naming the first 20 paths. At the lowest CPU
+# and disk priority, so the apps come first.
+aide_check_script() {
+  cat << EOF
 #!/bin/bash
 # Written by Chumbaq's deploy scripts. Daily: files changed since the last deploy.
-report=$(aide --check --config /etc/aide/aide.conf 2>&1)
-[ $? -eq 0 ] && exit 0
+report=\$(nice -n 19 ionice -c3 aide --check --config $AIDE_CONFIG 2>&1)
+[ \$? -eq 0 ] && exit 0
+EOF
+  cat << 'EOF'
 paths=$(printf '%s\n' "$report" | grep -E '^[fdlbcps][^:]*: /' | sed 's/^[^:]*: //' | head -20 | tr '\n' ' ')
 /usr/local/sbin/chumbaq-security-alert server.files_changed "$(date -u +%Y-%m-%d)" "paths=${paths:-see aide --check}"
 exit 0
+EOF
+}
+
+# /usr/local/sbin/chumbaq-file-baseline: takes the baseline the daily check compares with.
+# Run after a deploy: the platform's, or another app's on this server, whose deploy runs
+# the check first so what changed before it is raised rather than hidden.
+aide_baseline_script() {
+  cat << EOF
+#!/bin/bash
+# Written by Chumbaq's deploy scripts. The file baseline becomes the files as they are now.
+db=/var/lib/aide/aide.db
+mode=--init
+[ -f "\$db" ] && mode=--update
+nice -n 19 ionice -c3 aide "\$mode" --config $AIDE_CONFIG > /dev/null 2>&1
+status=\$?
+EOF
+  cat << 'EOF'
+# 0 to 7 say what differed from the old baseline (--update); 14 and up are AIDE's errors.
+if [ "$status" -ge 14 ]; then
+  echo "aide $mode failed with $status, so the file baseline was not changed." >&2
+  exit 1
+fi
+cp /var/lib/aide/aide.db.new "$db"
 EOF
 }
 
@@ -428,7 +529,7 @@ setup_nginx_logging() {
 
 # $1 = .env. The alarm scripts, the root-only token copy, pam_exec, fail2ban and AIDE.
 setup_server_alarms() {
-  local env="$1" pam
+  local env="$1" pam aide_conf
   env_add_if_missing "$env" SECURITY_ALERT_TOKEN "$(openssl rand -hex 32)"
   env_file_value "$env" SECURITY_ALERT_TOKEN | sys_write "$(R /etc/chumbaq/alert-token)"
   sudo chmod 0600 "$(R /etc/chumbaq/alert-token)"
@@ -444,8 +545,16 @@ setup_server_alarms() {
   fail2ban_jail | sys_write "$(R /etc/fail2ban/jail.d/chumbaq.conf)"
   sudo systemctl enable fail2ban
   sudo systemctl restart fail2ban
+  aide_conf=$(aide_config < "$(R /etc/aide/aide.conf)") || return 1
+  printf '%s\n' "$aide_conf" | sys_write "$(R "$AIDE_CONFIG")"
+  sudo mkdir -p "$(R "$AIDE_LOCAL_RULES")"
+  sudo chmod 0755 "$(R "$AIDE_LOCAL_RULES")"
   aide_check_script | sys_write "$(R /etc/cron.daily/chumbaq-aide)"
-  sudo chmod 0755 "$(R /etc/cron.daily/chumbaq-aide)"
+  aide_baseline_script | sys_write "$(R /usr/local/sbin/chumbaq-file-baseline)"
+  sudo chmod 0755 "$(R /etc/cron.daily/chumbaq-aide)" "$(R /usr/local/sbin/chumbaq-file-baseline)"
+  # The package's own daily check repeats ours with the distribution's config and mails
+  # the result to root, which nothing reads: a second half hour of both cores a day.
+  sudo systemctl mask --now dailyaidecheck.timer
 }
 
 # The log bundle collector, root-owned, so root never runs code the app user can write.
@@ -464,14 +573,18 @@ check_files_before_deploy() {
   fi
 }
 
-# After a deploy: the file baseline becomes what was just deployed (taking it the first
-# time takes a few minutes).
+# After a deploy: the file baseline becomes what was just deployed (a few minutes). The
+# helper comes with a prod deploy; until then (stage first) there is nothing to refresh.
 refresh_file_baseline() {
-  if [ -f "$(R /var/lib/aide/aide.db)" ]; then
-    sudo aide --update --config /etc/aide/aide.conf > /dev/null 2>&1 || true
-    sudo cp "$(R /var/lib/aide/aide.db.new)" "$(R /var/lib/aide/aide.db)"
-  else
-    sudo aideinit -y -f > /dev/null
+  local helper
+  helper=$(R /usr/local/sbin/chumbaq-file-baseline)
+  if [ ! -x "$helper" ]; then
+    echo "  No $helper yet; a DEPLOY_ENV=prod deploy installs it and takes the file baseline."
+    return 0
+  fi
+  echo "Taking the file baseline for the daily check (a few minutes)..."
+  if ! sudo "$helper"; then
+    echo "  The file baseline was not refreshed; the next daily check will report this deploy's files." >&2
   fi
 }
 

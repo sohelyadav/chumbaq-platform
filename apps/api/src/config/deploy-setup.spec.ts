@@ -54,6 +54,11 @@ function runWholeScript(
   writeFileSync(path.join(app, '.env'), opts.env);
   for (const [name, contents] of Object.entries(opts.sites ?? {})) writeFileSync(path.join(sites, name), contents);
   writeFileSync(log, '');
+  // What apt install aide leaves: the distribution's config, which ours is made from.
+  mkdirSync(path.join(root, 'system/etc/aide'), { recursive: true });
+  if (!existsSync(path.join(root, 'system/etc/aide/aide.conf'))) {
+    writeFileSync(path.join(root, 'system/etc/aide/aide.conf'), 'Checksums = H\nFull = p+Checksums\n');
+  }
   const stub = (name: string, body: string) => {
     writeFileSync(path.join(bin, name), `#!/bin/bash\n${body}\n`);
     chmodSync(path.join(bin, name), 0o755);
@@ -758,7 +763,7 @@ describe('scripts/deploy-setup.sh', () => {
         expect([result.ok, result.out]).toEqual([true, expect.stringContaining('stage skips them')]);
         expect(existsSync(path.join(result.system, 'etc/chumbaq/alert-token'))).toBe(false);
         expect(existsSync(path.join(result.system, 'etc/logrotate.d/chumbaq-retention'))).toBe(false);
-        expect(result.log).not.toMatch(/apt install -y chrony|aideinit|aide --update/);
+        expect(result.log).not.toMatch(/apt install -y chrony|chumbaq-file-baseline|dailyaidecheck/);
         expect(readFileSync(path.join(result.app, '.env'), 'utf8')).not.toMatch(/^SECURITY_ALERT_TOKEN=/m);
         // Redis is still set up: stage's queues need it, in an instance of its own.
         expect(result.log).toContain('sudo systemctl restart redis-server@stage');
@@ -851,7 +856,17 @@ describe('scripts/deploy-setup.sh', () => {
         expect(sys('usr/local/sbin/chumbaq-security-alert')).toContain('/api/internal/security-alerts');
         expect(sys('etc/pam.d/sshd')).toContain('pam_exec.so quiet /usr/local/sbin/chumbaq-ssh-login-alert');
         expect(sys('etc/fail2ban/jail.d/chumbaq.conf')).toContain('maxretry = 5');
-        expect(sys('etc/cron.daily/chumbaq-aide')).toContain('aide --check');
+        expect(sys('etc/cron.daily/chumbaq-aide')).toContain('aide --check --config /etc/chumbaq/aide.conf');
+        expect(sys('etc/chumbaq/aide.conf')).toMatch(/^Checksums = sha512$/m);
+        // AIDE refuses to start when an included directory is missing.
+        expect(existsSync(path.join(result.system, 'etc/chumbaq/aide.conf.d'))).toBe(true);
+        expect(sys('usr/local/sbin/chumbaq-file-baseline')).toContain('--config /etc/chumbaq/aide.conf');
+        expect(result.log).toMatch(/^sudo systemctl mask --now dailyaidecheck\.timer$/m);
+        // The first baseline is taken last, with the helper written above.
+        const setupLines = result.log.split('\n');
+        expect(setupLines.findIndex((l) => /^sudo \S+\/usr\/local\/sbin\/chumbaq-file-baseline$/.test(l))).toBeGreaterThan(
+          setupLines.findIndex((l) => l === 'sudo systemctl restart nginx'),
+        );
         expect(result.log).toMatch(/^sudo apt install -y chrony$/m);
         expect(result.log).toMatch(/^sudo apt install -y redis-server$/m);
         expect(result.log).toMatch(/^sudo apt install -y fail2ban aide$/m);
@@ -888,7 +903,17 @@ describe('scripts/deploy-setup.sh', () => {
         const check = lines.findIndex((l) => l.startsWith('sudo ') && l.endsWith('etc/cron.daily/chumbaq-aide'));
         expect(check).toBeGreaterThanOrEqual(0);
         expect(check).toBeLessThan(lines.findIndex((l) => l.startsWith('sudo apt')));
-        expect(check).toBeLessThan(lines.findIndex((l) => /aide --update/.test(l)));
+        expect(check).toBeLessThan(lines.findIndex((l) => /chumbaq-file-baseline$/.test(l)));
+      });
+
+      it('stops before writing the file check when the distribution config has changed shape', () => {
+        mkdirSync(path.join(dir, 'system/etc/aide'), { recursive: true });
+        writeFileSync(path.join(dir, 'system/etc/aide/aide.conf'), 'Checksums = sha256\n');
+        const result = runWholeScript(dir, { env: matching });
+        expect(result.ok).toBe(false);
+        expect(result.out).toContain("no 'Checksums = H' line to replace");
+        expect(existsSync(path.join(result.system, 'etc/chumbaq/aide.conf'))).toBe(false);
+        expect(existsSync(path.join(result.system, 'etc/cron.daily/chumbaq-aide'))).toBe(false);
       });
 
       it('stops before installing anything when LOG_RETENTION_DAYS is under 180', () => {

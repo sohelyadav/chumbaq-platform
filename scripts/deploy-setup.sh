@@ -805,7 +805,6 @@ pm2 save
 pm2 startup systemd -u "$(id -un)" --hp "$HOME" | tail -1 | sudo bash
 
 # Last, once everything is installed: what the daily file check compares with.
-echo "Taking the file baseline for the daily check (a few minutes)..."
 update_file_baseline
 
 echo ""

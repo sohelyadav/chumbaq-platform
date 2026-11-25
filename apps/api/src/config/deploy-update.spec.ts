@@ -24,6 +24,13 @@ function runUpdate(root: string, env = 'LOG_RETENTION_DAYS=365\n', vars: Record<
   mkdirSync(path.join(sys, 'var/lib/aide'), { recursive: true });
   writeFileSync(path.join(sys, 'etc/cron.daily/chumbaq-aide'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
   writeFileSync(path.join(sys, 'var/lib/aide/aide.db'), '');
+  if (!vars.STUB_NO_BASELINE_HELPER) {
+    mkdirSync(path.join(sys, 'usr/local/sbin'), { recursive: true });
+    writeFileSync(path.join(sys, 'usr/local/sbin/chumbaq-file-baseline'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
+  }
+  // What apt install aide leaves: the distribution's config, which ours is made from.
+  mkdirSync(path.join(sys, 'etc/aide'), { recursive: true });
+  writeFileSync(path.join(sys, 'etc/aide/aide.conf'), 'Checksums = H\nFull = p+Checksums\n');
   const stub = (name: string, body: string) => {
     writeFileSync(path.join(bin, name), `#!/bin/bash\n${body}\n`);
     chmodSync(path.join(bin, name), 0o755);
@@ -71,7 +78,8 @@ describe('scripts/deploy-update.sh', () => {
     expect(result.log).not.toMatch(/^pm2 restart chumbaq-api$/m);
     const lines = result.log.split('\n');
     const reload = lines.findIndex((l) => l.startsWith('pm2 startOrReload'));
-    const baseline = lines.findIndex((l) => /aideinit|aide --update/.test(l));
+    const baseline = lines.findIndex((l) => /^sudo \S+\/usr\/local\/sbin\/chumbaq-file-baseline$/.test(l));
+    expect(baseline).toBeGreaterThanOrEqual(0);
     expect(baseline).toBeGreaterThan(reload);
     expect(result.log).toMatch(/^sudo nginx -t$/m);
   });
@@ -91,7 +99,13 @@ describe('scripts/deploy-update.sh', () => {
     expect(result.log).toMatch(/--only chumbaq-stage-api --update-env$/m);
     expect(result.log).toContain('curl -fsS -o /dev/null http://127.0.0.1:3100/api/health');
     // Prod has a baseline here, so stage's changed files move it on.
-    expect(result.log).toMatch(/aide --update/);
+    expect(result.log).toMatch(/^sudo \S+\/usr\/local\/sbin\/chumbaq-file-baseline$/m);
+  });
+
+  it('skips the baseline on stage while prod has not installed the helper yet', () => {
+    const result = runUpdate(dir, 'LOG_RETENTION_DAYS=365\n', { DEPLOY_ENV: 'stage', STUB_NO_BASELINE_HELPER: '1' });
+    expect([result.ok, result.out]).toEqual([true, expect.stringContaining('a DEPLOY_ENV=prod deploy installs it')]);
+    expect(result.log).not.toMatch(/chumbaq-file-baseline|aide --update|aideinit/);
   });
 
   it('checks files against the old baseline before changing anything, so a deploy never hides a change', () => {
