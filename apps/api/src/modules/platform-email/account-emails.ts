@@ -21,28 +21,112 @@ export function accountLink(appUrl: string, path: string, token?: string): strin
   return token ? `${url}#token=${encodeURIComponent(token)}` : url;
 }
 
+/** The dashboard's primary colour (`--primary` in apps/web). */
+const BRAND = '#1447e6';
+const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+const P = `margin:0 0 16px;font-size:16px;line-height:24px;color:#111827;`;
+/** #4b5563, not a lighter grey: the footer sits on #f3f4f6 and must stay above 4.5:1. */
+const SMALL = `margin:0 0 12px;font-size:13px;line-height:20px;color:#4b5563;`;
+const MONO = `font-family:Menlo,Consolas,'Courier New',monospace;font-size:13px;color:#111827;word-break:break-all;`;
+
+/** Where `withFooter` puts the footer. Only the sender knows the app URL and reply-to. */
+const FOOTER_HTML = '<!--chumbaq:footer-->';
+const FOOTER_TEXT = '{{chumbaq:footer}}';
+
+interface Extras {
+  /** One short sentence that inboxes show next to the subject. */
+  preheader?: string;
+  /** Paragraphs under the button. */
+  after?: string[];
+  /** A second, plain link, written as `lead label`. */
+  link?: { lead: string; label: string; url: string };
+  /** Small print at the end. */
+  note?: string;
+}
+
 function compose(
   to: string,
   subject: string,
   name: string | null,
   paragraphs: string[],
   action?: { label: string; url: string },
+  extras: Extras = {},
 ): PlatformEmail {
   // The account name is whatever the registrant typed, and the address may not be
   // theirs: cleaned like any other typed name, so our sender delivers no link in it.
   const shown = name === null ? '' : safeDisplayName(name);
   const greeting = shown === '' ? 'Hi,' : `Hi ${shown},`;
-  const html = [
-    `<p>${escapeHtml(greeting)}</p>`,
-    ...paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`),
+  const p = (value: string, style = P) => `<p style="${style}">${escapeHtml(value)}</p>`;
+  const body = [
+    p(greeting),
+    ...paragraphs.map((paragraph) => p(paragraph)),
     ...(action
-      ? [`<p><a href="${escapeHtml(action.url)}">${escapeHtml(action.label)}</a></p>`]
+      ? [
+          `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 24px;"><tr><td bgcolor="${BRAND}" style="border-radius:6px;background-color:${BRAND};">` +
+            `<a href="${escapeHtml(action.url)}" style="display:inline-block;padding:12px 24px;font-family:${FONT};font-size:16px;font-weight:600;line-height:20px;color:#ffffff;text-decoration:none;border-radius:6px;">${escapeHtml(action.label)}</a>` +
+            '</td></tr></table>',
+          // Plain text, not a link: the sender rewrites every href to its click-tracking
+          // domain, so this is where the reader sees our own address.
+          `<p style="${SMALL}margin-bottom:24px;">If the button does not work, copy this link into your browser:<br>` +
+            `<span style="${MONO}">${escapeHtml(action.url)}</span></p>`,
+        ]
       : []),
+    ...(extras.after ?? []).map((paragraph) => p(paragraph)),
+    ...(extras.link
+      ? [
+          `<p style="${P}">${escapeHtml(extras.link.lead)} <a href="${escapeHtml(extras.link.url)}" style="color:${BRAND};">${escapeHtml(extras.link.label)}</a></p>`,
+        ]
+      : []),
+    ...(extras.note ? [p(extras.note, SMALL)] : []),
+  ];
+  const html = [
+    '<!DOCTYPE html>',
+    '<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<title>${escapeHtml(subject)}</title></head>`,
+    `<body style="margin:0;padding:0;background-color:#f3f4f6;">`,
+    ...(extras.preheader
+      ? [
+          `<div style="display:none;max-height:0;max-width:0;overflow:hidden;opacity:0;mso-hide:all;">${escapeHtml(extras.preheader)}</div>`,
+        ]
+      : []),
+    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f3f4f6" style="background-color:#f3f4f6;font-family:${FONT};"><tr><td align="center" style="padding:32px 16px;">`,
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">',
+    `<tr><td style="padding:0 8px 16px;font-family:${FONT};font-size:22px;font-weight:700;color:${BRAND};">Chumbaq</td></tr>`,
+    `<tr><td bgcolor="#ffffff" style="background-color:#ffffff;border-radius:8px;padding:32px;font-family:${FONT};">`,
+    ...body,
+    '</td></tr>',
+    `<tr><td style="padding:16px 8px 0;font-family:${FONT};">${FOOTER_HTML}</td></tr>`,
+    '</table></td></tr></table></body></html>',
   ].join('\n');
-  const text = [greeting, ...paragraphs, ...(action ? [`${action.label}: ${action.url}`] : [])].join(
-    '\n\n',
-  );
+  const text = [
+    greeting,
+    ...paragraphs,
+    ...(action ? [`${action.label}: ${action.url}`] : []),
+    ...(extras.after ?? []),
+    ...(extras.link ? [`${extras.link.lead} ${extras.link.label}: ${extras.link.url}`] : []),
+    ...(extras.note ? [extras.note] : []),
+    FOOTER_TEXT,
+  ].join('\n\n');
   return { to, subject, html, text };
+}
+
+/**
+ * Fills in the footer: "Chumbaq", the app's host, and "Questions? Reply to this email."
+ * only when replies go somewhere. Mail not built by `compose` passes through unchanged.
+ */
+export function withFooter(email: PlatformEmail, footer: { appUrl?: string; replyTo: boolean }): PlatformEmail {
+  let host = '';
+  try {
+    host = footer.appUrl ? new URL(footer.appUrl).host : '';
+  } catch {
+    // An unusable APP_URL leaves the host out; the API refuses to boot without one anyway.
+  }
+  const lines = [host ? `Chumbaq · ${host}` : 'Chumbaq', ...(footer.replyTo ? ['Questions? Reply to this email.'] : [])];
+  return {
+    ...email,
+    html: email.html.replace(FOOTER_HTML, `<p style="${SMALL}">${lines.map(escapeHtml).join('<br>')}</p>`),
+    text: email.text.replace(FOOTER_TEXT, `--\n${lines.join('\n')}`),
+  };
 }
 
 interface Recipient {
@@ -55,11 +139,13 @@ export function verificationEmail(user: Recipient, link: string): PlatformEmail 
     user.email,
     'Confirm your email address',
     user.name,
-    [
-      'Please confirm this is your email address for your Chumbaq account. The link works once and lasts 24 hours.',
-      'If you did not create this account, you can ignore this email.',
-    ],
+    ['Confirm your email address to finish setting up your Chumbaq account.'],
     { label: 'Confirm email address', url: link },
+    {
+      preheader: 'One click to confirm your email address.',
+      after: ['This link works once and expires in 24 hours.'],
+      note: 'Did not sign up? Ignore this email.',
+    },
   );
 }
 
@@ -69,11 +155,16 @@ export function signupLinkEmail(to: Recipient, link: string): PlatformEmail {
     to.email,
     'Finish creating your Chumbaq account',
     to.name,
-    [
-      'Someone asked to create a Chumbaq account with this email address. Open the link to choose a password and finish. It works once and lasts 24 hours.',
-      'If this was not you, ignore this email: no account is made unless the link is opened.',
-    ],
-    { label: 'Finish creating your account', url: link },
+    ['Thanks for signing up for Chumbaq. Choose a password to finish creating your account.'],
+    { label: 'Choose a password', url: link },
+    {
+      preheader: 'One step left: choose a password.',
+      after: [
+        'After that, you can create your first project and send a test push from the dashboard.',
+        'This link works once and expires in 24 hours.',
+      ],
+      note: 'Did not sign up? Ignore this email. No account is made unless the link is opened.',
+    },
   );
 }
 
@@ -83,12 +174,13 @@ export function alreadyRegisteredEmail(user: Recipient, signInLink: string, forg
     user.email,
     'You already have a Chumbaq account',
     user.name,
-    [
-      'Someone tried to create a Chumbaq account with this email address, which already has one. If it was you, sign in instead.',
-      `If you have forgotten your password, reset it here: ${forgotPasswordLink}`,
-      'If it was not you, you can ignore this email. Nothing about your account has changed.',
-    ],
+    ['You already have a Chumbaq account with this email address, so we did not create a new one.'],
     { label: 'Sign in', url: signInLink },
+    {
+      preheader: 'Sign in to the account you already have.',
+      link: { lead: 'Forgot your password?', label: 'Reset it', url: forgotPasswordLink },
+      note: 'Did not try to sign up? Ignore this email. Nothing about your account has changed.',
+    },
   );
 }
 
@@ -97,11 +189,14 @@ export function passwordResetEmail(user: Recipient, link: string): PlatformEmail
     user.email,
     'Reset your Chumbaq password',
     user.name,
-    [
-      'Someone asked to reset the password for your Chumbaq account. The link works once and lasts 30 minutes.',
-      'If this was not you, you can ignore this email and your password stays as it is.',
-    ],
+    ['We got a request to reset the password for your Chumbaq account.'],
     { label: 'Reset password', url: link },
+    {
+      preheader: 'Choose a new password for your Chumbaq account.',
+      after: [
+        'This link works once and expires in 30 minutes. If you did not ask for this, ignore this email. Your password stays the same.',
+      ],
+    },
   );
 }
 

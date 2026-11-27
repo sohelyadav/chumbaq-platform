@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { providerBaseUrl } from '../../config/provider-endpoints.config';
+import { withFooter } from './account-emails';
 
 export interface PlatformEmail {
   to: string;
@@ -14,6 +15,18 @@ export type PlatformEmailResult =
   | { sent: false; reason: 'not_configured' | 'refused' | 'unreachable' };
 
 const TIMEOUT_MS = 10_000;
+
+/** `Name <a@b.c>` or a bare `a@b.c`; null for anything else. */
+function parseAddress(value: string | undefined): { name?: string; email: string } | null {
+  const address = value?.trim();
+  if (!address) return null;
+  const named = /^(.*)<([^<>\s]+@[^<>\s]+)>$/.exec(address);
+  if (named) {
+    const name = named[1].trim();
+    return name ? { name, email: named[2] } : { email: named[2] };
+  }
+  return /^[^<>\s]+@[^<>\s]+$/.test(address) ? { email: address } : null;
+}
 
 /**
  * Chumbaq's own account email: verification, password resets, security notices.
@@ -35,14 +48,13 @@ export class PlatformEmailService {
 
   /** The address mail comes from, or null if either setting is missing or unusable. */
   get sender(): { name?: string; email: string } | null {
-    const from = this.config.get<string>('PLATFORM_EMAIL_FROM')?.trim();
-    if (!this.apiKey || !from) return null;
-    const named = /^(.*)<([^<>\s]+@[^<>\s]+)>$/.exec(from);
-    if (named) {
-      const name = named[1].trim();
-      return name ? { name, email: named[2] } : { email: named[2] };
-    }
-    return /^[^<>\s]+@[^<>\s]+$/.test(from) ? { email: from } : null;
+    if (!this.apiKey) return null;
+    return parseAddress(this.config.get<string>('PLATFORM_EMAIL_FROM'));
+  }
+
+  /** Where replies go, from the optional `PLATFORM_EMAIL_REPLY_TO`. Null when unset or unusable. */
+  get replyTo(): { name?: string; email: string } | null {
+    return parseAddress(this.config.get<string>('PLATFORM_EMAIL_REPLY_TO'));
   }
 
   get isConfigured(): boolean {
@@ -66,7 +78,15 @@ export class PlatformEmailService {
       return { sent: false, reason: 'not_configured' };
     }
 
+    const replyTo = this.replyTo;
+    const finished = withFooter(email, {
+      appUrl: this.config.get<string>('app.appUrl'),
+      replyTo: replyTo !== null,
+    });
+
     try {
+      // Brevo rewrites every link for click tracking and its API cannot turn that off, so
+      // `compose()` also shows the real address under the button as plain text.
       const response = await fetch(url, {
         method: 'POST',
         headers: {
@@ -76,10 +96,11 @@ export class PlatformEmailService {
         },
         body: JSON.stringify({
           sender,
-          to: [{ email: email.to }],
-          subject: email.subject,
-          htmlContent: email.html,
-          textContent: email.text,
+          ...(replyTo ? { replyTo } : {}),
+          to: [{ email: finished.to }],
+          subject: finished.subject,
+          htmlContent: finished.html,
+          textContent: finished.text,
         }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
