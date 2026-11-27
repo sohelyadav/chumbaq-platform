@@ -9,11 +9,16 @@ import { GetStartedCard } from '@/components/get-started-card';
 export default function DashboardPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const { data: stats, isLoading, error } = useProjectDashboardStats(projectId!);
+  // Shown whatever the link stats do: they mean nothing to someone setting up push.
+  // Keyed by project, so switching projects starts from that project's own state. The
+  // same key in every branch below keeps its state when the stats finish loading.
+  const getStarted = <GetStartedCard key={projectId} projectId={projectId!} />;
 
   if (isLoading) {
     return (
       <div className="space-y-6">
         <h1 className="text-3xl font-bold">Dashboard</h1>
+        {getStarted}
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           {[...Array(4)].map((_, i) => (
             <Card key={i}>
@@ -31,6 +36,7 @@ export default function DashboardPage() {
     return (
       <div className="space-y-6">
         <h1 className="text-3xl font-bold">Dashboard</h1>
+        {getStarted}
         <Card>
           <CardContent className="p-6 text-center text-muted-foreground">
             Failed to load dashboard stats. Make sure the API is running.
@@ -76,8 +82,7 @@ export default function DashboardPage() {
         </Button>
       </div>
 
-      {/* Keyed by project, so switching projects starts from that project's own state. */}
-      <GetStartedCard key={projectId} projectId={projectId!} />
+      {getStarted}
 
       {/* Stats cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">

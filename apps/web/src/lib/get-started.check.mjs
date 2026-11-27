@@ -17,6 +17,7 @@ const {
   doneCount,
   allDone,
   showGetStarted,
+  waitsForDevice,
   dismissedKey,
   sdkSnippets,
   sdkBaseUrl,
@@ -90,6 +91,18 @@ console.log('getStartedSteps');
   const oneLeft = getStartedSteps({ ...finished, campaigns: 0 });
   check('one step left keeps the card up', showGetStarted(oneLeft, false) === true);
   check('hiding it wins while steps remain', showGetStarted(oneLeft, true) === false);
+}
+console.log('waitsForDevice');
+{
+  const withKey = getStartedSteps({ ...NEW_PROJECT, apiKeys: 1 });
+  check('waits while the SDK step is open and not done', waitsForDevice(withKey, 'sdk') === true);
+  const noToken = getStartedSteps({ ...NEW_PROJECT, apiKeys: 1, devices: 2, pushChannels: 1 });
+  check('waits while the device step is open and not done', waitsForDevice(noToken, 'device') === true);
+  check('an unknown device count still waits', waitsForDevice(getStartedSteps(NOTHING_KNOWN), 'sdk') === true);
+  check('stops once the open step is done', waitsForDevice(noToken, 'sdk') === false);
+  check('does not wait on the key, credentials or campaign steps',
+    ['key', 'credentials', 'campaign'].every((id) => waitsForDevice(withKey, id) === false));
+  check('does not wait when no step is open', waitsForDevice(withKey, null) === false);
 }
 check('the hidden note is kept per project', dismissedKey('p1') !== dismissedKey('p2') && dismissedKey('p1').includes('p1'));
 

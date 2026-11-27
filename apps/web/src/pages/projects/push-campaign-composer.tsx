@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft, Users, Send, CalendarClock, Bell, Smartphone, Link2, Loader2,
   ChevronDown, FlaskConical, Plus, Trash2, Languages, FileText,
@@ -1532,9 +1532,13 @@ export default function PushCampaignComposerPage() {
       {!isConfigured && (
         <Card className="border-destructive/40">
           <CardContent className="pt-6 text-sm">
-            Push is not set up for this project, so nothing can be sent yet.
-            Add your Firebase or Apple credentials under Settings on the push
-            notifications page.
+            Push is not set up for this project, so nothing can be sent yet.{' '}
+            <Link
+              to={`${backToList}?tab=settings`}
+              className="font-medium text-primary underline-offset-4 hover:underline"
+            >
+              Add push credentials
+            </Link>
           </CardContent>
         </Card>
       )}

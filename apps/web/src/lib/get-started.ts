@@ -67,6 +67,18 @@ export function nextStep(steps: GetStartedStep[]): GetStartedStepId | null {
   return steps.find((step) => step.done !== true)?.id ?? null;
 }
 
+/** How often to refetch device counts so the open step ticks without a reload. */
+export const DEVICE_POLL_MS = 10_000;
+
+/**
+ * True while the open step waits on a device the dashboard cannot be told about: the
+ * SDK or device step, not yet done. Every other step is done from this page or another.
+ */
+export function waitsForDevice(steps: GetStartedStep[], open: GetStartedStepId | null): boolean {
+  if (open !== 'sdk' && open !== 'device') return false;
+  return steps.find((step) => step.id === open)?.done !== true;
+}
+
 export function doneCount(steps: GetStartedStep[]): number {
   return steps.filter((step) => step.done === true).length;
 }
