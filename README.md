@@ -1,10 +1,24 @@
 # Chumbaq
 
-Open-source customer engagement platform: short links with deep-link routing, click → install
-→ conversion attribution, in-app messages, push, email, SMS and WhatsApp, audiences and
-journeys, with consent, erasure and export built in.
+Chumbaq is the open-source OneSignal alternative. It sends push notifications to iOS, Android
+and the web, and shows in-app messages. Email, SMS and WhatsApp go through your own provider
+account.
 
-Use the hosted version at [chumbaq.com](https://chumbaq.com), or run it on your own server.
+It also has audiences and journeys, short links, and consent, erasure and export built in.
+
+Use the hosted version at [app.chumbaq.com](https://app.chumbaq.com/register) (free up to
+2,500 MAU), or run it on your own server for free.
+
+Leaving OneSignal? Read the [migration guide](https://chumbaq.com/migrate/onesignal), then
+[sign up](https://app.chumbaq.com/register).
+
+## Quick start
+
+Each SDK README has a "First push in 10 minutes" section:
+[JavaScript](https://github.com/sohelyadav/chumbaq-js-sdk#first-push-in-10-minutes) ·
+[iOS](https://github.com/sohelyadav/chumbaq-ios-sdk#first-push-in-10-minutes) ·
+[Android](https://github.com/sohelyadav/chumbaq-android-sdk#first-push-in-10-minutes) ·
+[Flutter](https://github.com/sohelyadav/chumbaq-flutter-sdk#first-push-in-10-minutes)
 
 ## What's in this repo
 
